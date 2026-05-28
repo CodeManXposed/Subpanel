@@ -115,6 +115,13 @@ CREATE TABLE IF NOT EXISTS detect_rules (
     created_ts INTEGER NOT NULL,
     updated_ts INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS resolved_tokens (
+    token       TEXT PRIMARY KEY,
+    tenant      TEXT,
+    note        TEXT,
+    resolved_ts INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_resolved_tenant_ts ON resolved_tokens(tenant, resolved_ts);
 `
 
 // Event 一行请求记录。
@@ -426,6 +433,10 @@ type EventFilter struct {
 	Until     time.Time
 	Limit     int
 	Offset    int
+	// IncludeResolved 为 true 时不过滤已处理 token;默认 false。
+	// 单 token 精确过滤(TokenHash != "")时会自动忽略此开关——
+	// 用户显式查某个 token 就该看到完整记录。
+	IncludeResolved bool
 }
 
 func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error) {
@@ -455,6 +466,15 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error)
 	if !f.Until.IsZero() {
 		q += " AND ts<=?"
 		args = append(args, f.Until.UnixMilli())
+	}
+	// 默认排除已处理 token;单 token 精确查询时不过滤(用户显式要看)。
+	if !f.IncludeResolved && f.TokenHash == "" {
+		if f.Tenant != "" {
+			q += " AND token_hash NOT IN (SELECT token FROM resolved_tokens WHERE tenant=? OR tenant='')"
+			args = append(args, f.Tenant)
+		} else {
+			q += " AND token_hash NOT IN (SELECT token FROM resolved_tokens)"
+		}
 	}
 	q += " ORDER BY ts DESC"
 	if f.Limit <= 0 || f.Limit > 1000 {
@@ -797,6 +817,58 @@ func (s *Store) Vacuum(ctx context.Context, eventsRetention, incidentsRetention 
 		return err
 	}
 	return nil
+}
+
+// ----- resolved_tokens(已处理 token) -----
+
+type ResolvedToken struct {
+	Token      string `json:"token"`
+	Tenant     string `json:"tenant"`
+	Note       string `json:"note"`
+	ResolvedTS int64  `json:"resolved_ts"` // 毫秒
+}
+
+// AddResolvedToken 标记 token 为已处理。tenant 可空(跨租户)。
+func (s *Store) AddResolvedToken(ctx context.Context, token, tenant, note string) error {
+	if token == "" {
+		return fmt.Errorf("token is empty")
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO resolved_tokens (token, tenant, note, resolved_ts) VALUES (?,?,?,?)
+		 ON CONFLICT(token) DO UPDATE SET tenant=excluded.tenant, note=excluded.note, resolved_ts=excluded.resolved_ts`,
+		token, tenant, note, time.Now().UnixMilli())
+	return err
+}
+
+// RemoveResolvedToken 取消已处理标记。
+func (s *Store) RemoveResolvedToken(ctx context.Context, token string) error {
+	_, err := s.db.ExecContext(ctx, "DELETE FROM resolved_tokens WHERE token=?", token)
+	return err
+}
+
+// ListResolvedTokens 列出已处理 token。tenant 空=全部。
+func (s *Store) ListResolvedTokens(ctx context.Context, tenant string) ([]ResolvedToken, error) {
+	q := "SELECT token, COALESCE(tenant,''), COALESCE(note,''), resolved_ts FROM resolved_tokens"
+	var args []any
+	if tenant != "" {
+		q += " WHERE tenant=? OR tenant=''"
+		args = append(args, tenant)
+	}
+	q += " ORDER BY resolved_ts DESC LIMIT 500"
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ResolvedToken
+	for rows.Next() {
+		var r ResolvedToken
+		if err := rows.Scan(&r.Token, &r.Tenant, &r.Note, &r.ResolvedTS); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // PurgeEvents 清空请求事件 + 异常事件。tenant 为空=全部租户;否则只清该租户。

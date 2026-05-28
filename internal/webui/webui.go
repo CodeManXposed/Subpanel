@@ -102,6 +102,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/summary", s.auth(http.HandlerFunc(s.apiSummary)))
 	mux.Handle("/api/events", s.auth(http.HandlerFunc(s.apiEvents)))
 	mux.Handle("/api/events/purge", s.auth(http.HandlerFunc(s.apiEventsPurge)))
+	mux.Handle("/api/resolved", s.auth(http.HandlerFunc(s.apiResolvedList)))
+	mux.Handle("/api/resolved/add", s.auth(http.HandlerFunc(s.apiResolvedAdd)))
+	mux.Handle("/api/resolved/remove", s.auth(http.HandlerFunc(s.apiResolvedRemove)))
 	mux.Handle("/api/incidents", s.auth(http.HandlerFunc(s.apiIncidents)))
 	mux.Handle("/api/incidents/agg_ip", s.auth(http.HandlerFunc(s.apiIncidentsAggIP)))
 	mux.Handle("/api/bans", s.auth(http.HandlerFunc(s.apiBans)))
@@ -360,6 +363,66 @@ func (s *Server) apiEventsPurge(w http.ResponseWriter, r *http.Request) {
 		"incidents_deleted": inN,
 		"tenant":            tenant,
 	})
+}
+
+// apiResolvedList GET /api/resolved?tenant=xxx
+func (s *Server) apiResolvedList(w http.ResponseWriter, r *http.Request) {
+	tenant := r.URL.Query().Get("tenant")
+	rows, err := s.st.ListResolvedTokens(r.Context(), tenant)
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	if rows == nil {
+		rows = []store.ResolvedToken{}
+	}
+	writeJSON(w, 200, rows)
+}
+
+// apiResolvedAdd POST /api/resolved/add  body:{token, tenant, note}
+func (s *Server) apiResolvedAdd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var body struct {
+		Token  string `json:"token"`
+		Tenant string `json:"tenant"`
+		Note   string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	if body.Token == "" {
+		writeJSON(w, 400, map[string]any{"error": "token is empty"})
+		return
+	}
+	if err := s.st.AddResolvedToken(r.Context(), body.Token, body.Tenant, body.Note); err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// apiResolvedRemove POST /api/resolved/remove  body:{token}
+func (s *Server) apiResolvedRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var body struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	if err := s.st.RemoveResolvedToken(r.Context(), body.Token); err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 func (s *Server) apiIncidents(w http.ResponseWriter, r *http.Request) {

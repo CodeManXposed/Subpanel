@@ -25,6 +25,10 @@
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>
       请求日志
     </a>
+    <a class="navlink" data-tab="resolved">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+      已处理
+    </a>
     <div class="sidebar-section">名单</div>
     <a class="navlink" data-tab="ip-bans">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
@@ -142,6 +146,28 @@
             <button class="danger" id="evPurge" title="清空当前机场的请求日志和异常记录">清空日志</button>
           </div>
           <div id="evList" class="ev-list"></div>
+        </div>
+      </section>
+
+      <!-- 已处理 token -->
+      <section id="tab-resolved" class="tab">
+        <div class="card">
+          <div class="card-header">
+            <h3 class="card-title">已处理 Token</h3>
+            <div class="muted" style="font-size:13px">这些 token 不再出现在请求日志列表里。可点击恢复让它重新可见。</div>
+          </div>
+          <div class="datatable" style="margin-top:8px">
+            <table>
+              <thead><tr>
+                <th>Token</th>
+                <th>机场</th>
+                <th>备注</th>
+                <th>标记时间</th>
+                <th style="width:120px">操作</th>
+              </tr></thead>
+              <tbody id="resolvedTbody"></tbody>
+            </table>
+          </div>
         </div>
       </section>
 

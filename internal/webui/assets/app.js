@@ -110,6 +110,7 @@ async function apiPost(path, body) {
 const TAB_TITLES = {
   'dashboard': '概览',
   'events': '请求日志',
+  'resolved': '已处理 Token',
   'ip-bans': '黑名单',
   'ip-whitelist': 'IP 白名单',
   'cloud-ip': 'GeoIP 库',
@@ -120,6 +121,7 @@ const TAB_TITLES = {
 const TAB_LOADERS = {
   'dashboard': () => loadSummary(),
   'events': () => loadEvents(),
+  'resolved': () => loadResolved(),
   'ip-bans': () => loadBans(),
   'ip-whitelist': () => loadIPWhitelist(),
   'cloud-ip': () => loadGeoIPInfo(),
@@ -236,6 +238,10 @@ function renderEventCard(e) {
   const usageBit = e.Usage
     ? `<span class="pill usage ${escapeHTML(String(e.Usage).toLowerCase())}">${escapeHTML(e.Usage)}</span>`
     : '';
+  // 已处理按钮:仅当有 token 时显示。data-tenant 用事件自己的 tenant(不是当前过滤)。
+  const resolveBtn = tokenFull
+    ? `<button class="ev-resolve" data-token="${escapeHTML(tokenFull)}" data-tenant="${escapeHTML(e.Tenant || '')}" title="标记此 token 为已处理,后续不再出现">已处理</button>`
+    : '';
   card.innerHTML = `
     <div class="ev-card-head">
       <span class="pill ${e.Action || ''}">${escapeHTML(actionLabel(e.Action))}</span>
@@ -243,6 +249,7 @@ function renderEventCard(e) {
       <span class="ev-status mono">HTTP ${e.Status || '—'}</span>
       <span class="ev-spacer"></span>
       ${tags}
+      ${resolveBtn}
     </div>
     <div class="ev-row-full">
       <span class="ev-label">订阅</span>
@@ -371,6 +378,57 @@ $('#evPurge').addEventListener('click', async () => {
   } else {
     alert('清空失败:' + (r && r.error ? r.error : '未知错误'));
   }
+});
+
+// 事件卡片"已处理"按钮:事件委托。
+$('#evList').addEventListener('click', async (e) => {
+  const btn = e.target.closest('.ev-resolve');
+  if (!btn) return;
+  const token = btn.dataset.token || '';
+  const tenant = btn.dataset.tenant || '';
+  if (!token) return;
+  const note = prompt(`标记 token 为已处理(备注可选):\n\n${token}`, '');
+  if (note === null) return; // 用户取消
+  const r = await apiPost('/api/resolved/add', { token, tenant, note });
+  if (r && r.ok) {
+    loadEvents(false);
+  } else {
+    alert('标记失败:' + (r && r.error ? r.error : '未知错误'));
+  }
+});
+
+// ---- 已处理 Token 列表 ----
+async function loadResolved() {
+  const q = new URLSearchParams();
+  if (state.tenant) q.set('tenant', state.tenant);
+  const rows = await api('/api/resolved' + (q.toString() ? '?' + q : ''));
+  const tbody = $('#resolvedTbody');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  if (!rows || !rows.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">无已处理 token</td></tr>';
+    return;
+  }
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="mono copyable" data-copy="${escapeHTML(r.token)}" title="点击复制">${escapeHTML(r.token)}</td>
+      <td>${escapeHTML(r.tenant || '-')}</td>
+      <td>${escapeHTML(r.note || '-')}</td>
+      <td class="mono">${escapeHTML(fmtTime(new Date(r.resolved_ts)))}</td>
+      <td><button class="danger res-restore" data-token="${escapeHTML(r.token)}">恢复</button></td>
+    `;
+    tbody.appendChild(tr);
+  }
+  bindCopyHandlers(tbody);
+}
+$('#resolvedTbody')?.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.res-restore');
+  if (!btn) return;
+  if (!confirm('恢复后此 token 将重新出现在请求日志里,确定?')) return;
+  const r = await apiPost('/api/resolved/remove', { token: btn.dataset.token });
+  if (r && r.ok) loadResolved();
+  else alert('恢复失败:' + (r && r.error ? r.error : '未知错误'));
 });
 
 // ---- 请求日志页顶部:异常 IP Top 20(复用 /api/incidents/agg_ip) ----
