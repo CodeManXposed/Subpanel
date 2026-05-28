@@ -356,6 +356,23 @@ function updateEvMore(lastCount) {
 }
 $('#evQuery').addEventListener('click', loadEvents);
 
+// 清空日志:针对当前选中的机场;选"全部机场"时清全部。
+// 二次确认 + 显示删了多少行。
+$('#evPurge').addEventListener('click', async () => {
+  const t = state.tenant || '';
+  const scope = t ? `机场 [${t}]` : '【全部机场】';
+  if (!confirm(`确定清空 ${scope} 的请求日志和异常记录?\n\n此操作不可撤销!`)) return;
+  const body = t ? { tenant: t } : { all: true };
+  const r = await apiPost('/api/events/purge', body);
+  if (r && r.ok) {
+    alert(`已清空。请求事件 ${r.events_deleted} 条,异常事件 ${r.incidents_deleted} 条。`);
+    loadEvents();
+    if (typeof loadSummary === 'function') loadSummary();
+  } else {
+    alert('清空失败:' + (r && r.error ? r.error : '未知错误'));
+  }
+});
+
 // ---- 请求日志页顶部:异常 IP Top 20(复用 /api/incidents/agg_ip) ----
 async function loadEvTopIP() {
   const q = new URLSearchParams({

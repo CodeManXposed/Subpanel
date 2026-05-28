@@ -799,6 +799,31 @@ func (s *Store) Vacuum(ctx context.Context, eventsRetention, incidentsRetention 
 	return nil
 }
 
+// PurgeEvents 清空请求事件 + 异常事件。tenant 为空=全部租户;否则只清该租户。
+// 返回 (events_deleted, incidents_deleted, err)。
+func (s *Store) PurgeEvents(ctx context.Context, tenant string) (int64, int64, error) {
+	var evArgs, inArgs []any
+	evQ := "DELETE FROM events"
+	inQ := "DELETE FROM incidents"
+	if tenant != "" {
+		evQ += " WHERE tenant=?"
+		inQ += " WHERE tenant=?"
+		evArgs = append(evArgs, tenant)
+		inArgs = append(inArgs, tenant)
+	}
+	evRes, err := s.db.ExecContext(ctx, evQ, evArgs...)
+	if err != nil {
+		return 0, 0, err
+	}
+	inRes, err := s.db.ExecContext(ctx, inQ, inArgs...)
+	if err != nil {
+		return 0, 0, err
+	}
+	evN, _ := evRes.RowsAffected()
+	inN, _ := inRes.RowsAffected()
+	return evN, inN, nil
+}
+
 // ----- meta key/value -----
 
 // SetMeta upsert.

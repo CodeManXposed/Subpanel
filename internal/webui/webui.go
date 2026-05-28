@@ -101,6 +101,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/", s.auth(http.HandlerFunc(s.indexPage)))
 	mux.Handle("/api/summary", s.auth(http.HandlerFunc(s.apiSummary)))
 	mux.Handle("/api/events", s.auth(http.HandlerFunc(s.apiEvents)))
+	mux.Handle("/api/events/purge", s.auth(http.HandlerFunc(s.apiEventsPurge)))
 	mux.Handle("/api/incidents", s.auth(http.HandlerFunc(s.apiIncidents)))
 	mux.Handle("/api/incidents/agg_ip", s.auth(http.HandlerFunc(s.apiIncidentsAggIP)))
 	mux.Handle("/api/bans", s.auth(http.HandlerFunc(s.apiBans)))
@@ -329,6 +330,36 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 		out = append(out, row)
 	}
 	writeJSON(w, 200, out)
+}
+
+// apiEventsPurge 清空请求事件 + 异常事件。
+// body: {"tenant":"<name>"} 只清该租户;{"tenant":""} 或 {"all":true} 全清。
+// 必须 POST(防误触)。
+func (s *Server) apiEventsPurge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var body struct {
+		Tenant string `json:"tenant"`
+		All    bool   `json:"all"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	tenant := body.Tenant
+	if body.All {
+		tenant = "" // 显式全清
+	}
+	evN, inN, err := s.st.PurgeEvents(r.Context(), tenant)
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"ok":                true,
+		"events_deleted":    evN,
+		"incidents_deleted": inN,
+		"tenant":            tenant,
+	})
 }
 
 func (s *Server) apiIncidents(w http.ResponseWriter, r *http.Request) {
