@@ -1,6 +1,6 @@
-# 二进制 / 构建产物
-sub-panel
-sub-panel-linux-*
+# 二进制 / 构建产物(根目录的可执行文件,不影响 cmd/sub-panel/ 源码目录)
+/sub-panel
+/sub-panel-linux-*
 dist/
 *.tar.gz
 *.sha256
