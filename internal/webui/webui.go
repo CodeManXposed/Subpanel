@@ -145,7 +145,7 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, err := r.Cookie("sub_panel_sess")
+		c, err := r.Cookie("sid")
 		if err != nil || c.Value == "" {
 			s.redirectLogin(w, r)
 			return
@@ -208,7 +208,7 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.sessionMu.Unlock()
 	http.SetCookie(w, &http.Cookie{
-		Name:     "sub_panel_sess",
+		Name:     "sid",
 		Value:    id,
 		Path:     "/",
 		HttpOnly: true,
@@ -219,13 +219,13 @@ func (s *Server) apiLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiLogout(w http.ResponseWriter, r *http.Request) {
-	c, err := r.Cookie("sub_panel_sess")
+	c, err := r.Cookie("sid")
 	if err == nil {
 		s.sessionMu.Lock()
 		delete(s.sessions, c.Value)
 		s.sessionMu.Unlock()
 	}
-	http.SetCookie(w, &http.Cookie{Name: "sub_panel_sess", Value: "", Path: "/", MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: "sid", Value: "", Path: "/", MaxAge: -1})
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
