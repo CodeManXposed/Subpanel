@@ -65,6 +65,28 @@ const TAG_PREFIX_CN = {
   'usage_type_not_in':    '用途排除',
   'isp_contains':         '运营商关键字',
 };
+
+// usage_type 中文映射(IPIP xdb 字段值)
+const USAGE_LABEL = {
+  'IDC':   '数据中心',
+  'CDN':   '内容分发',
+  'DNS':   '域名解析',
+  'EDU':   '教育机构',
+  'GTW':   '企业专线',
+  'GOV':   '政府机构',
+  'DYN':   '家庭宽带',
+  'MOB':   '移动网络',
+  'COM':   '商业宽带',
+  'ORG':   '组织机构',
+  'NET':   '基础设施',
+  'BOGON': '保留IP',
+};
+function usageLabel(u) {
+  if (!u) return '';
+  const k = String(u).toUpperCase().trim();
+  return USAGE_LABEL[k] || u;
+}
+
 function tagLabel(t) {
   if (!t) return '';
   // 处理 token_freq=10>=5 window=60s 这种带 = 的格式
@@ -237,7 +259,7 @@ function renderEventCard(e) {
   const flagBit = e.Flag ? `<span class="kv-sep">·</span><span class="mono">${escapeHTML(e.Flag)}</span>` : '';
   const tenantBit = e.Tenant ? `<span class="kv-sep">·</span><span class="ev-tenant">${escapeHTML(e.Tenant)}</span>` : '';
   const usageBit = e.Usage
-    ? `<span class="pill usage ${escapeHTML(String(e.Usage).toLowerCase())}">${escapeHTML(e.Usage)}</span>`
+    ? `<span class="pill usage ${escapeHTML(String(e.Usage).toLowerCase())}" title="${escapeHTML(e.Usage)}">${escapeHTML(usageLabel(e.Usage))}</span>`
     : '';
   // 已处理按钮:仅当有 token 时显示。data-tenant 用事件自己的 tenant(不是当前过滤)。
   const resolveBtn = tokenFull
@@ -667,7 +689,7 @@ function renderGeoInfo(info) {
     ['国家', info.country, info.iso_code ? ` (${info.iso_code})` : ''],
     ['省市区', [info.province, info.city, info.district].filter(Boolean).join(' / ')],
     ['ISP', info.isp],
-    ['用途', info.usage_type],
+    ['用途', info.usage_type ? `${usageLabel(info.usage_type)} (${info.usage_type})` : ''],
     ['云厂商', info.cloud_provider],
     ['ASN', info.asn],
     ['经纬度', (info.lon && info.lat) ? `${info.lon}, ${info.lat}` : ''],
@@ -879,8 +901,8 @@ function ruleSummary(r) {
   if (r.from_cloud_ip) parts.push('<strong>云IP</strong>');
   if (r.country_in && r.country_in.length) parts.push(`<strong>国家∈</strong>${r.country_in.join(',')}`);
   if (r.country_not_in && r.country_not_in.length) parts.push(`<strong>国家∉</strong>${r.country_not_in.join(',')}`);
-  if (r.usage_type_in && r.usage_type_in.length) parts.push(`<strong>用途∈</strong>${r.usage_type_in.join(',')}`);
-  if (r.usage_type_not_in && r.usage_type_not_in.length) parts.push(`<strong>用途∉</strong>${r.usage_type_not_in.join(',')}`);
+  if (r.usage_type_in && r.usage_type_in.length) parts.push(`<strong>用途∈</strong>${r.usage_type_in.map(usageLabel).join(',')}`);
+  if (r.usage_type_not_in && r.usage_type_not_in.length) parts.push(`<strong>用途∉</strong>${r.usage_type_not_in.map(usageLabel).join(',')}`);
   if (r.isp_contains && r.isp_contains.length) parts.push(`<strong>ISP⊇</strong>${r.isp_contains.join(',')}`);
   return parts.length ? parts.join(' · ') : '<span style="color:#dc2626">⚠ 无任何条件</span>';
 }
