@@ -245,12 +245,9 @@ func TestE2EEventsPersisted(t *testing.T) {
 	if e.ClientIP != "8.8.8.8" || e.Action != "pass" || e.Flag != "clash" {
 		t.Errorf("unexpected event: %+v", e)
 	}
-	// token 必须是 hash,不是原文
-	if e.TokenHash == "tttt" || e.TokenHash == "" {
-		t.Errorf("token not hashed: %q", e.TokenHash)
-	}
-	if len(e.TokenHash) != 64 {
-		t.Errorf("expected 64-char hex hash, got len=%d", len(e.TokenHash))
+	// token 直接存原文(面板要反查用户)
+	if e.TokenHash != "tttt" {
+		t.Errorf("expected raw token 'tttt', got %q", e.TokenHash)
 	}
 }
 

@@ -7,27 +7,15 @@ import (
 	"testing"
 )
 
-func TestHasherDeterministic(t *testing.T) {
+func TestHasherPassthrough(t *testing.T) {
+	// 用户要求 Hash 直接返回原 token 用于面板展示反查。
 	salt := []byte("01234567890123456789012345678901")
 	h := NewHasher(salt)
-	a := h.Hash("user-token-abc")
-	b := h.Hash("user-token-abc")
-	if a != b {
-		t.Fatal("hash should be deterministic")
+	if got := h.Hash("user-token-abc"); got != "user-token-abc" {
+		t.Errorf("expected passthrough, got %q", got)
 	}
-	if len(a) != 64 {
-		t.Errorf("expected 64 hex chars, got %d", len(a))
-	}
-	c := h.Hash("user-token-xyz")
-	if a == c {
-		t.Fatal("different inputs must yield different hashes")
-	}
-}
-
-func TestHasherEmptyToken(t *testing.T) {
-	h := NewHasher([]byte("salt"))
 	if got := h.Hash(""); got != "" {
-		t.Errorf("empty token must hash to empty, got %q", got)
+		t.Errorf("empty must stay empty, got %q", got)
 	}
 }
 

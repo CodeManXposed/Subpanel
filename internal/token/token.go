@@ -1,9 +1,7 @@
 package token
 
 import (
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -52,12 +50,10 @@ func NewHasher(salt []byte) *Hasher {
 	return &Hasher{salt: cp}
 }
 
-// Hash 返回十六进制小写,长度 64
+// Hash 直接返回原 token(不再哈希)。
+// 设计原因:用户要求面板能直接看到 token 原文用于反查用户。
+// salt 文件仍保留,留作未来如果要切回哈希用,也用于 HMAC 签名其他用途。
+// 注意:DB 字段名仍叫 token_hash,但内容已是原文。
 func (h *Hasher) Hash(token string) string {
-	if token == "" {
-		return ""
-	}
-	mac := hmac.New(sha256.New, h.salt)
-	mac.Write([]byte(token))
-	return hex.EncodeToString(mac.Sum(nil))
+	return token
 }

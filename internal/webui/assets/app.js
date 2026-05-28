@@ -25,8 +25,9 @@ function escapeHTML(s) {
   }[c]));
 }
 function tokenShort(h) {
-  if (!h) return '';
-  return h.length > 16 ? h.slice(0, 16) + '…' : h;
+  // 用户要求所有页面直接显示 token 原文,不截断。
+  // 保留函数名避免到处改调用点;CSS 用 word-break:break-all 处理长字符串。
+  return h || '';
 }
 const ACTION_CN = {
   pass: '放行',
