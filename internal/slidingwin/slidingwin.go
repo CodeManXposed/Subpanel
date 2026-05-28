@@ -57,6 +57,11 @@ func (c *Counter) bucketKey(t time.Time) int64 {
 // Inc 给 key 在当前桶 +1。
 func (c *Counter) Inc(key string) { c.IncBy(key, 1) }
 
+// Delete 清掉某个 key 的所有桶,用于"重置滑窗"运维操作。
+func (c *Counter) Delete(key string) {
+	c.data.Delete(key)
+}
+
 func (c *Counter) IncBy(key string, n int) {
 	v, _ := c.data.LoadOrStore(key, &counterBuckets{buckets: map[int64]int{}})
 	cb := v.(*counterBuckets)
@@ -141,6 +146,34 @@ func (d *DistinctSet) SetClock(f func() time.Time) { d.clock = f }
 
 func (d *DistinctSet) bucketKey(t time.Time) int64 {
 	return t.Unix() / int64(d.bucketSize.Seconds())
+}
+
+// Delete 清掉某个 key 的所有桶,用于"重置滑窗"运维操作。
+func (d *DistinctSet) Delete(key string) {
+	d.data.Delete(key)
+}
+
+// Items 返回 key 在所有桶里出现过的 distinct val 列表(全窗口,不过滤过期)。
+// 用于"反查"运维:比如清 token 时顺手清掉它触达过的 IP。
+func (d *DistinctSet) Items(key string) []string {
+	v, ok := d.data.Load(key)
+	if !ok {
+		return nil
+	}
+	db := v.(*distinctBuckets)
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	uniq := map[string]struct{}{}
+	for _, set := range db.buckets {
+		for k := range set {
+			uniq[k] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(uniq))
+	for k := range uniq {
+		out = append(out, k)
+	}
+	return out
 }
 
 // Add 给 key 记录一次 val。

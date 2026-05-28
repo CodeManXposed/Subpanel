@@ -134,6 +134,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/ip-whitelist/update", s.auth(http.HandlerFunc(s.apiIPWhitelistUpdate)))
 	mux.Handle("/api/ip-whitelist/remove", s.auth(http.HandlerFunc(s.apiIPWhitelistRemove)))
 
+	// 触发规则运维:清掉某 token 在滑窗里的累计,把误判 token "拉出来"。
+	// 下次再触发规则,继续按正常路径投毒(不是免疫,是 reset)。
+	mux.Handle("/api/detector/reset-token", s.auth(http.HandlerFunc(s.apiDetectorResetToken)))
+
 	// 云 IP 库(底层走 GeoIP xdb,保留旧路径兼容)
 	mux.Handle("/api/cloud-ip", s.auth(http.HandlerFunc(s.apiCloudIP)))
 	mux.Handle("/api/cloud-ip/refresh", s.auth(http.HandlerFunc(s.apiCloudIPRefresh)))
@@ -782,6 +786,29 @@ func (s *Server) apiIPWhitelistRemove(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
 	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// apiDetectorResetToken POST body:{token} 清掉该 token 在 detector 滑窗里的累计计数
+// + 它触达过的所有 IP 的 ipFreq / ipTokenSet,等于"把这次拉黑的因素全清"。
+// 不是免疫:下次再触发规则,继续按正常流程投毒。
+func (s *Server) apiDetectorResetToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeJSON(w, 405, map[string]any{"error": "POST only"})
+		return
+	}
+	var body struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	if body.Token == "" {
+		writeJSON(w, 400, map[string]any{"error": "token required"})
+		return
+	}
+	s.det.ResetToken(body.Token)
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 

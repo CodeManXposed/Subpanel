@@ -242,6 +242,11 @@ function renderEventCard(e) {
   const resolveBtn = tokenFull
     ? `<button class="ev-resolve" data-token="${escapeHTML(tokenFull)}" data-tenant="${escapeHTML(e.Tenant || '')}" title="标记此 token 为已处理,后续不再出现">已处理</button>`
     : '';
+  // 重置滑窗按钮:把此 token 在风控滑窗里的累计计数清掉,把它"拉出来"。
+  // 不是免疫——下次再命中规则照样投毒。仅对 fake / fake_failed 事件显示。
+  const resetBtn = (tokenFull && (e.Action === 'fake' || e.Action === 'fake_failed'))
+    ? `<button class="ev-reset" data-token="${escapeHTML(tokenFull)}" title="清掉此 token 的风控累计窗口,等于'本次解毒'。下次命中规则仍会重新投毒">重置窗口</button>`
+    : '';
   card.innerHTML = `
     <div class="ev-card-head">
       <span class="pill ${e.Action || ''}">${escapeHTML(actionLabel(e.Action))}</span>
@@ -249,6 +254,7 @@ function renderEventCard(e) {
       <span class="ev-status mono">HTTP ${e.Status || '—'}</span>
       <span class="ev-spacer"></span>
       ${tags}
+      ${resetBtn}
       ${resolveBtn}
     </div>
     <div class="ev-row-full">
@@ -382,6 +388,19 @@ $('#evPurge').addEventListener('click', async () => {
 
 // 事件卡片"已处理"按钮:事件委托。
 $('#evList').addEventListener('click', async (e) => {
+  const resetBtn = e.target.closest('.ev-reset');
+  if (resetBtn) {
+    const token = resetBtn.dataset.token || '';
+    if (!token) return;
+    if (!confirm(`重置此 token 在风控滑窗里的累计?\n\n${token}\n\n本次会被"拉出来",但下次再触发规则仍会照常投毒。`)) return;
+    const r = await apiPost('/api/detector/reset-token', { token });
+    if (r && r.ok) {
+      toast('已重置滑窗,客户端刷一下订阅试试', 'success');
+    } else {
+      alert('重置失败:' + (r && r.error ? r.error : '未知错误'));
+    }
+    return;
+  }
   const btn = e.target.closest('.ev-resolve');
   if (!btn) return;
   const token = btn.dataset.token || '';

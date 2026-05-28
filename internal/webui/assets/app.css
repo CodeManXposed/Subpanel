@@ -380,6 +380,12 @@ table tbody tr:hover { background: #f8fafc; }
   border-radius: 4px; cursor: pointer;
 }
 .ev-resolve:hover { background: #eef2ff; border-color: #6366f1; }
+.ev-reset {
+  font-size: 11.5px; padding: 2px 8px; line-height: 1.5;
+  background: #fff; color: #c2410c; border: 1px solid #fed7aa;
+  border-radius: 4px; cursor: pointer;
+}
+.ev-reset:hover { background: #fff7ed; border-color: #f97316; }
 .ev-row-full {
   display: flex; align-items: baseline; gap: 8px;
   padding: 4px 0; line-height: 1.55;

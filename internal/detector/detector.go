@@ -89,6 +89,24 @@ func New(cfg *config.DetectorCfg) (*Detector, error) {
 
 func (d *Detector) MaxWindow() time.Duration { return d.maxWindow }
 
+// ResetToken 清掉指定 token 在 detector 里所有滑窗里的累计状态(tokenFreq / tokenIPSet)
+// 以及"被该 token 触达过的所有 IP"的 ipFreq + ipTokenSet。
+// 运维型按钮:把误判的 token 从风控里"拉出来",下次重新计数。
+func (d *Detector) ResetToken(tokenHash string) {
+	if tokenHash == "" {
+		return
+	}
+	// 拿到这个 token 在窗口期内出现过的 IP 列表,顺手把对应 IP 维度也清掉。
+	// (否则 ipTokenSet[ip] 还残留该 token,后续 ip_token_count 仍可能触发)
+	ips := d.tokenIPSet.Items(tokenHash)
+	d.tokenFreq.Delete(tokenHash)
+	d.tokenIPSet.Delete(tokenHash)
+	for _, ip := range ips {
+		d.ipFreq.Delete(ip)
+		d.ipTokenSet.Delete(ip)
+	}
+}
+
 func (d *Detector) GCTargets() []interface{ GC() } {
 	return []interface{ GC() }{d.tokenFreq, d.ipFreq, d.tokenIPSet, d.ipTokenSet}
 }
