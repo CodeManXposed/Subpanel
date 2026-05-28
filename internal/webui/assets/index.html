@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>Sub-Panel 控制台</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- ============ 左侧导航 ============ -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo">S</div>
+      Sub-Panel
+    </div>
+
+    <div class="sidebar-section">监控</div>
+    <a class="navlink active" data-tab="dashboard">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>
+      概览
+    </a>
+    <a class="navlink" data-tab="events">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>
+      请求日志
+    </a>
+    <div class="sidebar-section">名单</div>
+    <a class="navlink" data-tab="ip-bans">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+      黑名单
+    </a>
+    <a class="navlink" data-tab="ip-whitelist">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="10"/></svg>
+      IP 白名单
+    </a>
+
+    <div class="sidebar-section">检测</div>
+    <a class="navlink" data-tab="cloud-ip">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="10" r="3"/><path d="M12 2a8 8 0 0 0-8 8c0 5 8 12 8 12s8-7 8-12a8 8 0 0 0-8-8z"/></svg>
+      GeoIP 库
+    </a>
+    <a class="navlink" data-tab="detect-rules">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+      触发规则
+    </a>
+
+    <div class="sidebar-section">系统</div>
+    <a class="navlink" data-tab="tenants">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+      机场管理
+    </a>
+    <a class="navlink" data-tab="settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      设置
+    </a>
+
+    <div class="spacer"></div>
+
+    <div class="user-box">
+      <div class="avatar" id="userAvatar">A</div>
+      <div>
+        <div class="user-name">admin</div>
+        <div class="muted" style="font-size:11px">Sub-Panel v0.1.0</div>
+      </div>
+      <button class="logout-btn" id="logoutBtn" title="退出">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+      </button>
+    </div>
+  </aside>
+
+  <!-- ============ 主区 ============ -->
+  <main class="main">
+    <div class="topbar">
+      <div class="page-title" id="pageTitle">概览</div>
+      <div class="topbar-right">
+        <select id="tenantSel"></select>
+        <select id="windowSel">
+          <option value="1h">1 小时</option>
+          <option value="6h">6 小时</option>
+          <option value="24h" selected>24 小时</option>
+          <option value="168h">7 天</option>
+        </select>
+        <button id="refreshBtn" class="primary">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          刷新
+        </button>
+      </div>
+    </div>
+
+    <div class="content">
+
+      <!-- 概览 -->
+      <section id="tab-dashboard" class="tab active">
+        <div class="stat-cards" id="summaryCards"></div>
+        <div class="row-2col">
+          <div class="card">
+            <h3>请求量最高 IP</h3>
+            <table id="topIPs"><thead><tr><th>IP</th><th>地区</th><th>ISP</th><th style="text-align:right">请求数</th></tr></thead><tbody></tbody></table>
+          </div>
+          <div class="card">
+            <h3>请求量最高 订阅</h3>
+            <table id="topTokens"><thead><tr><th>订阅哈希</th><th style="text-align:right">请求数</th></tr></thead><tbody></tbody></table>
+          </div>
+        </div>
+      </section>
+
+      <!-- 请求日志 -->
+      <section id="tab-events" class="tab">
+        <div class="card">
+          <details class="top-ip-fold" id="evTopIPFold">
+            <summary>
+              <span class="top-ip-title">异常 IP Top 20</span>
+              <span class="muted top-ip-hint">本时间窗内触发次数最高的 IP,展开可一键过滤 / 封禁</span>
+            </summary>
+            <div class="datatable" style="margin-top:8px">
+              <table>
+                <thead><tr>
+                  <th>IP</th>
+                  <th style="text-align:right">触发次数</th>
+                  <th>命中动作</th>
+                  <th>命中规则</th>
+                  <th>最近触发</th>
+                  <th style="width:160px">操作</th>
+                </tr></thead>
+                <tbody id="evTopIPTbody"></tbody>
+              </table>
+            </div>
+          </details>
+          <div class="filter-bar">
+            <input id="evIP" placeholder="按 IP 过滤">
+            <input id="evToken" placeholder="按 订阅哈希 过滤">
+            <select id="evAction">
+              <option value="">所有动作</option>
+              <option value="pass">放行</option>
+              <option value="fake">投毒</option>
+              <option value="deny">拒绝</option>
+              <option value="block_path">路径拦截</option>
+              <option value="fake_failed">投毒失败</option>
+            </select>
+            <button class="primary" id="evQuery">查询</button>
+          </div>
+          <div id="evList" class="ev-list"></div>
+        </div>
+      </section>
+
+      <!-- 黑名单 -->
+      <section id="tab-ip-bans" class="tab">
+        <div class="card bl-card">
+          <div class="card-header">
+            <h3>全局拦截开关 <span class="muted" style="font-weight:400;margin-left:8px;font-size:12px">命中即投毒,不进频率窗口</span></h3>
+            <div class="actions">
+              <button class="primary" id="blSaveBtn">保存</button>
+            </div>
+          </div>
+          <div class="bl-row">
+            <label class="bl-toggle"><input type="checkbox" id="blOversea"><span>禁止海外 IP 拉取</span><em>非 CN(港澳台/未知均拦)</em></label>
+            <label class="bl-toggle"><input type="checkbox" id="blCloud"><span>拉黑云厂商 IP</span><em>命中 cloud-ip 库</em></label>
+            <label class="bl-toggle"><input type="checkbox" id="blBrowser"><span>拉黑浏览器直访</span><em>Accept 头含 text/html</em></label>
+          </div>
+          <div class="bl-row bl-kw">
+            <span class="bl-label">运营商关键字</span>
+            <input id="blISPKw" placeholder="逗号分隔,例:Amazon, DigitalOcean, Hetzner">
+            <span class="muted bl-hint">ISP 字段子串包含即拉黑</span>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <h3>新增 IP 封禁</h3>
+          </div>
+          <div class="filter-bar">
+            <input id="banIPTarget" placeholder="IP 地址,如 1.2.3.4">
+            <input id="banIPReason" placeholder="原因(可选)">
+            <input id="banIPTTL" placeholder="TTL,如 24h,空=永久" style="width:170px">
+            <button class="primary" id="banIPAddBtn">添加</button>
+          </div>
+        </div>
+        <div class="datatable">
+          <table>
+            <thead><tr><th>IP</th><th>原因</th><th>标签</th><th>创建</th><th>过期</th><th>来源</th><th></th></tr></thead>
+            <tbody id="ipBanTbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- IP 白名单 -->
+      <section id="tab-ip-whitelist" class="tab">
+        <div class="card">
+          <h3>新增 IP 白名单</h3>
+          <div class="filter-bar">
+            <input id="ipWLTarget" placeholder="IP 或 CIDR,如 1.2.3.4 或 10.0.0.0/8">
+            <input id="ipWLNote" placeholder="备注">
+            <button class="primary" id="ipWLAddBtn">添加</button>
+          </div>
+          <p class="muted">白名单 IP 跳过所有规则检测,直接放行。<strong style="color:var(--text)">优先级最高,凌驾于黑名单。</strong></p>
+        </div>
+        <div class="datatable">
+          <table>
+            <thead><tr><th>IP / CIDR</th><th>备注</th><th>创建</th><th></th></tr></thead>
+            <tbody id="ipWLTbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- GeoIP 库 -->
+      <section id="tab-cloud-ip" class="tab">
+        <div class="card">
+          <div class="card-header">
+            <h3>GeoIP 数据库</h3>
+            <div class="actions muted" id="geoipStatus">加载中…</div>
+          </div>
+          <div class="muted" style="margin-top:6px">
+            底层使用 ip2region xdb 满载版,本地 mmap 查询。
+            云厂商判定按 ISP 字段关键词反推(阿里 / 腾讯 / Cloudflare / 谷歌 / 微软 / AWS / 字节跳动 等)。
+            规则里 <code>from_cloud_ip</code> / <code>country_in</code> / <code>usage_type_in</code> / <code>isp_contains</code> 都走这份库。
+          </div>
+        </div>
+        <div class="card">
+          <h3>IP 查询</h3>
+          <div class="filter-bar">
+            <input id="cloudCheckIP" placeholder="IP 地址,如 8.8.8.8 / 47.96.0.1">
+            <button class="primary" id="cloudCheckBtn">查询</button>
+          </div>
+          <div id="geoipResult" style="margin-top:12px"></div>
+        </div>
+      </section>
+
+      <!-- 触发规则 -->
+      <section id="tab-detect-rules" class="tab">
+        <div class="card">
+          <div class="card-header">
+            <h3>触发规则</h3>
+            <div class="actions">
+              <button class="primary" id="ruleAddBtn">+ 新增规则</button>
+            </div>
+          </div>
+          <p class="muted" style="margin:0 0 12px">
+            命中任意规则即视为非法访问,直接<strong>返回投毒订阅</strong>(改写节点 IP 到黑洞段)。规则保存后立即热生效,无需重启。
+          </p>
+          <div class="datatable">
+            <table>
+              <thead><tr>
+                <th>名称</th><th>描述</th><th>条件摘要</th>
+                <th>启用</th><th>更新时间</th><th>操作</th>
+              </tr></thead>
+              <tbody id="rulesTbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- 设置 -->
+      <section id="tab-settings" class="tab">
+        <div class="card">
+          <h3>修改管理员密码</h3>
+          <div class="form-grid">
+            <div>
+              <label>原密码</label>
+              <input type="password" id="pwOld" autocomplete="current-password">
+            </div>
+            <div>
+              <label>新密码(至少 8 位)</label>
+              <input type="password" id="pwNew" autocomplete="new-password">
+            </div>
+            <div>
+              <label>确认新密码</label>
+              <input type="password" id="pwNew2" autocomplete="new-password">
+            </div>
+            <div class="form-actions">
+              <button class="primary" id="pwSaveBtn">保存</button>
+            </div>
+          </div>
+          <p class="muted">保存后所有会话失效,需用新密码重新登录。</p>
+        </div>
+
+        <div class="card" id="passthroughCard">
+          <h3>一键透传(紧急回滚)</h3>
+          <div style="display:flex;align-items:center;gap:14px;margin-bottom:8px">
+            <label class="switch-wrap" style="display:flex;align-items:center;gap:8px;font-weight:500">
+              <input type="checkbox" id="passthroughToggle" style="width:auto;transform:scale(1.2)">
+              <span id="passthroughLabel">已关闭</span>
+            </label>
+            <span class="pill" id="passthroughStatusPill" style="display:none">透传中</span>
+          </div>
+          <p class="muted" style="margin:0">
+            开启后,所有请求<strong>跳过黑名单 / 触发规则 / IP 白名单 / 投毒</strong>,
+            只要路径前缀匹配就直接透传到上游。仅用于紧急回滚:疑似误伤大面积、上游出问题时临时打开。
+            事件日志里命中标签为<code>passthrough_all</code>,动作=放行。
+          </p>
+        </div>
+
+        <div class="card">
+          <h3>检测规则(YAML 配置,只读)</h3>
+          <pre id="rulesPre" class="mono" style="background:#0f172a;color:#e2e8f0;padding:14px;border-radius:6px;overflow-x:auto;font-size:11.5px;line-height:1.5"></pre>
+          <p class="muted">规则阈值需要改 <code>config.yml</code> 后重启 sub-panel。UA / IP 白名单和黑名单可以在对应页面动态增删。</p>
+        </div>
+
+        <div class="card">
+          <h3>机场列表</h3>
+          <p class="muted" style="margin:0">机场增删改请到左侧「机场管理」页面操作,可直接热生效。</p>
+        </div>
+      </section>
+
+      <!-- 机场管理 -->
+      <section id="tab-tenants" class="tab">
+        <div class="card">
+          <div class="card-header">
+            <h3>机场列表</h3>
+            <div class="actions">
+              <button class="primary" id="tenantAddBtn">+ 新增机场</button>
+            </div>
+          </div>
+          <p class="muted" style="margin:0 0 12px">
+            按 <code>订阅路径</code> 前缀路由,与 Host 头无关。所有机场的订阅路径必须全局唯一。
+          </p>
+          <div class="datatable">
+            <table>
+              <thead><tr>
+                <th>名称</th><th>订阅路径</th><th>上游地址</th>
+                <th>上游路径</th><th>启用</th><th>操作</th>
+              </tr></thead>
+              <tbody id="tenantsTbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+<!-- 机场新增/编辑 弹窗 -->
+<div class="modal-overlay" id="tenantModal" style="display:none">
+  <div class="modal" style="width:560px">
+    <div class="modal-header">
+      <h3 id="tenantModalTitle">新增机场</h3>
+      <button class="close-btn" id="tenantModalClose">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-row">
+        <label>机场名称 <span class="req">*</span></label>
+        <input id="tenantFormName" placeholder="cat / dog / acme,主键,唯一">
+      </div>
+      <div class="form-row">
+        <label>订阅路径 <span class="req">*</span></label>
+        <input id="tenantFormSubPath" placeholder="/api/v1/client/subscribe/cat" class="mono">
+        <p class="hint">客户端访问的对外路径前缀,全局唯一。命中此前缀的请求转发到对应上游。</p>
+      </div>
+      <div class="form-row">
+        <label>上游地址 <span class="req">*</span></label>
+        <input id="tenantFormUpstream" placeholder="http://127.0.0.1:17001" class="mono">
+        <p class="hint">真实 V2Board 后端,只填 scheme + host[:port]。</p>
+      </div>
+      <div class="form-row">
+        <label>上游路径(可选)</label>
+        <input id="tenantFormUpPath" placeholder="留空透传,如 /api/v1/client/subscribe" class="mono">
+      </div>
+      <div class="form-row">
+        <label><input type="checkbox" id="tenantFormEnabled" checked> 启用</label>
+        <p class="hint">关掉相当于摘除,网关立即停止接收对应订阅路径请求。</p>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button id="tenantFormCancel">取消</button>
+      <button class="primary" id="tenantFormSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 触发规则 新增/编辑 弹窗 -->
+<div class="modal-overlay" id="ruleModal" style="display:none">
+  <div class="modal rule-modal" style="width:760px">
+    <div class="modal-header">
+      <h3 id="ruleModalTitle">新增规则</h3>
+      <button class="close-btn" id="ruleModalClose">×</button>
+    </div>
+    <div class="modal-body">
+
+      <div class="rule-grid rule-grid-2">
+        <div class="form-row">
+          <label>规则名 <span class="req">*</span></label>
+          <input id="ruleFormName" placeholder="token_freq_extreme" class="mono">
+        </div>
+        <div class="form-row">
+          <label>状态</label>
+          <div class="seg-switch">
+            <label><input type="radio" name="ruleEnabled" id="ruleFormEnabledOn" value="1" checked><span>启用</span></label>
+            <label><input type="radio" name="ruleEnabled" id="ruleFormEnabledOff" value="0"><span>停用</span></label>
+          </div>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <label>描述</label>
+        <input id="ruleFormDesc" placeholder="一句话说清这条规则在防什么">
+      </div>
+
+      <div class="section-title">计数条件</div>
+      <div class="rule-cond-list">
+        <div class="cond-row-v2">
+          <span class="cond-name">单 token 频次</span>
+          <input type="number" min="0" id="ruleFormTfWin" placeholder="0">
+          <span class="cond-sep">秒内 ≥</span>
+          <input type="number" min="0" id="ruleFormTfGte" placeholder="0">
+          <span class="cond-unit">次</span>
+        </div>
+        <div class="cond-row-v2">
+          <span class="cond-name">单 IP 频次</span>
+          <input type="number" min="0" id="ruleFormIfWin" placeholder="0">
+          <span class="cond-sep">秒内 ≥</span>
+          <input type="number" min="0" id="ruleFormIfGte" placeholder="0">
+          <span class="cond-unit">次</span>
+        </div>
+        <div class="cond-row-v2">
+          <span class="cond-name">单 token 多 IP</span>
+          <input type="number" min="0" id="ruleFormTdWin" placeholder="0">
+          <span class="cond-sep">秒内 ≥</span>
+          <input type="number" min="0" id="ruleFormTdGte" placeholder="0">
+          <span class="cond-unit">个 IP</span>
+        </div>
+        <div class="cond-row-v2">
+          <span class="cond-name">单 IP 多 token</span>
+          <input type="number" min="0" id="ruleFormIdWin" placeholder="0">
+          <span class="cond-sep">秒内 ≥</span>
+          <input type="number" min="0" id="ruleFormIdGte" placeholder="0">
+          <span class="cond-unit">个 token</span>
+        </div>
+      </div>
+      <p class="hint" style="margin:8px 0 14px">同一行两个值都 &gt; 0 才生效,任一为 0 该条件关闭。</p>
+
+      <details class="advanced">
+        <summary>高级条件:云 IP / 地理 / ISP</summary>
+        <div class="form-row">
+          <label class="inline-check"><input type="checkbox" id="ruleFormFromCloud"> 命中云厂商 IP 库时触发</label>
+        </div>
+        <div class="rule-grid rule-grid-2">
+          <div class="form-row">
+            <label>国家 命中</label>
+            <input id="ruleFormCountryIn" placeholder="CN, US">
+          </div>
+          <div class="form-row">
+            <label>国家 排除</label>
+            <input id="ruleFormCountryNotIn" placeholder="CN(非此即触发)">
+          </div>
+          <div class="form-row">
+            <label>用途 命中</label>
+            <input id="ruleFormUsageIn" placeholder="IDC, CDN, DYN, MOB">
+          </div>
+          <div class="form-row">
+            <label>用途 排除</label>
+            <input id="ruleFormUsageNotIn" placeholder="留空不限">
+          </div>
+        </div>
+        <div class="form-row">
+          <label>ISP 子串(任一命中)</label>
+          <input id="ruleFormISP" placeholder="阿里, Cloudflare, AWS">
+        </div>
+        <p class="hint" style="margin-top:-2px">"排除" 优先于 "命中"。留空表示该字段不参与判定。</p>
+      </details>
+
+    </div>
+    <div class="modal-footer">
+      <button id="ruleFormCancel">取消</button>
+      <button class="primary" id="ruleFormSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

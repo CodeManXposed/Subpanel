@@ -1,0 +1,30 @@
+# 二进制 / 构建产物
+sub-panel
+sub-panel-linux-*
+dist/
+*.tar.gz
+*.sha256
+
+# 数据 / 临时
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+ip2region.xdb
+salt
+
+# 测试 / 临时配置
+config.yml
+config.local.yml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Go
+*.test
+*.out
+vendor/

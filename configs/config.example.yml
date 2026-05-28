@@ -1,0 +1,63 @@
+# Sub-Panel 默认配置(由 install.sh 复制到 /opt/Sub-Panel/config.yml)
+# 注释里 ${VAR} 仅作说明用,YAML 本身不展开变量。
+
+listen: "0.0.0.0:18443"          # 反代监听端口(对外订阅入口)
+admin_listen: "0.0.0.0:19090"    # 管理面监听端口
+
+# HMAC 盐文件,首次启动自动生成 32 字节随机
+hmac_salt_file: "/opt/Sub-Panel/data/salt"
+
+storage:
+  sqlite_path: "/opt/Sub-Panel/data/sub-panel.db"
+  retention:
+    events: 7d         # 请求事件保留 7 天
+    incidents: 30d     # 异常事件保留 30 天
+  batch_flush_interval: 1s
+  batch_flush_size: 100
+
+# 真实 IP 解析(若 Sub-Panel 在 CDN/Nginx 后面,把信任代理段填上)
+real_ip:
+  trust_headers:
+    - "X-Real-IP"
+    - "X-Forwarded-For"
+  trust_proxies:
+    - "127.0.0.1"
+    - "::1"
+
+# GeoIP(ip2region xdb 满载版,放 tmpfs 内存盘加速)
+geoip:
+  xdb_path: "/tmp/sub-panel/ip2region.xdb"
+
+# 管理员账号(默认 admin/admin123456,装完务必登录改密)
+# password_hash 留空时使用下方 password 明文(仅首次启动)
+admin:
+  username: "admin"
+  password: "admin123456"
+  password_hash: ""
+
+# 租户(订阅前置)。可以在管理面 → 租户管理 增删
+tenants: []
+
+# 检测规则(可在管理面 → 检测规则 查看,阈值需改本文件后重启)
+detector:
+  observe_only: false
+  windows:
+    short: 5m
+    mid: 1h
+    long: 24h
+  rules:
+    - name: token_freq_extreme
+      desc: 单 token 5 分钟内 >=30 次
+      when:
+        token_freq:
+          window: 5m
+          gte: 30
+      severity: red
+
+    - name: token_multi_ip
+      desc: 单 token 5 分钟多 IP
+      when:
+        token_distinct_ips:
+          window: 5m
+          gte: 5
+      severity: yellow

@@ -1,0 +1,23 @@
+[Unit]
+Description=Sub-Panel - V2Board 订阅前置网关
+Documentation=https://github.com/huabanmao168/SubPanel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/Sub-Panel
+# 启动前确保 xdb tmpfs 目录存在,缺则从二进制同目录恢复
+ExecStartPre=/bin/mkdir -p /tmp/sub-panel /opt/Sub-Panel/data
+ExecStartPre=/bin/sh -c 'test -f /tmp/sub-panel/ip2region.xdb || cp /opt/Sub-Panel/ip2region.xdb /tmp/sub-panel/ip2region.xdb'
+ExecStart=/opt/Sub-Panel/sub-panel -c /opt/Sub-Panel/config.yml
+Restart=on-failure
+RestartSec=3s
+LimitNOFILE=65536
+# 日志走 journald
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

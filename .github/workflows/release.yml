@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Build
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags "-s -w -X main.Version=${VERSION}" \
+            -o dist/sub-panel \
+            ./cmd/sub-panel
+
+          cd dist
+          tar -czf "sub-panel-linux-${{ matrix.goarch }}.tar.gz" sub-panel
+          sha256sum "sub-panel-linux-${{ matrix.goarch }}.tar.gz" > "sub-panel-linux-${{ matrix.goarch }}.tar.gz.sha256"
+          ls -la
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sub-panel-${{ matrix.goarch }}
+          path: dist/sub-panel-linux-${{ matrix.goarch }}.tar.gz*
+
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/sub-panel-linux-amd64.tar.gz
+            dist/sub-panel-linux-amd64.tar.gz.sha256
+            dist/sub-panel-linux-arm64.tar.gz
+            dist/sub-panel-linux-arm64.tar.gz.sha256
+          generate_release_notes: true
+          body: |
+            ## Sub-Panel ${{ github.ref_name }}
+
+            ### 一键安装
+
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/huabanmao168/SubPanel/main/install.sh | bash
+            ```
+
+            ### 升级
+
+            再跑一次同样的命令即可,会保留 `config.yml` 和 `data/`。
+
+            ### 下载
+
+            - **amd64**: `sub-panel-linux-amd64.tar.gz`
+            - **arm64**: `sub-panel-linux-arm64.tar.gz`

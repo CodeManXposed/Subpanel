@@ -1,0 +1,235 @@
+// Package detector 跑规则引擎,输出命中 tag 集合 + 最高 severity。
+package detector
+
+import (
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/huabanmao168/SubPanel/internal/config"
+	"github.com/huabanmao168/SubPanel/internal/slidingwin"
+)
+
+// Severity / sevRank 删除:规则不再分等级,命中即投毒。
+
+type Detector struct {
+	cfg         *config.DetectorCfg
+	rulesSnap   atomic.Pointer[[]config.Rule] // 热更:nil → 用 cfg.Rules
+	maxWindow   time.Duration
+	tokenFreq   *slidingwin.Counter
+	ipFreq      *slidingwin.Counter
+	tokenIPSet  *slidingwin.DistinctSet
+	ipTokenSet  *slidingwin.DistinctSet
+	ipWhitelist map[string]struct{}
+
+	// 可选:云 IP 查询函数。nil 时 from_cloud_ip 规则跳过。
+	cloudLookup func(ip string) (bool, string)
+	// 可选:GeoIP 查询函数。nil 时 country/usage_type/isp 规则跳过。
+	geoLookup func(ip string) *GeoInfo
+	// 可选:外部 IP 白名单提供者(热更新,来自 DB)。
+	dynamicIPWhitelist func(ip string) bool
+}
+
+// GeoInfo 给 detector 用的精简版 IP 地理信息。
+// 避免 detector 直接依赖 geoip 包(循环 import 风险),由上层注入。
+type GeoInfo struct {
+	Country   string // 国家(中国/美国/...)
+	ISOCode   string // CN/US
+	ISP       string // 电信/阿里/Cloudflare/...
+	UsageType string // IDC/CDN/DYN/MOB/COM
+}
+
+// SetCloudLookup 注入云 IP 查询函数(可热更换)。
+func (d *Detector) SetCloudLookup(fn func(ip string) (bool, string)) {
+	d.cloudLookup = fn
+}
+
+// SetGeoLookup 注入 GeoIP 查询函数(可热更换)。
+func (d *Detector) SetGeoLookup(fn func(ip string) *GeoInfo) {
+	d.geoLookup = fn
+}
+
+// SetDynamicIPWhitelist 注入 DB 来源的 IP 白名单查询函数。
+func (d *Detector) SetDynamicIPWhitelist(fn func(string) bool) {
+	d.dynamicIPWhitelist = fn
+}
+
+func New(cfg *config.DetectorCfg) (*Detector, error) {
+	// 找出最大窗口
+	maxWindow := time.Hour
+	for _, r := range cfg.Rules {
+		w := r.When
+		for _, c := range []*config.Cond{w.TokenFreq, w.IPFreq, w.TokenDistinctIPs, w.IPDistinctTokens} {
+			if c != nil && c.Window.Std() > maxWindow {
+				maxWindow = c.Window.Std()
+			}
+		}
+	}
+	bucket := time.Minute
+	if maxWindow < 5*time.Minute {
+		bucket = 30 * time.Second
+	}
+
+	d := &Detector{
+		cfg:         cfg,
+		maxWindow:   maxWindow,
+		tokenFreq:   slidingwin.NewCounter(bucket, maxWindow),
+		ipFreq:      slidingwin.NewCounter(bucket, maxWindow),
+		tokenIPSet:  slidingwin.NewDistinctSet(bucket, maxWindow),
+		ipTokenSet:  slidingwin.NewDistinctSet(bucket, maxWindow),
+		ipWhitelist: map[string]struct{}{},
+	}
+
+	for _, ip := range cfg.Whitelist.IPs {
+		d.ipWhitelist[ip] = struct{}{}
+	}
+
+	return d, nil
+}
+
+func (d *Detector) MaxWindow() time.Duration { return d.maxWindow }
+
+func (d *Detector) GCTargets() []interface{ GC() } {
+	return []interface{ GC() }{d.tokenFreq, d.ipFreq, d.tokenIPSet, d.ipTokenSet}
+}
+
+// Observe 把请求记入计数器(请求落库前调用)。
+// tokenHash 可能为空。ua 参数保留兼容签名,内部不再使用。
+func (d *Detector) Observe(ip, tokenHash, ua string) {
+	if tokenHash != "" {
+		d.tokenFreq.Inc(tokenHash)
+		d.tokenIPSet.Add(tokenHash, ip)
+		d.ipTokenSet.Add(ip, tokenHash)
+	}
+	d.ipFreq.Inc(ip)
+	_ = ua
+}
+
+// Result 检测结果。Hit=true 即命中,命中后由调用方直接投毒。
+type Result struct {
+	Hit  bool
+	Tags []string // 命中的规则名
+	Note string
+}
+
+// Whitelisted IP 白名单 — 完全跳过所有规则。
+// ua 参数保留兼容签名,内部不再使用。
+func (d *Detector) Whitelisted(ip, ua string) bool {
+	if _, ok := d.ipWhitelist[ip]; ok {
+		return true
+	}
+	if d.dynamicIPWhitelist != nil && d.dynamicIPWhitelist(ip) {
+		return true
+	}
+	_ = ua
+	return false
+}
+
+// Evaluate 运行所有规则。注意 Evaluate 必须在 Observe 之后调用,
+// 这样当前请求自身也算进窗口。ua 参数保留兼容签名,内部不再使用。
+func (d *Detector) Evaluate(ip, tokenHash, ua string) Result {
+	if d.Whitelisted(ip, ua) {
+		return Result{}
+	}
+	var (
+		tags  []string
+		notes []string
+	)
+	rules := d.cfg.Rules
+	if snap := d.rulesSnap.Load(); snap != nil {
+		rules = *snap
+	}
+	for _, r := range rules {
+		hit, note := d.matchRule(r, ip, tokenHash)
+		if !hit {
+			continue
+		}
+		tags = append(tags, r.Name)
+		if note != "" {
+			notes = append(notes, note)
+		}
+	}
+	return Result{Hit: len(tags) > 0, Tags: tags, Note: strings.Join(notes, "; ")}
+}
+
+func (d *Detector) matchRule(r config.Rule, ip, tokenHash string) (bool, string) {
+	w := r.When
+	if c := w.TokenFreq; c != nil && tokenHash != "" {
+		n := d.tokenFreq.Sum(tokenHash, c.Window.Std())
+		if n >= c.GTE {
+			return true, formatN("token_freq", n, c)
+		}
+	}
+	if c := w.IPFreq; c != nil {
+		n := d.ipFreq.Sum(ip, c.Window.Std())
+		if n >= c.GTE {
+			return true, formatN("ip_freq", n, c)
+		}
+	}
+	if c := w.TokenDistinctIPs; c != nil && tokenHash != "" {
+		n := d.tokenIPSet.Count(tokenHash, c.Window.Std())
+		if n >= c.GTE {
+			return true, formatN("token_distinct_ips", n, c)
+		}
+	}
+	if c := w.IPDistinctTokens; c != nil {
+		n := d.ipTokenSet.Count(ip, c.Window.Std())
+		if n >= c.GTE {
+			return true, formatN("ip_distinct_tokens", n, c)
+		}
+	}
+	if w.FromCloudIP && d.cloudLookup != nil {
+		if hit, prov := d.cloudLookup(ip); hit {
+			return true, "cloud_ip:" + prov
+		}
+	}
+	// GeoIP 字段评估(country/usage_type/isp)
+	if d.geoLookup != nil && needsGeo(&w) {
+		if info := d.geoLookup(ip); info != nil {
+			if hit, note := evalGeoConds(&w, info); hit {
+				return true, note
+			}
+		}
+	}
+	return false, ""
+}
+
+func formatN(name string, n int, c *config.Cond) string {
+	return name + "=" + itoa(n) + ">=" + itoa(c.GTE) + " window=" + c.Window.Std().String()
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := false
+	if n < 0 {
+		neg = true
+		n = -n
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
+}
+
+
+// SetRules 用 DB 来源的规则覆盖 yaml 静态规则,热生效。
+// 传 nil 或空 slice 会清空快照,detector 回退到 cfg.Rules。
+func (d *Detector) SetRules(rs []config.Rule) {
+	if rs == nil {
+		d.rulesSnap.Store(nil)
+		return
+	}
+	cp := make([]config.Rule, len(rs))
+	copy(cp, rs)
+	d.rulesSnap.Store(&cp)
+}

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>Sub-Panel 登录</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="login-body">
+  <div class="login-card">
+    <div class="brand-row">
+      <div class="logo">S</div>
+      <h1>Sub-Panel</h1>
+    </div>
+    <div class="sub">订阅前置网关 · 管理后台</div>
+    <form id="loginForm">
+      <input name="username" placeholder="用户名" autocomplete="username" required>
+      <input name="password" type="password" placeholder="密码" autocomplete="current-password" required>
+      <button class="primary" type="submit">登 录</button>
+    </form>
+    <div id="err" class="err"></div>
+  </div>
+  <script>
+    document.getElementById('loginForm').addEventListener('submit', async e => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      const r = await fetch('/api/login', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({username: fd.get('username'), password: fd.get('password')})
+      });
+      if (r.ok) {
+        location.href = '/';
+      } else {
+        const j = await r.json().catch(() => ({error: '登录失败'}));
+        document.getElementById('err').textContent = j.error || '登录失败';
+      }
+    });
+  </script>
+</body>
+</html>
