@@ -29,11 +29,11 @@ geoip:
   xdb_path: "/tmp/sub-panel/ip2region.xdb"
 
 # 管理员账号(默认 admin/admin123456,装完务必登录改密)
-# password_hash 留空时使用下方 password 明文(仅首次启动)
+# 改密在管理面「设置」页,新哈希会写入 SQLite,不再读这里。
 admin:
   username: "admin"
-  password: "admin123456"
-  password_hash: ""
+  # bcrypt(admin123456) - 首次登录后请改密
+  password_hash: "$2a$10$4X17qnFIVcMqpszFGboBBeF0LMWDHxhR21dgL9UKU9EjjH0gtTBCG"
 
 # 租户(订阅前置)。可以在管理面 → 租户管理 增删
 tenants: []
