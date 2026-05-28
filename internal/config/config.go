@@ -49,6 +49,9 @@ type Retention struct {
 type RealIP struct {
 	TrustHeaders []string `yaml:"trust_headers"`
 	TrustProxies []string `yaml:"trust_proxies"`
+	// Cloudflare=true 时启动自动追加 CF 官方 IP 段(v4+v6)到 trust_proxies,
+	// 并把 CF-Connecting-IP 放到 trust_headers 最前面。
+	Cloudflare bool `yaml:"cloudflare"`
 }
 
 type Tenant struct {
@@ -156,6 +159,7 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	c.applyDefaults()
+	applyCloudflare(&c)
 	return &c, nil
 }
 
