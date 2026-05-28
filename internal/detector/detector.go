@@ -89,6 +89,15 @@ func New(cfg *config.DetectorCfg) (*Detector, error) {
 
 func (d *Detector) MaxWindow() time.Duration { return d.maxWindow }
 
+// ResetAll 清空所有滑窗状态(tokenFreq/ipFreq/tokenIPSet/ipTokenSet)。
+// 配合"清空日志"使用,语义统一:用户视角一切归零。
+func (d *Detector) ResetAll() {
+	d.tokenFreq.Reset()
+	d.ipFreq.Reset()
+	d.tokenIPSet.Reset()
+	d.ipTokenSet.Reset()
+}
+
 // ResetToken 清掉指定 token 在 detector 里所有滑窗里的累计状态(tokenFreq / tokenIPSet)
 // 以及"被该 token 触达过的所有 IP"的 ipFreq + ipTokenSet。
 // 运维型按钮:把误判的 token 从风控里"拉出来",下次重新计数。

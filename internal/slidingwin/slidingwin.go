@@ -62,6 +62,11 @@ func (c *Counter) Delete(key string) {
 	c.data.Delete(key)
 }
 
+// Reset 清空所有 key,用于"清空日志"等全局归零运维。
+func (c *Counter) Reset() {
+	c.data.Range(func(k, _ any) bool { c.data.Delete(k); return true })
+}
+
 func (c *Counter) IncBy(key string, n int) {
 	v, _ := c.data.LoadOrStore(key, &counterBuckets{buckets: map[int64]int{}})
 	cb := v.(*counterBuckets)
@@ -151,6 +156,11 @@ func (d *DistinctSet) bucketKey(t time.Time) int64 {
 // Delete 清掉某个 key 的所有桶,用于"重置滑窗"运维操作。
 func (d *DistinctSet) Delete(key string) {
 	d.data.Delete(key)
+}
+
+// Reset 清空所有 key。
+func (d *DistinctSet) Reset() {
+	d.data.Range(func(k, _ any) bool { d.data.Delete(k); return true })
 }
 
 // Items 返回 key 在所有桶里出现过的 distinct val 列表(全窗口,不过滤过期)。

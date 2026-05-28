@@ -362,6 +362,11 @@ func (s *Server) apiEventsPurge(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
 	}
+	// 清日志的同时,把 detector 滑窗状态也归零。
+	// 全清(tenant=="")才清滑窗——单租户清不影响其他租户的风控累计。
+	if tenant == "" {
+		s.det.ResetAll()
+	}
 	writeJSON(w, 200, map[string]any{
 		"ok":                true,
 		"events_deleted":    evN,
