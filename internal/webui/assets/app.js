@@ -354,7 +354,7 @@ function updateEvMore(lastCount) {
     btn.textContent = `加载更多(已显示 ${evOffset} 条)`;
   }
 }
-$('#evQuery').addEventListener('click', loadEvents);
+$('#evQuery').addEventListener('click', () => loadEvents(false));
 
 // 清空日志:针对当前选中的机场;选"全部机场"时清全部。
 // 二次确认 + 显示删了多少行。
