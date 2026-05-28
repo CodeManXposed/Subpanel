@@ -48,7 +48,17 @@ var (
 
 	// JSON: "server":"1.2.3.4"
 	jsonServerRE = regexp.MustCompile(`"server"\s*:\s*"[^"]*"`)
+
+	// URI fragment #name (节点名,url 编码)。
+	uriNameRE = regexp.MustCompile(`#([^#\s&]+)`)
+
+	// Clash YAML `- name: xxx`(列表项节点名)
+	yamlNameRE = regexp.MustCompile(`(?m)(^\s*-\s*name\s*:\s*)(.+)$`)
 )
+
+// poisonMark 节点名前缀,标记"已投毒"。改前端无害,sing-box 的 tag 字段
+// 会被 route 引用,所以这里只标 URI fragment / vmess ps / Clash name。
+const poisonMark = "!"
 
 // Poison 改写 body 中所有节点 host 为 RFC5737 黑洞 IP。content-type 仅作参考。
 func Poison(body []byte, contentType string) []byte {
@@ -95,13 +105,17 @@ func looksLikeProxyURIs(b []byte) bool {
 
 func poisonText(b []byte) []byte {
 	s := string(b)
-	// 1) vmess://<b64-json>
+	// 1) vmess://<b64-json>(改 add + 在 ps 前加 !)
 	s = vmessRE.ReplaceAllStringFunc(s, replaceVmess)
 	// 2) URI 形态 host
 	s = uriHostRE.ReplaceAllStringFunc(s, replaceURIHost)
-	// 3) Clash YAML `server: xxx`
+	// 3) URI fragment #name —— 节点名前加 !
+	s = uriNameRE.ReplaceAllStringFunc(s, replaceURIName)
+	// 4) Clash YAML `server: xxx`
 	s = yamlServerRE.ReplaceAllStringFunc(s, replaceYAMLServer)
-	// 4) sing-box / 通用 JSON `"server":"xxx"`
+	// 5) Clash YAML `- name: xxx` —— 节点名前加 !
+	s = yamlNameRE.ReplaceAllStringFunc(s, replaceYAMLName)
+	// 6) sing-box / 通用 JSON `"server":"xxx"`
 	s = jsonServerRE.ReplaceAllString(s, `"server":"`+"__BH__"+`"`)
 	// JSON 的占位符要逐个换成不同的随机 IP,避免所有节点同 IP
 	for strings.Contains(s, "__BH__") {
@@ -130,6 +144,12 @@ func replaceVmess(match string) string {
 		return match
 	}
 	obj["add"] = randBlackholeIP()
+	// 节点名 ps 前加 !,标记被投毒
+	if ps, _ := obj["ps"].(string); ps != "" && !strings.HasPrefix(ps, poisonMark) {
+		obj["ps"] = poisonMark + ps
+	} else if _, ok := obj["ps"]; !ok {
+		obj["ps"] = poisonMark
+	}
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return match
@@ -156,4 +176,45 @@ func replaceYAMLServer(match string) string {
 		return match
 	}
 	return match[:idx+1] + " " + randBlackholeIP()
+}
+
+// replaceURIName 在 URI fragment #name 节点名前加 ! 标记。
+// name 是 url 编码的,直接在 # 后插 ! 即可(! 是 fragment 合法字符)。
+func replaceURIName(match string) string {
+	if len(match) < 2 {
+		return match
+	}
+	rest := match[1:]
+	if strings.HasPrefix(rest, poisonMark) {
+		return match
+	}
+	return "#" + poisonMark + rest
+}
+
+// replaceYAMLName 在 Clash `- name: xxx` 节点名前加 ! 标记。
+// YAML name 可能带引号("xxx" / 'xxx'),要插到引号内。
+func replaceYAMLName(match string) string {
+	// 用 yamlNameRE 重新拆分,避免重复解析。
+	sub := yamlNameRE.FindStringSubmatch(match)
+	if len(sub) < 3 {
+		return match
+	}
+	prefix, name := sub[1], sub[2]
+	name = strings.TrimRight(name, " \t\r")
+	// 已经标过就不重复
+	stripped := strings.Trim(name, `"' `)
+	if strings.HasPrefix(stripped, poisonMark) {
+		return match
+	}
+	// 保留引号风格;裸名要加引号(! 在 YAML 是 tag 关键字,会让解析炸)
+	switch {
+	case strings.HasPrefix(name, `"`) && strings.HasSuffix(name, `"`):
+		inner := strings.TrimSuffix(strings.TrimPrefix(name, `"`), `"`)
+		return prefix + `"` + poisonMark + inner + `"`
+	case strings.HasPrefix(name, `'`) && strings.HasSuffix(name, `'`):
+		inner := strings.TrimSuffix(strings.TrimPrefix(name, `'`), `'`)
+		return prefix + `'` + poisonMark + inner + `'`
+	default:
+		return prefix + `"` + poisonMark + name + `"`
+	}
 }
