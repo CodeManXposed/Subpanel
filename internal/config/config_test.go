@@ -82,7 +82,7 @@ actions:
 	}
 }
 
-func TestLoadMissingTenant(t *testing.T) {
+func TestLoadEmptyTenantsAllowed(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "c.yml")
 	yml := `
@@ -94,8 +94,8 @@ actions: {yellow: pass, orange: pass, red: pass}
 `
 	_ = os.WriteFile(p, []byte(yml), 0644)
 	_, err := Load(p)
-	if err == nil {
-		t.Error("expected error for missing tenants")
+	if err != nil {
+		t.Errorf("空 tenants 应允许(仅起管理面),got err: %v", err)
 	}
 }
 

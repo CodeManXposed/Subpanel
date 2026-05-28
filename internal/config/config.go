@@ -169,9 +169,8 @@ func (c *Config) validate() error {
 	if c.Storage.SQLitePath == "" {
 		return errors.New("storage.sqlite_path is required")
 	}
-	if len(c.Tenants) == 0 {
-		return errors.New("at least one tenant is required")
-	}
+	// 空 tenants 允许:此时反代不接任何路径,只起管理面,从 UI 后台添加租户
+	// 后续 tenant 可热加载(/api/tenants POST)
 	seen := map[string]bool{}
 	seenPath := map[string]bool{} // subscribe_path 全局唯一
 	for i := range c.Tenants {
