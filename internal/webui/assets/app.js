@@ -355,6 +355,8 @@ async function loadEvents(append = false) {
     tenant: state.tenant, window: state.window,
     limit: String(EV_PAGE_SIZE), offset: String(evOffset),
     ip: $('#evIP').value, token: $('#evToken').value, action: $('#evAction').value,
+    usage: $('#evUsage').value,
+    show_whitelist: $('#evShowWL').checked ? '1' : '0',
   });
   const evs = await api('/api/events?' + q);
   if (!evs) return;

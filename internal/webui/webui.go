@@ -293,10 +293,14 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 		ClientIP:  q.Get("ip"),
 		TokenHash: q.Get("token"),
 		Action:    q.Get("action"),
+		Usage:     strings.ToUpper(strings.TrimSpace(q.Get("usage"))),
 		Since:     time.Now().Add(-dur),
 		Limit:     limit,
 		Offset:    offset,
 	}
+	// 默认隐藏白名单 IP 的请求(走 rules.IPWhitelisted,支持 CIDR)。
+	// show_whitelist=1 时显示。单 IP 精确查询时也跳过过滤(用户显式要看)。
+	hideWL := q.Get("show_whitelist") != "1" && f.ClientIP == ""
 	evs, err := s.st.QueryEvents(r.Context(), f)
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
@@ -314,6 +318,9 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	gi := geoip.Global()
 	out := make([]eventOut, 0, len(evs))
 	for _, e := range evs {
+		if hideWL && e.ClientIP != "" && s.rules != nil && s.rules.IPWhitelisted(e.ClientIP) {
+			continue
+		}
 		row := eventOut{Event: e}
 		if e.ClientIP != "" {
 			if info := gi.Lookup(e.ClientIP); info != nil {

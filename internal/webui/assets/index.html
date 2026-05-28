@@ -142,6 +142,22 @@
               <option value="block_path">路径拦截</option>
               <option value="fake_failed">投毒失败</option>
             </select>
+            <select id="evUsage" title="按 IP 用途筛选">
+              <option value="">所有用途</option>
+              <option value="IDC">数据中心 IDC</option>
+              <option value="CDN">内容分发 CDN</option>
+              <option value="DNS">域名解析 DNS</option>
+              <option value="EDU">教育机构 EDU</option>
+              <option value="GTW">企业专线 GTW</option>
+              <option value="GOV">政府机构 GOV</option>
+              <option value="DYN">家庭宽带 DYN</option>
+              <option value="MOB">移动网络 MOB</option>
+              <option value="COM">商业宽带 COM</option>
+              <option value="ORG">组织机构 ORG</option>
+              <option value="NET">基础设施 NET</option>
+              <option value="BOGON">保留 IP</option>
+            </select>
+            <label class="bl-toggle" style="margin:0;padding:6px 10px" title="默认隐藏白名单 IP 的请求"><input type="checkbox" id="evShowWL"><span style="font-size:13px">显示白名单</span></label>
             <button class="primary" id="evQuery">查询</button>
             <button class="danger" id="evPurge" title="清空当前机场的请求日志和异常记录">清空日志</button>
           </div>

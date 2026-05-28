@@ -429,6 +429,7 @@ type EventFilter struct {
 	ClientIP  string
 	TokenHash string
 	Action    string
+	Usage     string // usage_type 精确匹配(IDC/CDN/DYN/MOB/...)
 	Since     time.Time
 	Until     time.Time
 	Limit     int
@@ -458,6 +459,10 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error)
 	if f.Action != "" {
 		q += " AND action=?"
 		args = append(args, f.Action)
+	}
+	if f.Usage != "" {
+		q += " AND usage_type=?"
+		args = append(args, f.Usage)
 	}
 	if !f.Since.IsZero() {
 		q += " AND ts>=?"
