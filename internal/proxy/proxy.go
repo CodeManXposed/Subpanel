@@ -257,7 +257,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 3.5) 全局黑名单(海外/云/ISP/浏览器)— 粗粒度规则,优先于触发规则。
 	// 命中即投毒,不进 detector.Observe(不污染频率窗口)。
 	if g.bl != nil {
-		country, _, isp := g.geoFor(pr.ClientIP)
+		country, usageType, isp := g.geoFor(pr.ClientIP)
 		// xdb 返回的 country 字段是中文,需要 ISO 码就要单独存。这里把 country
 		// 当 ISO 兜底字段两边都传,IsOverseaCountry 会两个都判。
 		var iso string
@@ -270,7 +270,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			isCloud, _ = g.cloudLookup(pr.ClientIP)
 		}
 		accept := r.Header.Get("Accept")
-		if hit, tag := g.bl.Evaluate(iso, country, isp, isCloud, accept); hit {
+		if hit, tag := g.bl.Evaluate(iso, country, usageType, isp, isCloud, accept); hit {
 			g.respondFake(w, r, pr, tokenHash, []string{tag}, start)
 			return
 		}

@@ -23,6 +23,7 @@ type Snapshot struct {
 	OverseaEnabled bool
 	CloudEnabled   bool
 	BrowserEnabled bool
+	CNIDCEnabled   bool // 国内 IDC 拉黑(CN + usage_type==IDC)
 	ISPKeywords    []string
 }
 
@@ -35,6 +36,7 @@ const (
 	MetaOversea  = "bl_oversea_enabled"
 	MetaCloud    = "bl_cloud_enabled"
 	MetaBrowser  = "bl_browser_enabled"
+	MetaCNIDC    = "bl_cn_idc_enabled"
 	MetaISPKwCSV = "bl_isp_keywords"
 )
 
@@ -50,6 +52,7 @@ func (m *Manager) Reload() error {
 	sn.OverseaEnabled = readBool(m.st, MetaOversea)
 	sn.CloudEnabled = readBool(m.st, MetaCloud)
 	sn.BrowserEnabled = readBool(m.st, MetaBrowser)
+	sn.CNIDCEnabled = readBool(m.st, MetaCNIDC)
 	if v, _ := m.st.GetMeta(MetaISPKwCSV); v != "" {
 		for _, p := range strings.Split(v, ",") {
 			if p = strings.TrimSpace(p); p != "" {
@@ -79,6 +82,9 @@ func (m *Manager) Update(s Snapshot) error {
 		return err
 	}
 	if err := writeBool(m.st, MetaBrowser, s.BrowserEnabled); err != nil {
+		return err
+	}
+	if err := writeBool(m.st, MetaCNIDC, s.CNIDCEnabled); err != nil {
 		return err
 	}
 	kw := strings.Join(s.ISPKeywords, ",")
@@ -131,13 +137,14 @@ func (m *Manager) ISPHitKeyword(isp string) (bool, string) {
 
 // Evaluate 综合判断 — 命中返回 (true, 原因 tag)。
 //   - iso/country: GeoIP 国家字段
+//   - usageType:  GeoIP usage_type 字段(IDC/CDN/DYN/MOB/COM)
 //   - isp:        GeoIP ISP 字段
 //   - isCloud:    云厂商命中标志(调用方查 cloudMatcher 后传入)
 //   - accept:     Accept 请求头
 //
-// 评估顺序:海外 → 云厂商 → ISP 关键字 → 浏览器。任一命中即返回。
+// 评估顺序:海外 → 云厂商 → CN-IDC → ISP 关键字 → 浏览器。任一命中即返回。
 // 顺序选择:粗→细,命中投毒后短路,省去后续 lookup。
-func (m *Manager) Evaluate(iso, country, isp string, isCloud bool, accept string) (bool, string) {
+func (m *Manager) Evaluate(iso, country, usageType, isp string, isCloud bool, accept string) (bool, string) {
 	sn := m.Get()
 	if sn.OverseaEnabled && IsOverseaCountry(iso, country) {
 		c := iso
@@ -151,6 +158,9 @@ func (m *Manager) Evaluate(iso, country, isp string, isCloud bool, accept string
 	}
 	if sn.CloudEnabled && isCloud {
 		return true, "bl_cloud"
+	}
+	if sn.CNIDCEnabled && !IsOverseaCountry(iso, country) && strings.EqualFold(strings.TrimSpace(usageType), "IDC") {
+		return true, "bl_cn_idc"
 	}
 	if len(sn.ISPKeywords) > 0 {
 		if hit, kw := m.ISPHitKeyword(isp); hit {

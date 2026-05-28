@@ -44,6 +44,7 @@ const TAG_PREFIX_CN = {
   // 全局黑名单
   'bl_oversea':     '黑名单·海外',
   'bl_cloud':       '黑名单·云厂商',
+  'bl_cn_idc':      '黑名单·国内IDC',
   'bl_browser':     '黑名单·浏览器直访',
   'bl_isp':         '黑名单·运营商',
   // 白名单 / 路径
@@ -553,6 +554,7 @@ async function loadBlacklistCfg() {
   if (!cfg) return;
   $('#blOversea').checked = !!cfg.oversea_enabled;
   $('#blCloud').checked = !!cfg.cloud_enabled;
+  $('#blCNIDC').checked = !!cfg.cn_idc_enabled;
   $('#blBrowser').checked = !!cfg.browser_enabled;
   $('#blISPKw').value = (cfg.isp_keywords || []).join(', ');
 }
@@ -561,6 +563,7 @@ $('#blSaveBtn').addEventListener('click', async () => {
   const r = await apiPost('/api/blacklist/save', {
     oversea_enabled: $('#blOversea').checked,
     cloud_enabled: $('#blCloud').checked,
+    cn_idc_enabled: $('#blCNIDC').checked,
     browser_enabled: $('#blBrowser').checked,
     isp_keywords: kw,
   });

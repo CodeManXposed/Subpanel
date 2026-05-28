@@ -956,6 +956,7 @@ func (s *Server) apiBlacklist(w http.ResponseWriter, r *http.Request) {
 			"oversea_enabled": false,
 			"cloud_enabled":   false,
 			"browser_enabled": false,
+			"cn_idc_enabled":  false,
 			"isp_keywords":    []string{},
 		})
 		return
@@ -969,6 +970,7 @@ func (s *Server) apiBlacklist(w http.ResponseWriter, r *http.Request) {
 		"oversea_enabled": sn.OverseaEnabled,
 		"cloud_enabled":   sn.CloudEnabled,
 		"browser_enabled": sn.BrowserEnabled,
+		"cn_idc_enabled":  sn.CNIDCEnabled,
 		"isp_keywords":    kw,
 	})
 }
@@ -987,6 +989,7 @@ func (s *Server) apiBlacklistSave(w http.ResponseWriter, r *http.Request) {
 		OverseaEnabled bool     `json:"oversea_enabled"`
 		CloudEnabled   bool     `json:"cloud_enabled"`
 		BrowserEnabled bool     `json:"browser_enabled"`
+		CNIDCEnabled   bool     `json:"cn_idc_enabled"`
 		ISPKeywords    []string `json:"isp_keywords"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -997,6 +1000,7 @@ func (s *Server) apiBlacklistSave(w http.ResponseWriter, r *http.Request) {
 		OverseaEnabled: body.OverseaEnabled,
 		CloudEnabled:   body.CloudEnabled,
 		BrowserEnabled: body.BrowserEnabled,
+		CNIDCEnabled:   body.CNIDCEnabled,
 		ISPKeywords:    body.ISPKeywords,
 	}); err != nil {
 		writeJSON(w, 500, map[string]any{"ok": false, "msg": err.Error()})
