@@ -104,6 +104,22 @@ func (m *Manager) DeleteIPWhitelist(id int64) error {
 	return m.Reload()
 }
 
+// UpdateIPWhitelist 校验 target 合法性 + 写库 + 触发热加载。
+func (m *Manager) UpdateIPWhitelist(id int64, target, note string) error {
+	t := strings.TrimSpace(target)
+	if strings.Contains(t, "/") {
+		if _, _, err := net.ParseCIDR(t); err != nil {
+			return err
+		}
+	} else if net.ParseIP(t) == nil {
+		return errIPInvalid
+	}
+	if err := m.st.UpdateIPWhitelist(id, t, note); err != nil {
+		return err
+	}
+	return m.Reload()
+}
+
 // errIPInvalid 用于 IP 校验失败。
 var errIPInvalid = &simpleErr{"target must be valid IP or CIDR"}
 

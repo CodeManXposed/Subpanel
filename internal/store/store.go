@@ -1018,6 +1018,14 @@ func (s *Store) DeleteIPWhitelist(id int64) error {
 	return err
 }
 
+// UpdateIPWhitelist 改 target 或 note。target 冲突会返回 UNIQUE 错。
+func (s *Store) UpdateIPWhitelist(id int64, target, note string) error {
+	_, err := s.db.Exec(
+		`UPDATE ip_whitelist SET target=?, note=? WHERE id=?`,
+		target, note, id)
+	return err
+}
+
 func (s *Store) ListIPWhitelist() ([]IPWhitelistEntry, error) {
 	rows, err := s.db.Query(
 		`SELECT id,target,COALESCE(note,''),created_ts FROM ip_whitelist ORDER BY id`)

@@ -559,23 +559,64 @@ async function loadIPWhitelist() {
   }
   for (const e of list) {
     const tr = document.createElement('tr');
+    tr.dataset.id = e.ID;
+    tr.dataset.target = e.Target || '';
+    tr.dataset.note = e.Note || '';
     tr.innerHTML = `
-      <td class="mono">${escapeHTML(e.Target)}</td>
-      <td>${escapeHTML(e.Note || '')}</td>
+      <td class="mono ipwl-target">${escapeHTML(e.Target)}</td>
+      <td class="ipwl-note">${escapeHTML(e.Note || '')}</td>
       <td class="mono">${escapeHTML(fmtTime(e.CreatedTS))}</td>
-      <td><button class="danger" data-id="${e.ID}">删除</button></td>
+      <td class="ipwl-ops">
+        <button class="ipwl-edit" data-id="${e.ID}">编辑</button>
+        <button class="danger ipwl-del" data-id="${e.ID}">删除</button>
+      </td>
     `;
     tbody.appendChild(tr);
   }
-  $$('#ipWLTbody button.danger').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      if (!confirm('删除该白名单?')) return;
-      const r = await apiPost('/api/ip-whitelist/remove', { id: parseInt(btn.dataset.id, 10) });
-      if (r && r.ok) { toast('已删除', 'success'); loadIPWhitelist(); }
-      else toast((r && r.error) || '失败', 'error');
-    });
-  });
 }
+
+// 行内编辑:点'编辑'把两格替换成 input,按钮换'保存/取消'。
+$('#ipWLTbody').addEventListener('click', async (ev) => {
+  const tr = ev.target.closest('tr'); if (!tr) return;
+  const id = parseInt(tr.dataset.id, 10);
+
+  if (ev.target.matches('.ipwl-del')) {
+    if (!confirm('删除该白名单?')) return;
+    const r = await apiPost('/api/ip-whitelist/remove', { id });
+    if (r && r.ok) { toast('已删除', 'success'); loadIPWhitelist(); }
+    else toast((r && r.error) || '失败', 'error');
+    return;
+  }
+
+  if (ev.target.matches('.ipwl-edit')) {
+    const curTarget = tr.dataset.target;
+    const curNote = tr.dataset.note;
+    tr.querySelector('.ipwl-target').innerHTML = `<input class="ipwl-edit-target" value="${escapeHTML(curTarget)}" style="width:100%">`;
+    tr.querySelector('.ipwl-note').innerHTML = `<input class="ipwl-edit-note" value="${escapeHTML(curNote)}" style="width:100%">`;
+    tr.querySelector('.ipwl-ops').innerHTML = `
+      <button class="primary ipwl-save" data-id="${id}">保存</button>
+      <button class="ipwl-cancel">取消</button>
+    `;
+    tr.querySelector('.ipwl-edit-target').focus();
+    return;
+  }
+
+  if (ev.target.matches('.ipwl-cancel')) {
+    loadIPWhitelist();
+    return;
+  }
+
+  if (ev.target.matches('.ipwl-save')) {
+    const target = tr.querySelector('.ipwl-edit-target').value.trim();
+    const note = tr.querySelector('.ipwl-edit-note').value.trim();
+    if (!target) return toast('IP/CIDR 不能为空', 'error');
+    const r = await apiPost('/api/ip-whitelist/update', { id, target, note });
+    if (r && r.ok) { toast('已保存', 'success'); loadIPWhitelist(); }
+    else toast((r && r.error) || '保存失败', 'error');
+    return;
+  }
+});
+
 $('#ipWLAddBtn').addEventListener('click', async () => {
   const target = $('#ipWLTarget').value.trim();
   if (!target) return toast('请输入 IP/CIDR', 'error');
