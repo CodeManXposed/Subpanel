@@ -257,7 +257,8 @@ function renderEventCard(e) {
   const tokenFull = e.TokenHash || '';
   const ua = e.UA || '';
   const flagBit = e.Flag ? `<span class="kv-sep">·</span><span class="mono">${escapeHTML(e.Flag)}</span>` : '';
-  const tenantBit = e.Tenant ? `<span class="kv-sep">·</span><span class="ev-tenant">${escapeHTML(e.Tenant)}</span>` : '';
+  const tenantBit = (e.Tenant && e.Tenant !== '_unmatched') ? `<span class="kv-sep">·</span><span class="ev-tenant">${escapeHTML(e.Tenant)}</span>` : '';
+  const pathBit = e.Path ? `<span class="mono ev-path" title="${escapeHTML(e.Path)}">${escapeHTML(e.Path)}</span>` : '<span class="muted">(无)</span>';
   const usageBit = e.Usage
     ? `<span class="pill usage ${escapeHTML(String(e.Usage).toLowerCase())}" title="${escapeHTML(e.Usage)}">${escapeHTML(usageLabel(e.Usage))}</span>`
     : '';
@@ -286,6 +287,10 @@ function renderEventCard(e) {
         ? `<span class="mono copyable ev-token ev-token-expand" data-copy="${escapeHTML(tokenFull)}" data-full="${escapeHTML(tokenFull)}" data-short="${escapeHTML(tokenShort(tokenFull))}" title="点击展开 / 再点复制">${escapeHTML(tokenShort(tokenFull))}</span>`
         : '<span class="muted">(无)</span>'}
       ${flagBit}${tenantBit}
+    </div>
+    <div class="ev-row-full">
+      <span class="ev-label">路径</span>
+      ${pathBit}
     </div>
     <div class="ev-row-full">
       <span class="ev-label">UA</span>

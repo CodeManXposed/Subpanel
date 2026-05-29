@@ -393,6 +393,7 @@ table tbody tr:hover { background: #f8fafc; }
 }
 .ev-row-full .ev-token,
 .ev-row-full .ev-ua { font-size: 12px; color: #374151; word-break: break-all; flex: 1; min-width: 0; }
+.ev-row-full .ev-path { font-size: 12px; color: #1f2937; word-break: break-all; flex: 1; min-width: 0; }
 .ev-row-full .kv-sep { color: #d1d5db; }
 .ev-row-full .ev-tenant { font-size: 12px; color: #4338ca; font-weight: 600; }
 .ev-label {
