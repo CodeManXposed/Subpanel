@@ -153,6 +153,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/suspects", s.auth(http.HandlerFunc(s.apiSuspects)))
 	mux.Handle("/api/user-reports", s.auth(http.HandlerFunc(s.apiUserReports)))
 	mux.Handle("/api/report-info", s.auth(http.HandlerFunc(s.apiReportInfo)))
+	mux.Handle("/api/report-info/save", s.auth(http.HandlerFunc(s.apiReportInfoSave)))
 
 	return mux
 }

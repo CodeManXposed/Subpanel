@@ -152,7 +152,7 @@ const TAB_LOADERS = {
   'detect-rules': () => loadRulesTable(),
   'suspects': () => loadSuspects(),
   'tenants': () => loadTenantsTable(),
-  'settings': () => { loadSettings(); loadPassthrough(); },
+  'settings': () => { loadSettings(); loadPassthrough(); loadReportSecret(); },
 };
 
 $$('.navlink').forEach(a => {
@@ -895,7 +895,7 @@ async function openReportCodeModal(tenantName) {
   const info = await getReportInfo();
   const baseUrl = location.origin;
   const reportUrl = `${baseUrl}/api/report/${encodeURIComponent(tenantName)}`;
-  const secret = info.report_secret || '(未配置,请在 config.yml 的 admin.report_secret 设置)';
+  const secret = info.report_secret || '(未配置,请在设置页「上报密钥」中配置)';
 
   $('#reportCodeTitle').textContent = `上报接入 — ${tenantName}`;
   $('#reportCodeURL').textContent = reportUrl;
@@ -1137,6 +1137,27 @@ async function loadPassthrough() {
   lbl.textContent = r.enabled ? '已开启' : '已关闭';
   pill.style.display = r.enabled ? '' : 'none';
 }
+
+// ─── 上报密钥设置 ───
+async function loadReportSecret() {
+  const r = await api('/api/report-info');
+  if (!r) return;
+  const input = $('#reportSecretInput');
+  if (input) input.value = r.report_secret || '';
+  // 清除缓存,让接入代码弹窗下次重新拉取
+  _reportInfo = null;
+}
+
+$('#reportSecretSave')?.addEventListener('click', async () => {
+  const val = ($('#reportSecretInput').value || '').trim();
+  const r = await apiPost('/api/report-info/save', { report_secret: val });
+  if (r && r.ok) {
+    toast(val ? '密钥已保存' : '密钥已清除(上报接口不校验)', 'success');
+    _reportInfo = null; // 清缓存
+  } else {
+    toast((r && r.error) || '保存失败', 'error');
+  }
+});
 
 $('#pwSaveBtn')?.addEventListener('click', async () => {
   const oldP = $('#pwOld').value;

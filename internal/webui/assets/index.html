@@ -337,6 +337,15 @@
       <!-- 设置 -->
       <section id="tab-settings" class="tab">
         <div class="card">
+          <h3>上报密钥</h3>
+          <p class="muted" style="margin:0 0 8px">v2board 上报接口鉴权用,留空则不校验。修改后立即生效,同步更新各机场「接入代码」里的密钥。</p>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input id="reportSecretInput" placeholder="留空 = 不校验" style="flex:1;max-width:360px">
+            <button class="primary" id="reportSecretSave">保存</button>
+          </div>
+        </div>
+
+        <div class="card">
           <h3>修改管理员密码</h3>
           <div class="form-grid">
             <div>

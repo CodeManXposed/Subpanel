@@ -117,7 +117,6 @@ type AdminCfg struct {
 	PasswordHash string   `yaml:"password_hash"` // bcrypt
 	SessionTTL   Duration `yaml:"session_ttl"`
 	SessionKey   string   `yaml:"session_key"`   // 用于签 cookie,空则自动生成
-	ReportSecret string   `yaml:"report_secret"` // 上报接口鉴权 key,空则不校验
 }
 
 // Duration 支持 "5m" / "24h" / "30d" 这种字符串

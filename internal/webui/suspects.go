@@ -16,8 +16,8 @@ func (s *Server) apiReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 鉴权: X-Report-Key header
-	secret := s.cfg.Admin.ReportSecret
+	// 鉴权: X-Report-Key header (secret 存在 meta 表)
+	secret, _ := s.st.GetMeta("report_secret")
 	if secret != "" {
 		key := r.Header.Get("X-Report-Key")
 		if key != secret {
@@ -118,8 +118,25 @@ func (s *Server) apiUserReports(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/report-info — 返回上报接入信息(URL前缀 + secret),供机场管理页展示
 func (s *Server) apiReportInfo(w http.ResponseWriter, r *http.Request) {
+	secret, _ := s.st.GetMeta("report_secret")
 	writeJSON(w, 200, map[string]any{
-		"report_secret": s.cfg.Admin.ReportSecret,
-		"admin_listen":  s.cfg.AdminListen,
+		"report_secret": secret,
 	})
+}
+
+// POST /api/report-info — 保存上报密钥
+func (s *Server) apiReportInfoSave(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ReportSecret string `json:"report_secret"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, 400, map[string]any{"error": "bad json"})
+		return
+	}
+	if body.ReportSecret == "" {
+		_ = s.st.DeleteMeta("report_secret")
+	} else {
+		_ = s.st.SetMeta("report_secret", body.ReportSecret)
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
 }
