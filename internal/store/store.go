@@ -899,14 +899,17 @@ func (s *Store) ListResolvedTokens(ctx context.Context, tenant string) ([]Resolv
 // PurgeEvents 清空请求事件 + 异常事件。tenant 为空=全部租户;否则只清该租户。
 // 返回 (events_deleted, incidents_deleted, err)。
 func (s *Store) PurgeEvents(ctx context.Context, tenant string) (int64, int64, error) {
-	var evArgs, inArgs []any
+	var evArgs, inArgs, urArgs []any
 	evQ := "DELETE FROM events"
 	inQ := "DELETE FROM incidents"
+	urQ := "DELETE FROM user_reports"
 	if tenant != "" {
 		evQ += " WHERE tenant=?"
 		inQ += " WHERE tenant=?"
+		urQ += " WHERE tenant=?"
 		evArgs = append(evArgs, tenant)
 		inArgs = append(inArgs, tenant)
+		urArgs = append(urArgs, tenant)
 	}
 	evRes, err := s.db.ExecContext(ctx, evQ, evArgs...)
 	if err != nil {
@@ -916,6 +919,8 @@ func (s *Store) PurgeEvents(ctx context.Context, tenant string) (int64, int64, e
 	if err != nil {
 		return 0, 0, err
 	}
+	// 同步清除上报数据
+	_, _ = s.db.ExecContext(ctx, urQ, urArgs...)
 	evN, _ := evRes.RowsAffected()
 	inN, _ := inRes.RowsAffected()
 	return evN, inN, nil
