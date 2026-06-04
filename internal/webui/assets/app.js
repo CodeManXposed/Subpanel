@@ -1112,9 +1112,40 @@ async function loadSuspects() {
     window: $('#suspectWindow').value || '168h',
   });
   const rows = await api('/api/suspects?' + q);
+  window._suspectsData = rows || [];
+  renderSuspects();
+}
+
+function renderSuspects() {
+  let rows = window._suspectsData || [];
   const tbody = $('#suspectsTbody'); tbody.innerHTML = '';
-  if (!rows || !rows.length) {
-    tbody.innerHTML = '<tr><td colspan="10" class="empty-state">暂无上报数据或无嫌疑用户</td></tr>';
+
+  // 搜索过滤
+  const search = ($('#suspectSearch').value || '').trim().toLowerCase();
+  if (search) {
+    rows = rows.filter(r =>
+      (r.token || '').toLowerCase().includes(search) ||
+      (r.email || '').toLowerCase().includes(search) ||
+      (r.last_ip || '').toLowerCase().includes(search)
+    );
+  }
+
+  // 排序
+  const sort = $('#suspectSort').value;
+  rows = [...rows].sort((a, b) => {
+    if (sort === 'pull') return b.pull_count - a.pull_count;
+    if (sort === 'ips') return b.distinct_ips - a.distinct_ips;
+    if (sort === 'usage') {
+      const ra = a.traffic_total > 0 ? a.traffic_used / a.traffic_total : 2;
+      const rb = b.traffic_total > 0 ? b.traffic_used / b.traffic_total : 2;
+      return ra - rb; // 低使用率排前面
+    }
+    // 默认: flags desc, pull desc
+    return b.red_flags - a.red_flags || b.pull_count - a.pull_count;
+  });
+
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="10" class="empty-state">暂无上报数据或无匹配结果</td></tr>';
     return;
   }
   for (const r of rows) {
@@ -1139,6 +1170,8 @@ async function loadSuspects() {
 }
 
 $('#suspectWindow').addEventListener('change', () => loadSuspects());
+$('#suspectSort').addEventListener('change', () => renderSuspects());
+$('#suspectSearch').addEventListener('input', () => renderSuspects());
 
 // ════════════════════════════════════════════════════
 // 交互打磨:进度条 / 搜索高亮 / 快捷键 / 验证 / loading
