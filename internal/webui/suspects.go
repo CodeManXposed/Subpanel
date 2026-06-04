@@ -138,6 +138,33 @@ func (s *Server) apiReportInfo(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GET /api/suspect-detail?token=xxx&tenant=xxx&window=168h — 单用户详情(所有IP+UA)
+func (s *Server) apiSuspectDetail(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	tenant := r.URL.Query().Get("tenant")
+	if token == "" {
+		writeJSON(w, 400, map[string]any{"error": "token required"})
+		return
+	}
+	windowStr := r.URL.Query().Get("window")
+	if windowStr == "" {
+		windowStr = "168h"
+	}
+	dur, err := time.ParseDuration(windowStr)
+	if err != nil {
+		dur = 168 * time.Hour
+	}
+	since := time.Now().Add(-dur)
+
+	detail, err := s.st.QuerySuspectDetail(token, tenant, since)
+	if err != nil {
+		s.logger.Error("query suspect detail", "err", err)
+		writeJSON(w, 500, map[string]any{"error": "query error"})
+		return
+	}
+	writeJSON(w, 200, detail)
+}
+
 // POST /api/report-info — 保存上报密钥
 func (s *Server) apiReportInfoSave(w http.ResponseWriter, r *http.Request) {
 	var body struct {

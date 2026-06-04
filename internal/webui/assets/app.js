@@ -1257,6 +1257,8 @@ function renderSuspects() {
   }
   for (const r of rows) {
     const tr = document.createElement('tr');
+    tr.style.cursor = 'pointer';
+    tr.title = '点击展开详情';
     const usageRatio = r.traffic_total > 0 ? (r.traffic_used / r.traffic_total * 100).toFixed(1) + '%' : '-';
     const flags = '🚩'.repeat(r.red_flags) || '<span class="muted">—</span>';
     tr.innerHTML = `
@@ -1271,9 +1273,71 @@ function renderSuspects() {
       <td class="mono" style="text-align:right">${fmtBytes(r.traffic_total)}</td>
       <td class="mono" style="text-align:right"><strong>${usageRatio}</strong></td>
     `;
+    tr.addEventListener('click', (e) => {
+      if (e.target.closest('.copyable')) return; // 不拦截复制
+      toggleSuspectDetail(tr, r);
+    });
     tbody.appendChild(tr);
   }
   bindCopyHandlers(tbody);
+}
+
+async function toggleSuspectDetail(tr, r) {
+  const existing = tr.nextElementSibling;
+  if (existing && existing.classList.contains('suspect-detail-row')) {
+    existing.remove();
+    return;
+  }
+  // 收起其他已展开的
+  document.querySelectorAll('.suspect-detail-row').forEach(el => el.remove());
+
+  const detailRow = document.createElement('tr');
+  detailRow.className = 'suspect-detail-row';
+  const td = document.createElement('td');
+  td.colSpan = 10;
+  td.innerHTML = '<div style="padding:12px 16px;color:#6b7280;font-size:12px">加载中...</div>';
+  detailRow.appendChild(td);
+  tr.after(detailRow);
+
+  const q = new URLSearchParams({
+    token: r.token,
+    tenant: r.tenant,
+    window: $('#suspectWindow').value || '168h',
+  });
+  const detail = await api('/api/suspect-detail?' + q);
+  if (!detail) { td.innerHTML = '<div style="padding:12px 16px;color:#ef4444">加载失败</div>'; return; }
+
+  let html = '<div style="padding:12px 16px;display:grid;grid-template-columns:1fr 1fr;gap:16px">';
+
+  // IP 列表
+  html += '<div><div style="font-weight:600;font-size:12px;margin-bottom:6px;color:#374151">IP 列表 (' + (detail.ips||[]).length + ')</div>';
+  if (detail.ips && detail.ips.length) {
+    html += '<table style="width:100%;font-size:11.5px;border-collapse:collapse">';
+    html += '<tr style="color:#6b7280;border-bottom:1px solid #e5e7eb"><th style="text-align:left;padding:2px 6px">IP</th><th style="text-align:left;padding:2px 6px">位置</th><th style="text-align:left;padding:2px 6px">ISP</th><th style="text-align:right;padding:2px 6px">次数</th><th style="text-align:right;padding:2px 6px">最近</th></tr>';
+    for (const ip of detail.ips) {
+      const loc = ip.country || '-';
+      const isp = ip.isp || '-';
+      const last = new Date(ip.last_seen).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+      html += `<tr style="border-bottom:1px solid #f3f4f6"><td class="mono" style="padding:3px 6px">${escapeHTML(ip.ip)}</td><td style="padding:3px 6px">${escapeHTML(loc)}</td><td style="padding:3px 6px">${escapeHTML(isp)}</td><td class="mono" style="text-align:right;padding:3px 6px">${ip.hit_count}</td><td class="mono" style="text-align:right;padding:3px 6px">${last}</td></tr>`;
+    }
+    html += '</table>';
+  } else { html += '<div style="color:#9ca3af;font-size:11px">无记录</div>'; }
+  html += '</div>';
+
+  // UA 列表
+  html += '<div><div style="font-weight:600;font-size:12px;margin-bottom:6px;color:#374151">UA 列表 (' + (detail.uas||[]).length + ')</div>';
+  if (detail.uas && detail.uas.length) {
+    html += '<table style="width:100%;font-size:11.5px;border-collapse:collapse">';
+    html += '<tr style="color:#6b7280;border-bottom:1px solid #e5e7eb"><th style="text-align:left;padding:2px 6px">User-Agent</th><th style="text-align:right;padding:2px 6px">次数</th><th style="text-align:right;padding:2px 6px">最近</th></tr>';
+    for (const ua of detail.uas) {
+      const last = new Date(ua.last_seen).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+      html += `<tr style="border-bottom:1px solid #f3f4f6"><td class="mono" style="padding:3px 6px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHTML(ua.ua)}">${escapeHTML(ua.ua)}</td><td class="mono" style="text-align:right;padding:3px 6px">${ua.hit_count}</td><td class="mono" style="text-align:right;padding:3px 6px">${last}</td></tr>`;
+    }
+    html += '</table>';
+  } else { html += '<div style="color:#9ca3af;font-size:11px">无记录</div>'; }
+  html += '</div></div>';
+
+  td.innerHTML = html;
 }
 
 $('#suspectWindow').addEventListener('change', () => loadSuspects());

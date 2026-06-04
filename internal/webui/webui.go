@@ -151,6 +151,7 @@ func (s *Server) Handler() http.Handler {
 	// 上报接口已移到订阅网关(80端口) /r/{report_id},不再挂管理面
 	// 嫌疑用户分析(需登录)
 	mux.Handle("/api/suspects", s.auth(http.HandlerFunc(s.apiSuspects)))
+	mux.Handle("/api/suspect-detail", s.auth(http.HandlerFunc(s.apiSuspectDetail)))
 	mux.Handle("/api/user-reports", s.auth(http.HandlerFunc(s.apiUserReports)))
 	mux.Handle("/api/report-info", s.auth(http.HandlerFunc(s.apiReportInfo)))
 	mux.Handle("/api/report-info/save", s.auth(http.HandlerFunc(s.apiReportInfoSave)))

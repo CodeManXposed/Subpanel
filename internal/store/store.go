@@ -1412,3 +1412,76 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 	}
 	return out, nil
 }
+
+// SuspectDetail 单用户的 IP 列表和 UA 列表
+type SuspectDetail struct {
+	IPs []IPDetail `json:"ips"`
+	UAs []UADetail `json:"uas"`
+}
+
+type IPDetail struct {
+	IP       string `json:"ip"`
+	Country  string `json:"country"`
+	ISP      string `json:"isp"`
+	HitCount int    `json:"hit_count"`
+	LastSeen int64  `json:"last_seen"` // unix ms
+}
+
+type UADetail struct {
+	UA       string `json:"ua"`
+	HitCount int    `json:"hit_count"`
+	LastSeen int64  `json:"last_seen"`
+}
+
+func (s *Store) QuerySuspectDetail(token, tenant string, since time.Time) (*SuspectDetail, error) {
+	sinceMs := since.UnixMilli()
+	detail := &SuspectDetail{}
+
+	// IP 明细
+	tenantCond := ""
+	args := []any{token, sinceMs}
+	if tenant != "" {
+		tenantCond = " AND tenant=?"
+		args = append(args, tenant)
+	}
+	ipRows, err := s.db.Query(`
+		SELECT client_ip, COALESCE(country,''), COALESCE(isp,''), COUNT(*), MAX(ts)
+		FROM events WHERE token_hash=? AND ts>=?`+tenantCond+`
+		GROUP BY client_ip ORDER BY COUNT(*) DESC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer ipRows.Close()
+	for ipRows.Next() {
+		var d IPDetail
+		if err := ipRows.Scan(&d.IP, &d.Country, &d.ISP, &d.HitCount, &d.LastSeen); err != nil {
+			continue
+		}
+		detail.IPs = append(detail.IPs, d)
+	}
+
+	// UA 明细
+	args2 := []any{token, sinceMs}
+	tenantCond2 := ""
+	if tenant != "" {
+		tenantCond2 = " AND tenant=?"
+		args2 = append(args2, tenant)
+	}
+	uaRows, err := s.db.Query(`
+		SELECT COALESCE(ua,''), COUNT(*), MAX(ts)
+		FROM events WHERE token_hash=? AND ts>=?`+tenantCond2+`
+		GROUP BY ua ORDER BY COUNT(*) DESC`, args2...)
+	if err != nil {
+		return nil, err
+	}
+	defer uaRows.Close()
+	for uaRows.Next() {
+		var d UADetail
+		if err := uaRows.Scan(&d.UA, &d.HitCount, &d.LastSeen); err != nil {
+			continue
+		}
+		detail.UAs = append(detail.UAs, d)
+	}
+
+	return detail, nil
+}
