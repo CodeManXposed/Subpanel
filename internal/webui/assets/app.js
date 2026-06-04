@@ -137,6 +137,7 @@ const TAB_TITLES = {
   'ip-bans': '黑名单',
   'ip-whitelist': 'IP 白名单',
   'cloud-ip': 'GeoIP 库',
+  'suspects': '嫌疑用户',
   'tenants': '机场管理',
   'settings': '设置',
 };
@@ -149,6 +150,7 @@ const TAB_LOADERS = {
   'ip-whitelist': () => loadIPWhitelist(),
   'cloud-ip': () => loadGeoIPInfo(),
   'detect-rules': () => loadRulesTable(),
+  'suspects': () => loadSuspects(),
   'tenants': () => loadTenantsTable(),
   'settings': () => { loadSettings(); loadPassthrough(); },
 };
@@ -1090,6 +1092,53 @@ $('#passthroughToggle')?.addEventListener('change', async (e) => {
     toast((r && r.error) || '失败', 'error');
   }
 });
+
+// ════════════════════════════════════════════════════
+// 嫌疑用户
+// ════════════════════════════════════════════════════
+
+function fmtBytes(b) {
+  if (!b || b <= 0) return '0';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  let v = b;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return v.toFixed(i > 1 ? 1 : 0) + ' ' + units[i];
+}
+
+async function loadSuspects() {
+  const q = new URLSearchParams({
+    tenant: state.tenant,
+    window: $('#suspectWindow').value || '168h',
+  });
+  const rows = await api('/api/suspects?' + q);
+  const tbody = $('#suspectsTbody'); tbody.innerHTML = '';
+  if (!rows || !rows.length) {
+    tbody.innerHTML = '<tr><td colspan="10" class="empty-state">暂无上报数据或无嫌疑用户</td></tr>';
+    return;
+  }
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    const usageRatio = r.traffic_total > 0 ? (r.traffic_used / r.traffic_total * 100).toFixed(1) + '%' : '-';
+    const flags = '🚩'.repeat(r.red_flags) || '<span class="muted">—</span>';
+    tr.innerHTML = `
+      <td>${flags}</td>
+      <td>${escapeHTML(r.tenant)}</td>
+      <td class="mono copyable" data-copy="${escapeHTML(r.token)}" title="点击复制" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHTML(r.token)}</td>
+      <td>${escapeHTML(r.email || '-')}</td>
+      <td class="mono" style="text-align:right"><strong>${r.pull_count}</strong></td>
+      <td class="mono" style="text-align:right">${r.distinct_ips}</td>
+      <td class="mono" style="text-align:right">${r.distinct_uas}</td>
+      <td class="mono" style="text-align:right">${fmtBytes(r.traffic_used)}</td>
+      <td class="mono" style="text-align:right">${fmtBytes(r.traffic_total)}</td>
+      <td class="mono" style="text-align:right"><strong>${usageRatio}</strong></td>
+    `;
+    tbody.appendChild(tr);
+  }
+  bindCopyHandlers(tbody);
+}
+
+$('#suspectWindow').addEventListener('change', () => loadSuspects());
 
 // ════════════════════════════════════════════════════
 // 交互打磨:进度条 / 搜索高亮 / 快捷键 / 验证 / loading

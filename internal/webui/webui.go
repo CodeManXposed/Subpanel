@@ -147,6 +147,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/geoip", s.auth(http.HandlerFunc(s.apiGeoIPInfo)))
 	mux.Handle("/api/geoip/lookup", s.auth(http.HandlerFunc(s.apiGeoIPLookup)))
 
+	// 用户上报(v2board 外部调用,不走登录,用 secret key)
+	mux.HandleFunc("/api/report/", s.apiReport)
+	// 嫌疑用户分析(需登录)
+	mux.Handle("/api/suspects", s.auth(http.HandlerFunc(s.apiSuspects)))
+	mux.Handle("/api/user-reports", s.auth(http.HandlerFunc(s.apiUserReports)))
+
 	return mux
 }
 

@@ -214,6 +214,26 @@ func Open(path string, flushEvery time.Duration, flushSize int) (*Store, error) 
 	}
 	// 清理 v1 残留:cloud_cidrs 表(已被 xdb 替代)
 	_, _ = db.Exec("DROP TABLE IF EXISTS cloud_cidrs")
+	// user_reports 表(v2board 上报)
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS user_reports (
+		token             TEXT NOT NULL,
+		tenant            TEXT NOT NULL,
+		uuid              TEXT,
+		email             TEXT,
+		traffic_used      INTEGER NOT NULL DEFAULT 0,
+		traffic_total     INTEGER NOT NULL DEFAULT 0,
+		wallet_balance    INTEGER NOT NULL DEFAULT 0,
+		commission_balance INTEGER NOT NULL DEFAULT 0,
+		user_created_at   TEXT,
+		last_ip           TEXT,
+		last_ua           TEXT,
+		site_domain       TEXT,
+		report_count      INTEGER NOT NULL DEFAULT 0,
+		first_seen        INTEGER NOT NULL,
+		last_seen         INTEGER NOT NULL,
+		PRIMARY KEY(token, tenant)
+	)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_user_reports_tenant ON user_reports(tenant, last_seen)`)
 	s := &Store{
 		db:         db,
 		eventCh:    make(chan Event, 1024),
@@ -1189,4 +1209,144 @@ func (s *Store) CountDetectRules() (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM detect_rules`).Scan(&n)
 	return n, err
+}
+
+// ════════════════════════════════════════════════════════
+// user_reports: v2board 上报的用户流量/身份信息
+// ════════════════════════════════════════════════════════
+
+type UserReport struct {
+	Token             string `json:"token"`
+	Tenant            string `json:"tenant"`
+	UUID              string `json:"uuid"`
+	Email             string `json:"email"`
+	TrafficUsed       int64  `json:"traffic_used"`
+	TrafficTotal      int64  `json:"traffic_total"`
+	WalletBalance     int64  `json:"wallet_balance"`
+	CommissionBalance int64  `json:"commission_balance"`
+	UserCreatedAt     string `json:"user_created_at"`
+	LastIP            string `json:"last_ip"`
+	LastUA            string `json:"last_ua"`
+	SiteDomain        string `json:"site_domain"`
+	ReportCount       int64  `json:"report_count"`
+	FirstSeen         int64  `json:"first_seen"`
+	LastSeen          int64  `json:"last_seen"`
+}
+
+func (s *Store) UpsertUserReport(r UserReport) error {
+	now := time.Now().Unix()
+	_, err := s.db.Exec(`
+		INSERT INTO user_reports (token, tenant, uuid, email, traffic_used, traffic_total,
+			wallet_balance, commission_balance, user_created_at, last_ip, last_ua, site_domain,
+			report_count, first_seen, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+		ON CONFLICT(token, tenant) DO UPDATE SET
+			uuid=excluded.uuid, email=excluded.email,
+			traffic_used=excluded.traffic_used, traffic_total=excluded.traffic_total,
+			wallet_balance=excluded.wallet_balance, commission_balance=excluded.commission_balance,
+			user_created_at=excluded.user_created_at, last_ip=excluded.last_ip, last_ua=excluded.last_ua,
+			site_domain=excluded.site_domain,
+			report_count=report_count+1, last_seen=excluded.last_seen`,
+		r.Token, r.Tenant, r.UUID, r.Email, r.TrafficUsed, r.TrafficTotal,
+		r.WalletBalance, r.CommissionBalance, r.UserCreatedAt, r.LastIP, r.LastUA, r.SiteDomain,
+		now, now)
+	return err
+}
+
+func (s *Store) ListUserReports(tenant string) ([]UserReport, error) {
+	q := `SELECT token, tenant, uuid, email, traffic_used, traffic_total,
+		wallet_balance, commission_balance, user_created_at, last_ip, last_ua, site_domain,
+		report_count, first_seen, last_seen FROM user_reports`
+	var args []any
+	if tenant != "" {
+		q += ` WHERE tenant=?`
+		args = append(args, tenant)
+	}
+	q += ` ORDER BY last_seen DESC`
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UserReport
+	for rows.Next() {
+		var r UserReport
+		if err := rows.Scan(&r.Token, &r.Tenant, &r.UUID, &r.Email, &r.TrafficUsed, &r.TrafficTotal,
+			&r.WalletBalance, &r.CommissionBalance, &r.UserCreatedAt, &r.LastIP, &r.LastUA, &r.SiteDomain,
+			&r.ReportCount, &r.FirstSeen, &r.LastSeen); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// SuspectRow 是嫌疑分析结果:user_report + events 聚合
+type SuspectRow struct {
+	UserReport
+	PullCount   int `json:"pull_count"`
+	DistinctIPs int `json:"distinct_ips"`
+	DistinctUAs int `json:"distinct_uas"`
+	RedFlags    int `json:"red_flags"`
+}
+
+func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, error) {
+	// 先拿 user_reports
+	reports, err := s.ListUserReports(tenant)
+	if err != nil {
+		return nil, err
+	}
+	if len(reports) == 0 {
+		return nil, nil
+	}
+
+	sinceMs := since.UnixMilli()
+	out := make([]SuspectRow, 0, len(reports))
+	for _, r := range reports {
+		var pullCount, distinctIPs, distinctUAs int
+		// events 表里按 token_hash + tenant 聚合
+		row := s.db.QueryRow(`
+			SELECT COUNT(*), COUNT(DISTINCT client_ip), COUNT(DISTINCT ua)
+			FROM events WHERE token_hash=? AND tenant=? AND ts>=?`,
+			r.Token, r.Tenant, sinceMs)
+		_ = row.Scan(&pullCount, &distinctIPs, &distinctUAs)
+
+		// 红旗计算
+		flags := 0
+		usageRatio := float64(0)
+		if r.TrafficTotal > 0 {
+			usageRatio = float64(r.TrafficUsed) / float64(r.TrafficTotal)
+		}
+		if usageRatio < 0.05 && pullCount >= 10 {
+			flags++
+		}
+		if r.TrafficUsed == 0 && pullCount >= 5 {
+			flags++
+		}
+		if distinctIPs >= 5 {
+			flags++
+		}
+		if distinctUAs >= 3 {
+			flags++
+		}
+
+		out = append(out, SuspectRow{
+			UserReport:  r,
+			PullCount:   pullCount,
+			DistinctIPs: distinctIPs,
+			DistinctUAs: distinctUAs,
+			RedFlags:    flags,
+		})
+	}
+
+	// 按红旗数降序,同分按 pull_count 降序
+	for i := range out {
+		for j := i + 1; j < len(out); j++ {
+			if out[j].RedFlags > out[i].RedFlags ||
+				(out[j].RedFlags == out[i].RedFlags && out[j].PullCount > out[i].PullCount) {
+				out[i], out[j] = out[j], out[i]
+			}
+		}
+	}
+	return out, nil
 }
