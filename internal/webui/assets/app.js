@@ -1090,3 +1090,170 @@ $('#passthroughToggle')?.addEventListener('change', async (e) => {
     toast((r && r.error) || '失败', 'error');
   }
 });
+
+// ════════════════════════════════════════════════════
+// 交互打磨:进度条 / 搜索高亮 / 快捷键 / 验证 / loading
+// ════════════════════════════════════════════════════
+
+// ─── 1. 全局进度条(monkey-patch fetch) ───
+(function () {
+  const bar = document.getElementById('progressBar');
+  let inflight = 0;
+  const origFetch = window.fetch;
+  window.fetch = function (...args) {
+    inflight++;
+    if (inflight === 1) { bar.className = 'progress-bar loading'; bar.style.width = ''; }
+    return origFetch.apply(this, args).finally(() => {
+      inflight--;
+      if (inflight <= 0) {
+        inflight = 0;
+        bar.classList.remove('loading');
+        bar.classList.add('done');
+        setTimeout(() => { bar.className = 'progress-bar'; bar.style.width = '0'; }, 500);
+      }
+    });
+  };
+})();
+
+// ─── 2. 搜索高亮:事件卡片内 IP/Token 匹配词标亮 ───
+(function () {
+  const origLoadEvents = window.loadEvents || loadEvents;
+  // 重写 loadEvents 加高亮后处理
+  const _origLoadEventsRef = loadEvents;
+  const patchedLoadEvents = async function (append) {
+    await _origLoadEventsRef(append);
+    highlightEventCards();
+  };
+  // 替换全局引用
+  window.loadEvents = patchedLoadEvents;
+  // 同时 patch 查询按钮
+  $('#evQuery').removeEventListener('click', null); // 无法直接移除,改用下面的重绑
+  $('#evQuery').addEventListener('click', () => patchedLoadEvents(false), true);
+
+  function highlightEventCards() {
+    const ipVal = ($('#evIP').value || '').trim();
+    const tokVal = ($('#evToken').value || '').trim();
+    if (!ipVal && !tokVal) return;
+    const list = $('#evList');
+    if (!list) return;
+    const keywords = [];
+    if (ipVal) keywords.push(ipVal);
+    if (tokVal) keywords.push(tokVal);
+    // walk text nodes inside ev-cards
+    const walker = document.createTreeWalker(list, NodeFilter.SHOW_TEXT);
+    const hits = [];
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      for (const kw of keywords) {
+        if (node.nodeValue && node.nodeValue.includes(kw)) {
+          hits.push({ node, kw });
+          break;
+        }
+      }
+    }
+    for (const { node, kw } of hits) {
+      const parent = node.parentNode;
+      if (!parent || parent.tagName === 'MARK') continue;
+      const parts = node.nodeValue.split(kw);
+      const frag = document.createDocumentFragment();
+      parts.forEach((p, i) => {
+        if (i > 0) {
+          const mark = document.createElement('mark');
+          mark.className = 'hl';
+          mark.textContent = kw;
+          frag.appendChild(mark);
+        }
+        if (p) frag.appendChild(document.createTextNode(p));
+      });
+      parent.replaceChild(frag, node);
+    }
+  }
+})();
+
+// ─── 3. 键盘快捷键 ───
+document.addEventListener('keydown', (e) => {
+  // 忽略:在 input/textarea/select 中时只响应 Esc
+  const inInput = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
+
+  // Esc 关弹窗
+  if (e.key === 'Escape') {
+    const modals = ['#tenantModal', '#ruleModal'];
+    for (const sel of modals) {
+      const m = document.querySelector(sel);
+      if (m && m.style.display === 'flex') {
+        m.style.display = 'none';
+        e.preventDefault();
+        return;
+      }
+    }
+    // Esc 还可以 blur 当前输入框
+    if (inInput) { document.activeElement.blur(); e.preventDefault(); }
+    return;
+  }
+
+  if (inInput) return;
+
+  // R = 刷新当前 tab
+  if (e.key === 'r' || e.key === 'R') {
+    e.preventDefault();
+    $('#refreshBtn').click();
+    return;
+  }
+  // / = 聚焦事件搜索 IP 输入框(如果在事件页)
+  if (e.key === '/') {
+    const evTab = document.getElementById('tab-events');
+    if (evTab && evTab.classList.contains('active')) {
+      e.preventDefault();
+      $('#evIP').focus();
+    }
+    return;
+  }
+});
+
+// ─── 4. 表单验证:shake + 红框 ───
+function validateRequired(el, msg) {
+  if (!el.value.trim()) {
+    el.classList.add('input-error');
+    el.closest('form, .card, .modal-body, section')?.classList.add('shake');
+    toast(msg || '此项不能为空', 'error');
+    el.focus();
+    setTimeout(() => {
+      el.classList.remove('input-error');
+      el.closest('.shake')?.classList.remove('shake');
+    }, 800);
+    return false;
+  }
+  return true;
+}
+// 暴露给可能需要用的地方
+window.validateRequired = validateRequired;
+
+// ─── 5. 按钮 loading 态工具函数 ───
+function withLoading(btn, asyncFn) {
+  if (btn.classList.contains('loading')) return;
+  btn.classList.add('loading');
+  asyncFn().finally(() => btn.classList.remove('loading'));
+}
+window.withLoading = withLoading;
+
+// 给刷新按钮加 loading
+(function () {
+  const origClick = $('#refreshBtn').onclick;
+  $('#refreshBtn').addEventListener('click', function () {
+    withLoading(this, async () => {
+      const active = document.querySelector('.navlink.active');
+      if (active && TAB_LOADERS[active.dataset.tab]) {
+        await TAB_LOADERS[active.dataset.tab]();
+      }
+    });
+  }, true);
+})();
+
+// 给事件「查询」按钮加 loading
+(function () {
+  const btn = $('#evQuery');
+  if (!btn) return;
+  btn.addEventListener('click', function () {
+    withLoading(this, () => loadEvents(false));
+  }, true);
+})();
