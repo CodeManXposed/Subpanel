@@ -115,3 +115,11 @@ func (s *Server) apiUserReports(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, reports)
 }
+
+// GET /api/report-info — 返回上报接入信息(URL前缀 + secret),供机场管理页展示
+func (s *Server) apiReportInfo(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, map[string]any{
+		"report_secret": s.cfg.Admin.ReportSecret,
+		"admin_listen":  s.cfg.AdminListen,
+	})
+}

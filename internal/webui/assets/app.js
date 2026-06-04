@@ -780,6 +780,7 @@ async function loadTenantsTable() {
       <td>${statusBadge}</td>
       <td>
         <button data-act="edit" data-name="${escapeHTML(t.name)}">编辑</button>
+        <button data-act="report" data-name="${escapeHTML(t.name)}">接入代码</button>
         <button data-act="toggle" data-name="${escapeHTML(t.name)}">${t.enabled ? '禁用' : '启用'}</button>
         <button class="danger" data-act="del" data-name="${escapeHTML(t.name)}">删除</button>
       </td>
@@ -810,6 +811,10 @@ async function onTenantAction(act, name, list) {
   if (!t) return;
   if (act === 'edit') {
     openTenantModal(t);
+    return;
+  }
+  if (act === 'report') {
+    openReportCodeModal(t.name);
     return;
   }
   if (act === 'toggle') {
@@ -876,6 +881,81 @@ $('#tenantFormSave').addEventListener('click', async () => {
   } else {
     toast((r && r.error) || '失败', 'error');
   }
+});
+
+// ============ 上报接入代码弹窗 ============
+
+let _reportInfo = null;
+async function getReportInfo() {
+  if (!_reportInfo) _reportInfo = await api('/api/report-info');
+  return _reportInfo || {};
+}
+
+async function openReportCodeModal(tenantName) {
+  const info = await getReportInfo();
+  const baseUrl = location.origin;
+  const reportUrl = `${baseUrl}/api/report/${encodeURIComponent(tenantName)}`;
+  const secret = info.report_secret || '(未配置,请在 config.yml 的 admin.report_secret 设置)';
+
+  $('#reportCodeTitle').textContent = `上报接入 — ${tenantName}`;
+  $('#reportCodeURL').textContent = reportUrl;
+  $('#reportCodeURL').dataset.copy = reportUrl;
+  $('#reportCodeKey').textContent = secret;
+  $('#reportCodeKey').dataset.copy = secret;
+
+  const phpCode = `// ─── Sub-Panel 上报 (${tenantName}) ───
+$subPanelUrl = '${reportUrl}';
+$subPanelKey = '${secret}';
+
+$reportData = [
+    'token'              => $user->token,
+    'uuid'               => $user->uuid,
+    'email'              => $user->email,
+    'traffic_used'       => $user->u + $user->d,
+    'traffic_total'      => $user->transfer_enable,
+    'wallet_balance'     => $user->balance ?? 0,
+    'commission_balance' => $user->commission_balance ?? 0,
+    'user_created_at'    => (string)$user->created_at,
+    'ip'                 => $request->header('cf-connecting-ip')
+                            ?? explode(',', $request->header('x-forwarded-for', ''))[0]
+                            ?? $request->ip(),
+    'user_agent'         => $request->userAgent() ?? '',
+    'site_domain'        => $request->getHost(),
+];
+
+try {
+    \\Illuminate\\Support\\Facades\\Http::timeout(3)
+        ->withHeaders(['X-Report-Key' => $subPanelKey])
+        ->post($subPanelUrl, $reportData);
+} catch (\\Exception $e) {
+    // 静默失败,不影响订阅下发
+}
+// ─── Sub-Panel 上报结束 ───`;
+
+  $('#reportCodePHP').textContent = phpCode;
+  $('#reportCodeModal').dataset.php = phpCode;
+  $('#reportCodeModal').style.display = 'flex';
+  bindCopyHandlers($('#reportCodeModal'));
+}
+
+function closeReportCodeModal() { $('#reportCodeModal').style.display = 'none'; }
+$('#reportCodeClose').addEventListener('click', closeReportCodeModal);
+$('#reportCodeModal').addEventListener('click', e => {
+  if (e.target.id === 'reportCodeModal') closeReportCodeModal();
+});
+$('#reportCodeCopyBtn').addEventListener('click', async () => {
+  const code = $('#reportCodeModal').dataset.php || '';
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(code);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = code; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select(); document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    toast('已复制 PHP 代码', 'success');
+  } catch (e) { toast('复制失败', 'error'); }
 });
 
 // ============ 触发规则 ============
@@ -1259,7 +1339,7 @@ document.addEventListener('keydown', (e) => {
 
   // Esc 关弹窗
   if (e.key === 'Escape') {
-    const modals = ['#tenantModal', '#ruleModal'];
+    const modals = ['#tenantModal', '#ruleModal', '#reportCodeModal'];
     for (const sel of modals) {
       const m = document.querySelector(sel);
       if (m && m.style.display === 'flex') {
