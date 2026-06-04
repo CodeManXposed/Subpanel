@@ -1363,15 +1363,44 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 	}
 
 	sinceMs := since.UnixMilli()
+
+	// 一次性从 events 表批量聚合所有 token 的统计
+	tenantCond := ""
+	args := []any{sinceMs}
+	if tenant != "" {
+		tenantCond = " AND tenant=?"
+		args = append(args, tenant)
+	}
+	rows, err := s.db.Query(`
+		SELECT token_hash, COUNT(*), COUNT(DISTINCT client_ip), COUNT(DISTINCT ua)
+		FROM events WHERE ts>=?`+tenantCond+`
+		GROUP BY token_hash`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type evStats struct {
+		pullCount   int
+		distinctIPs int
+		distinctUAs int
+	}
+	statsMap := make(map[string]evStats, len(reports))
+	for rows.Next() {
+		var token string
+		var st evStats
+		if err := rows.Scan(&token, &st.pullCount, &st.distinctIPs, &st.distinctUAs); err != nil {
+			continue
+		}
+		statsMap[token] = st
+	}
+
 	out := make([]SuspectRow, 0, len(reports))
 	for _, r := range reports {
-		var pullCount, distinctIPs, distinctUAs int
-		// events 表里按 token_hash + tenant 聚合
-		row := s.db.QueryRow(`
-			SELECT COUNT(*), COUNT(DISTINCT client_ip), COUNT(DISTINCT ua)
-			FROM events WHERE token_hash=? AND tenant=? AND ts>=?`,
-			r.Token, r.Tenant, sinceMs)
-		_ = row.Scan(&pullCount, &distinctIPs, &distinctUAs)
+		st := statsMap[r.Token]
+		pullCount := st.pullCount
+		distinctIPs := st.distinctIPs
+		distinctUAs := st.distinctUAs
 
 		// 红旗计算
 		flags := 0
