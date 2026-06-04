@@ -4,7 +4,9 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -99,6 +101,7 @@ CREATE TABLE IF NOT EXISTS tenants (
     subscribe_path TEXT NOT NULL,
     upstream       TEXT NOT NULL,
     upstream_path  TEXT,
+    report_id      TEXT NOT NULL DEFAULT '',
     enabled        INTEGER NOT NULL DEFAULT 1,
     created_ts     INTEGER NOT NULL,
     updated_ts     INTEGER NOT NULL
@@ -214,6 +217,8 @@ func Open(path string, flushEvery time.Duration, flushSize int) (*Store, error) 
 	}
 	// 清理 v1 残留:cloud_cidrs 表(已被 xdb 替代)
 	_, _ = db.Exec("DROP TABLE IF EXISTS cloud_cidrs")
+	// 补 tenants.report_id 列(老库升级)
+	_, _ = db.Exec("ALTER TABLE tenants ADD COLUMN report_id TEXT NOT NULL DEFAULT ''")
 	// user_reports 表(v2board 上报)
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS user_reports (
 		token             TEXT NOT NULL,
@@ -1085,6 +1090,7 @@ type TenantRow struct {
 	SubscribePath string
 	Upstream      string
 	UpstreamPath  string
+	ReportID      string
 	Enabled       bool
 	CreatedTS     time.Time
 	UpdatedTS     time.Time
@@ -1101,17 +1107,24 @@ func (s *Store) UpsertTenant(t TenantRow) error {
 	if t.Enabled {
 		enabled = 1
 	}
+	// 自动生成 report_id(16 字节 hex = 32 字符）
+	if t.ReportID == "" {
+		b := make([]byte, 16)
+		_, _ = rand.Read(b)
+		t.ReportID = hex.EncodeToString(b)
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO tenants (name,host,subscribe_path,upstream,upstream_path,enabled,created_ts,updated_ts)
-		 VALUES (?,?,?,?,?,?,?,?)
+		`INSERT INTO tenants (name,host,subscribe_path,upstream,upstream_path,report_id,enabled,created_ts,updated_ts)
+		 VALUES (?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(name) DO UPDATE SET
 		   host=excluded.host,
 		   subscribe_path=excluded.subscribe_path,
 		   upstream=excluded.upstream,
 		   upstream_path=excluded.upstream_path,
+		   report_id=CASE WHEN tenants.report_id='' THEN excluded.report_id ELSE tenants.report_id END,
 		   enabled=excluded.enabled,
 		   updated_ts=excluded.updated_ts`,
-		t.Name, t.Host, t.SubscribePath, t.Upstream, t.UpstreamPath, enabled, created, now)
+		t.Name, t.Host, t.SubscribePath, t.Upstream, t.UpstreamPath, t.ReportID, enabled, created, now)
 	return err
 }
 
@@ -1124,7 +1137,7 @@ func (s *Store) DeleteTenant(name string) error {
 // ListTenants 全量返回(含禁用)。
 func (s *Store) ListTenants() ([]TenantRow, error) {
 	rows, err := s.db.Query(
-		`SELECT name,host,subscribe_path,upstream,COALESCE(upstream_path,''),enabled,created_ts,updated_ts
+		`SELECT name,host,subscribe_path,upstream,COALESCE(upstream_path,''),COALESCE(report_id,''),enabled,created_ts,updated_ts
 		 FROM tenants ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -1135,7 +1148,7 @@ func (s *Store) ListTenants() ([]TenantRow, error) {
 		var t TenantRow
 		var cts, uts int64
 		var en int
-		if err := rows.Scan(&t.Name, &t.Host, &t.SubscribePath, &t.Upstream, &t.UpstreamPath, &en, &cts, &uts); err != nil {
+		if err := rows.Scan(&t.Name, &t.Host, &t.SubscribePath, &t.Upstream, &t.UpstreamPath, &t.ReportID, &en, &cts, &uts); err != nil {
 			return nil, err
 		}
 		t.Enabled = en != 0
@@ -1146,11 +1159,55 @@ func (s *Store) ListTenants() ([]TenantRow, error) {
 	return out, rows.Err()
 }
 
+// GetTenantByReportID 通过 report_id 查找机场(上报接口用)。
+func (s *Store) GetTenantByReportID(reportID string) (TenantRow, error) {
+	var t TenantRow
+	var cts, uts int64
+	var en int
+	err := s.db.QueryRow(
+		`SELECT name,host,subscribe_path,upstream,COALESCE(upstream_path,''),report_id,enabled,created_ts,updated_ts
+		 FROM tenants WHERE report_id=?`, reportID).
+		Scan(&t.Name, &t.Host, &t.SubscribePath, &t.Upstream, &t.UpstreamPath, &t.ReportID, &en, &cts, &uts)
+	if err != nil {
+		return t, err
+	}
+	t.Enabled = en != 0
+	t.CreatedTS = time.UnixMilli(cts)
+	t.UpdatedTS = time.UnixMilli(uts)
+	return t, nil
+}
+
 // CountTenants 用于判断是否已迁移过 yaml 种子。
 func (s *Store) CountTenants() (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM tenants`).Scan(&n)
 	return n, err
+}
+
+// BackfillReportIDs 给所有 report_id 为空的 tenant 补随机 ID。
+func (s *Store) BackfillReportIDs() error {
+	rows, err := s.db.Query(`SELECT name FROM tenants WHERE report_id='' OR report_id IS NULL`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return err
+		}
+		names = append(names, n)
+	}
+	for _, name := range names {
+		b := make([]byte, 16)
+		_, _ = rand.Read(b)
+		id := hex.EncodeToString(b)
+		if _, err := s.db.Exec(`UPDATE tenants SET report_id=? WHERE name=?`, id, name); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ----- detect_rules -----

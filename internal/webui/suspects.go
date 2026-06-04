@@ -9,7 +9,8 @@ import (
 	"github.com/huabanmao168/SubPanel/internal/store"
 )
 
-// POST /api/report/{tenant} — v2board 上报接口(不走登录,用 secret key 鉴权)
+// POST /r/{report_id} — v2board 上报接口(不走登录,用 secret key 鉴权)
+// 挂在订阅网关(80端口),路径不暴露机场名,用随机 report_id。
 func (s *Server) apiReport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
@@ -26,10 +27,17 @@ func (s *Server) apiReport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 从路径提取 tenant: /api/report/{tenant}
-	tenant := strings.TrimPrefix(r.URL.Path, "/api/report/")
-	if tenant == "" || tenant == r.URL.Path {
-		writeJSON(w, 400, map[string]any{"error": "missing tenant in path"})
+	// 从路径提取 report_id: /r/{report_id}
+	reportID := strings.TrimPrefix(r.URL.Path, "/r/")
+	if reportID == "" || reportID == r.URL.Path {
+		writeJSON(w, 400, map[string]any{"error": "missing report_id in path"})
+		return
+	}
+
+	// 通过 report_id 查 tenant
+	tenant, err := s.st.GetTenantByReportID(reportID)
+	if err != nil {
+		writeJSON(w, 404, map[string]any{"error": "unknown report_id"})
 		return
 	}
 
@@ -57,7 +65,7 @@ func (s *Server) apiReport(w http.ResponseWriter, r *http.Request) {
 
 	report := store.UserReport{
 		Token:             body.Token,
-		Tenant:            tenant,
+		Tenant:            tenant.Name,
 		UUID:              body.UUID,
 		Email:             body.Email,
 		TrafficUsed:       body.TrafficUsed,
@@ -75,6 +83,11 @@ func (s *Server) apiReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// ReportHandler 返回挂在订阅网关(80端口)的上报路由 handler。
+func (s *Server) ReportHandler() http.Handler {
+	return http.HandlerFunc(s.apiReport)
 }
 
 // GET /api/suspects?tenant=xxx&window=24h — 嫌疑用户列表(需登录)
@@ -116,11 +129,12 @@ func (s *Server) apiUserReports(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, reports)
 }
 
-// GET /api/report-info — 返回上报接入信息(URL前缀 + secret),供机场管理页展示
+// GET /api/report-info — 返回上报接入信息(secret + 订阅网关监听地址),供机场管理页展示
 func (s *Server) apiReportInfo(w http.ResponseWriter, r *http.Request) {
 	secret, _ := s.st.GetMeta("report_secret")
 	writeJSON(w, 200, map[string]any{
 		"report_secret": secret,
+		"sub_listen":    s.cfg.Listen,
 	})
 }
 

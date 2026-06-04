@@ -814,7 +814,7 @@ async function onTenantAction(act, name, list) {
     return;
   }
   if (act === 'report') {
-    openReportCodeModal(t.name);
+    openReportCodeModal(t.name, t.report_id);
     return;
   }
   if (act === 'toggle') {
@@ -891,10 +891,16 @@ async function getReportInfo() {
   return _reportInfo || {};
 }
 
-async function openReportCodeModal(tenantName) {
+async function openReportCodeModal(tenantName, reportId) {
   const info = await getReportInfo();
-  const baseUrl = location.origin;
-  const reportUrl = `${baseUrl}/api/report/${encodeURIComponent(tenantName)}`;
+  // 上报走订阅网关(80端口),用同域名拼 report_id
+  // sub_listen 格式如 ":80" / "0.0.0.0:8080",提取端口
+  const subListen = info.sub_listen || ':80';
+  const subPort = subListen.split(':').pop();
+  const host = location.hostname;
+  const portBit = (subPort === '80' || subPort === '443') ? '' : ':' + subPort;
+  const proto = subPort === '443' ? 'https' : 'http';
+  const reportUrl = `${proto}://${host}${portBit}/r/${reportId}`;
   const secret = info.report_secret || '(未配置,请在设置页「上报密钥」中配置)';
 
   $('#reportCodeTitle').textContent = `上报接入 — ${tenantName}`;

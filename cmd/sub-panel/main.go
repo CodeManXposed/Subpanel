@@ -109,6 +109,11 @@ func main() {
 		logger.Error("初始化机场配置失败", "err", err)
 		os.Exit(1)
 	}
+	// 给老数据补 report_id
+	if err := st.BackfillReportIDs(); err != nil {
+		logger.Error("补 report_id 失败", "err", err)
+		os.Exit(1)
+	}
 	if err := loadTenantsFromDB(st, cfg); err != nil {
 		logger.Error("加载机场配置失败", "err", err)
 		os.Exit(1)
@@ -209,9 +214,13 @@ func main() {
 		logger.Warn("一键透传已开启 — 所有规则/黑白名单短路")
 	}
 
+	// admin server (先创建 ui,subMux 也要用它的 ReportHandler)
+	ui := webui.NewServer(cfg, st, bans, hasher, cloudMatcher, cloudFetcher, rulesMgr, gw, det, bl, logger)
+
 	// 反代 server
 	subMux := http.NewServeMux()
 	subMux.HandleFunc("/healthz", proxy.Healthz)
+	subMux.Handle("/r/", ui.ReportHandler()) // v2board 上报走 80 端口
 	subMux.Handle("/", gw)
 	subSrv := &http.Server{
 		Addr:              cfg.Listen,
@@ -222,8 +231,6 @@ func main() {
 		IdleTimeout:       90 * time.Second,
 	}
 
-	// admin server
-	ui := webui.NewServer(cfg, st, bans, hasher, cloudMatcher, cloudFetcher, rulesMgr, gw, det, bl, logger)
 	adminSrv := &http.Server{
 		Addr:              cfg.AdminListen,
 		Handler:           ui.Handler(),

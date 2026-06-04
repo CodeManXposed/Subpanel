@@ -148,7 +148,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/geoip/lookup", s.auth(http.HandlerFunc(s.apiGeoIPLookup)))
 
 	// 用户上报(v2board 外部调用,不走登录,用 secret key)
-	mux.HandleFunc("/api/report/", s.apiReport)
+	// 上报接口已移到订阅网关(80端口) /r/{report_id},不再挂管理面
 	// 嫌疑用户分析(需登录)
 	mux.Handle("/api/suspects", s.auth(http.HandlerFunc(s.apiSuspects)))
 	mux.Handle("/api/user-reports", s.auth(http.HandlerFunc(s.apiUserReports)))
@@ -600,6 +600,7 @@ func (s *Server) apiTenants(w http.ResponseWriter, r *http.Request) {
 			"subscribe_path": t.SubscribePath,
 			"upstream":       t.Upstream,
 			"upstream_path":  t.UpstreamPath,
+			"report_id":      t.ReportID,
 			"enabled":        t.Enabled,
 			"updated_ts":     t.UpdatedTS.Unix(),
 		})
