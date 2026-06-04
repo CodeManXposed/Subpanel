@@ -2,21 +2,27 @@
 
 ## 1. Sub-Panel 配置
 
-在 `config.yml` 的 `admin` 节下加一行：
+在面板「设置」页配置「上报密钥」即可，留空则不校验。
 
-```yaml
-admin:
-  report_secret: "你的密钥"   # 上报鉴权,留空则不校验
-```
+## 2. 获取上报地址
 
-## 2. v2board 代码修改
+进入面板「机场管理」→ 点击目标机场的「接入代码」按钮。弹窗会显示：
 
-在 `app/Http/Controllers/V1/Client/ClientController.php`（或 `app/Http/Controllers/Client/ClientController.php`）的订阅拉取方法中，`$serverService = new ServerService();` 之前加入：
+- **上报 URL**：`http://你的域名/r/{report_id}`（挂在订阅网关 80 端口）
+- **上报密钥**：面板设置页中配的 secret
+
+每个机场有独立的随机 `report_id`，URL 不暴露机场名。
+
+## 3. v2board 代码修改
+
+文件位置：`app/Http/Controllers/V1/Client/ClientController.php`
+
+在 `subscribe()` 方法内，`$userService->isAvailable($user)` 判定通过后、`$serverService = new ServerService();` **之前**插入（约第 22 行）：
 
 ```php
 // ─── Sub-Panel 上报 ───
-$subPanelUrl = 'https://你的面板地址/api/report/机场名';  // 机场名 = Sub-Panel 里的 tenant name
-$subPanelKey = '你的report_secret';
+$subPanelUrl = 'http://你的域名/r/你的report_id';  // 从面板「接入代码」弹窗复制
+$subPanelKey = '你的上报密钥';                       // 面板设置页配置
 
 $reportData = [
     'token'              => $user->token,
@@ -44,36 +50,32 @@ try {
 // ─── Sub-Panel 上报结束 ───
 ```
 
-## 3. 多机场部署
+## 4. 多机场部署
 
-每个机场的 v2board 实例配不同的 URL 路径：
+每个机场在面板里有独立的 `report_id`，各自从「接入代码」弹窗复制对应 URL 即可：
 
 ```
-机场A: POST https://panel.example.com/api/report/airport-a
-机场B: POST https://panel.example.com/api/report/airport-b
+机场A: POST http://panel.example.com/r/a1b2c3d4...
+机场B: POST http://panel.example.com/r/e5f6g7h8...
 ```
 
-路径末尾的名称必须与 Sub-Panel「机场管理」里配置的机场名一致。
+`上报密钥` 全局共用一个。
 
-`report_secret` 全局共用一个即可。
+## 5. 字段说明
 
-## 4. 字段说明
+- token (string): 用户订阅 token 原文（必填）
+- uuid (string): v2board 用户 UUID
+- email (string): 用户邮箱
+- traffic_used (int): 已用流量 bytes（u + d）
+- traffic_total (int): 总流量 bytes
+- wallet_balance (int): 钱包余额（分）
+- commission_balance (int): 佣金余额（分）
+- user_created_at (string): 用户注册时间
+- ip (string): 拉取时客户端 IP
+- user_agent (string): 拉取时 UA
+- site_domain (string): 请求来源域名
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| token | string | 用户订阅 token 原文（必填） |
-| uuid | string | v2board 用户 UUID |
-| email | string | 用户邮箱 |
-| traffic_used | int | 已用流量 bytes（u + d） |
-| traffic_total | int | 总流量 bytes |
-| wallet_balance | int | 钱包余额（分） |
-| commission_balance | int | 佣金余额（分） |
-| user_created_at | string | 用户注册时间 |
-| ip | string | 拉取时客户端 IP |
-| user_agent | string | 拉取时 UA |
-| site_domain | string | 请求来源域名 |
-
-## 5. 嫌疑分析
+## 6. 嫌疑分析
 
 Sub-Panel 面板「嫌疑用户」页会自动交叉分析：
 
