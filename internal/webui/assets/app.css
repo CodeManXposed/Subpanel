@@ -415,6 +415,20 @@ table tbody tr:hover { background: #f8fafc; }
 .copyable:hover { background: rgba(99,102,241,0.10); }
 .copyable.copied { background: rgba(34,197,94,0.18); color: #166534; }
 
+/* 嫌疑用户卡片:独立 IP 主指标 + 风险标签 */
+.sus-head { gap: 12px; }
+.sus-ip {
+  display: inline-flex; align-items: baseline; gap: 5px;
+  padding: 1px 10px 1px 8px; border-radius: 6px;
+  border-left: 3px solid transparent;
+  font-variant-numeric: tabular-nums;
+}
+.sus-ip .sus-ip-num { font-size: 20px; font-weight: 700; line-height: 1; letter-spacing: -0.01em; }
+.sus-ip .sus-ip-lbl { font-size: 10.5px; font-weight: 500; opacity: 0.7; }
+.sus-ip.sus-ip-lo  { background: rgba(107,114,128,0.08); border-left-color: #9ca3af; color: #4b5563; }
+.sus-ip.sus-ip-mid { background: rgba(245,158,11,0.12); border-left-color: #f59e0b; color: #92400e; }
+.sus-ip.sus-ip-hi  { background: rgba(239,68,68,0.12);  border-left-color: #ef4444; color: #991b1b; }
+
 .filter-bar {
   display: flex;
   flex-wrap: wrap;

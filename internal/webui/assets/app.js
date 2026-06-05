@@ -1267,16 +1267,24 @@ function renderSuspectCard(r) {
   card.className = 'ev-card';
   const tokenFull = r.token || '';
   const usageRatio = r.traffic_total > 0 ? (r.traffic_used / r.traffic_total * 100) : -1;
-  // 红旗 pill:按数量取色阶。0=灰、1-2=黄、3+=红
-  const flagCls = r.red_flags >= 3 ? 'red' : (r.red_flags >= 1 ? 'yellow' : 'empty');
-  const flagTxt = r.red_flags ? '🚩'.repeat(r.red_flags) : '无标记';
+  // 主指标:独立 IP 数。共享/倒卖最直观的信号 → 卡片头部大号数字,按数量上色阶
+  // <5 正常(灰) / 5-9 注意(琥珀) / 10+ 高危(红)
+  const ipCls = r.distinct_ips >= 10 ? 'sus-ip-hi' : (r.distinct_ips >= 5 ? 'sus-ip-mid' : 'sus-ip-lo');
+  // 风险等级标签:替代 emoji 红旗。0=正常 / 1-2=注意 N / 3+=高危 N
+  const riskCls = r.red_flags >= 3 ? 'red' : (r.red_flags >= 1 ? 'yellow' : 'empty');
+  const riskTxt = r.red_flags >= 3 ? '高危 ' + r.red_flags
+                : (r.red_flags >= 1 ? '注意 ' + r.red_flags : '正常');
   // 使用率 pill:<5% 红、<20% 黄、其余靛蓝
   const usageCls = usageRatio < 0 ? 'empty' : (usageRatio < 5 ? 'red' : (usageRatio < 20 ? 'yellow' : 'tag'));
   const usageTxt = usageRatio < 0 ? '使用率 -' : '使用率 ' + usageRatio.toFixed(1) + '%';
 
   card.innerHTML = `
-    <div class="ev-card-head">
-      <span class="pill ${flagCls}">${flagTxt}</span>
+    <div class="ev-card-head sus-head">
+      <span class="sus-ip ${ipCls}">
+        <span class="sus-ip-num">${r.distinct_ips}</span>
+        <span class="sus-ip-lbl">独立 IP</span>
+      </span>
+      <span class="pill ${riskCls}">${riskTxt}</span>
       <span class="ev-tenant mono">${escapeHTML(r.tenant)}</span>
       <span class="ev-spacer"></span>
       <span class="pill ${usageCls}">${usageTxt}</span>
@@ -1293,7 +1301,6 @@ function renderSuspectCard(r) {
     </div>
     <div class="ev-meta">
       <span class="ev-meta-item"><span class="ev-label">拉取</span><span class="mono"><strong>${r.pull_count}</strong></span></span>
-      <span class="ev-meta-item"><span class="ev-label">独立IP</span><span class="mono">${r.distinct_ips}</span></span>
       <span class="ev-meta-item"><span class="ev-label">独立UA</span><span class="mono">${r.distinct_uas}</span></span>
       <span class="ev-meta-item"><span class="ev-label">已用</span><span class="mono">${fmtBytes(r.traffic_used)}</span></span>
       <span class="ev-meta-item"><span class="ev-label">总量</span><span class="mono">${fmtBytes(r.traffic_total)}</span></span>
@@ -1346,7 +1353,7 @@ async function toggleSuspectDetail(card, r) {
       const loc = ip.country || '-';
       const isp = ip.isp || '-';
       const asn = ip.asn || '-';
-      const usage = ip.usage_type || '-';
+      const usage = ip.usage_type ? usageLabel(ip.usage_type) : '-';
       const last = new Date(ip.last_seen).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
       html += `<tr style="border-bottom:1px solid #f3f4f6"><td class="mono" style="padding:3px 6px">${escapeHTML(ip.ip)}</td><td style="padding:3px 6px">${escapeHTML(loc)}</td><td style="padding:3px 6px">${escapeHTML(isp)}</td><td class="mono" style="padding:3px 6px">${escapeHTML(asn)}</td><td style="padding:3px 6px">${escapeHTML(usage)}</td><td class="mono" style="text-align:right;padding:3px 6px">${ip.hit_count}</td><td class="mono" style="text-align:right;padding:3px 6px">${last}</td></tr>`;
     }
