@@ -54,7 +54,6 @@ func (s *Server) apiReport(w http.ResponseWriter, r *http.Request) {
 		IP                string   `json:"ip"`
 		UserAgent         string   `json:"user_agent"`
 		SiteDomain        string   `json:"site_domain"`
-		ConnectIPs        []string `json:"connect_ips"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, 400, map[string]any{"error": "bad json: " + err.Error()})
@@ -78,7 +77,6 @@ func (s *Server) apiReport(w http.ResponseWriter, r *http.Request) {
 		LastIP:            body.IP,
 		LastUA:            body.UserAgent,
 		SiteDomain:        body.SiteDomain,
-		ConnectIPs:        strings.Join(body.ConnectIPs, ","),
 	}
 	if err := s.st.UpsertUserReport(report); err != nil {
 		s.logger.Error("upsert user report", "err", err)
@@ -187,9 +185,6 @@ func (s *Server) apiSuspectDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	for i := range detail.IPs {
 		enrich(&detail.IPs[i])
-	}
-	for i := range detail.ConnectIPs {
-		enrich(&detail.ConnectIPs[i])
 	}
 	writeJSON(w, 200, detail)
 }

@@ -876,9 +876,8 @@ button.loading:not(.primary)::after {
 td.empty-state::before { display: inline-block; vertical-align: middle; margin: 0 8px 0 0; width: 20px; height: 20px; }
 
 /* ─── 嫌疑用户展开详情行 ─── */
-.suspect-detail-row td { background: #f8fafc; border-top: none; padding: 0; }
-.suspect-detail-row table th { font-weight: 500; }
-.suspect-detail-row table td { font-size: 11.5px; }
+.suspect-detail table th { font-weight: 500; }
+.suspect-detail table td { font-size: 11.5px; }
 
 /* ─── 快捷键提示 badge ─── */
 .kbd {

@@ -1297,7 +1297,6 @@ type UserReport struct {
 	LastIP            string `json:"last_ip"`
 	LastUA            string `json:"last_ua"`
 	SiteDomain        string `json:"site_domain"`
-	ConnectIPs        string `json:"connect_ips"`
 	ReportCount       int64  `json:"report_count"`
 	FirstSeen         int64  `json:"first_seen"`
 	LastSeen          int64  `json:"last_seen"`
@@ -1308,25 +1307,25 @@ func (s *Store) UpsertUserReport(r UserReport) error {
 	_, err := s.db.Exec(`
 		INSERT INTO user_reports (token, tenant, uuid, email, traffic_used, traffic_total,
 			wallet_balance, commission_balance, user_created_at, last_ip, last_ua, site_domain,
-			connect_ips, report_count, first_seen, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+			report_count, first_seen, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
 		ON CONFLICT(token, tenant) DO UPDATE SET
 			uuid=excluded.uuid, email=excluded.email,
 			traffic_used=excluded.traffic_used, traffic_total=excluded.traffic_total,
 			wallet_balance=excluded.wallet_balance, commission_balance=excluded.commission_balance,
 			user_created_at=excluded.user_created_at, last_ip=excluded.last_ip, last_ua=excluded.last_ua,
-			site_domain=excluded.site_domain, connect_ips=excluded.connect_ips,
+			site_domain=excluded.site_domain,
 			report_count=report_count+1, last_seen=excluded.last_seen`,
 		r.Token, r.Tenant, r.UUID, r.Email, r.TrafficUsed, r.TrafficTotal,
 		r.WalletBalance, r.CommissionBalance, r.UserCreatedAt, r.LastIP, r.LastUA, r.SiteDomain,
-		r.ConnectIPs, now, now)
+		now, now)
 	return err
 }
 
 func (s *Store) ListUserReports(tenant string) ([]UserReport, error) {
 	q := `SELECT token, tenant, uuid, email, traffic_used, traffic_total,
 		wallet_balance, commission_balance, user_created_at, last_ip, last_ua, site_domain,
-		COALESCE(connect_ips,''), report_count, first_seen, last_seen FROM user_reports`
+		report_count, first_seen, last_seen FROM user_reports`
 	var args []any
 	if tenant != "" {
 		q += ` WHERE tenant=?`
@@ -1343,7 +1342,7 @@ func (s *Store) ListUserReports(tenant string) ([]UserReport, error) {
 		var r UserReport
 		if err := rows.Scan(&r.Token, &r.Tenant, &r.UUID, &r.Email, &r.TrafficUsed, &r.TrafficTotal,
 			&r.WalletBalance, &r.CommissionBalance, &r.UserCreatedAt, &r.LastIP, &r.LastUA, &r.SiteDomain,
-			&r.ConnectIPs, &r.ReportCount, &r.FirstSeen, &r.LastSeen); err != nil {
+			&r.ReportCount, &r.FirstSeen, &r.LastSeen); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -1478,9 +1477,8 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 
 // SuspectDetail 单用户的 IP 列表和 UA 列表
 type SuspectDetail struct {
-	IPs        []IPDetail `json:"ips"`
-	UAs        []UADetail `json:"uas"`
-	ConnectIPs []IPDetail `json:"connect_ips"` // 节点侧连接 IP,实时 geoip 富化(HitCount/LastSeen 不适用,留 0)
+	IPs []IPDetail `json:"ips"`
+	UAs []UADetail `json:"uas"`
 }
 
 type IPDetail struct {
@@ -1547,30 +1545,6 @@ func (s *Store) QuerySuspectDetail(token, tenant string, since time.Time) (*Susp
 			continue
 		}
 		detail.UAs = append(detail.UAs, d)
-	}
-
-	// 连接 IP(节点侧):从 user_reports.connect_ips 取,split 成 IPDetail(仅 IP,富化在 handler 层)
-	{
-		ciArgs := []any{token}
-		ciCond := ""
-		if tenant != "" {
-			ciCond = " AND tenant=?"
-			ciArgs = append(ciArgs, tenant)
-		}
-		var connectIPs string
-		err := s.db.QueryRow(`SELECT COALESCE(connect_ips,'') FROM user_reports
-			WHERE token=?`+ciCond+` ORDER BY last_seen DESC LIMIT 1`, ciArgs...).Scan(&connectIPs)
-		if err == nil && connectIPs != "" {
-			seen := map[string]bool{}
-			for _, ip := range strings.Split(connectIPs, ",") {
-				ip = strings.TrimSpace(ip)
-				if ip == "" || seen[ip] {
-					continue
-				}
-				seen[ip] = true
-				detail.ConnectIPs = append(detail.ConnectIPs, IPDetail{IP: ip})
-			}
-		}
 	}
 
 	return detail, nil

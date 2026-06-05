@@ -913,25 +913,6 @@ async function openReportCodeModal(tenantName, reportId) {
 $subPanelUrl = '${reportUrl}';
 $subPanelKey = '${secret}';
 
-// 连接 IP：从设备数限制的在线 IP 缓存读（ALIVE_IP_USER_{用户id}）
-// 结构：['节点type+id' => ['aliveips' => ['1.2.3.4_5', ...], 'lastupdateAt' => ts], 'alive_ip' => count]
-$connectIps = [];
-$aliveData = \\\\Illuminate\\\\Support\\\\Facades\\\\Cache::get('ALIVE_IP_USER_' . $user->id);
-if (is_array($aliveData)) {
-    foreach ($aliveData as $nodeKey => $nodeData) {
-        if ($nodeKey === 'alive_ip' || !is_array($nodeData) || !isset($nodeData['aliveips'])) {
-            continue; // 跳过统计字段 alive_ip 和无效节点
-        }
-        foreach ($nodeData['aliveips'] as $ipNodeId) {
-            $ip = explode('_', $ipNodeId)[0]; // 元素是 "IP_节点ID"，取 IP 段
-            if ($ip !== '') {
-                $connectIps[$ip] = true; // 用 key 去重
-            }
-        }
-    }
-}
-$connectIps = array_values(array_keys($connectIps));
-
 $reportData = [
     'token'              => $user->token,
     'uuid'               => $user->uuid,
@@ -946,7 +927,6 @@ $reportData = [
                             ?? $request->ip(),
     'user_agent'         => $request->userAgent() ?? '',
     'site_domain'        => $request->getHost(),
-    'connect_ips'        => $connectIps, // 节点侧实际连接 IP 列表（去重）
 ];
 
 try {
@@ -1245,7 +1225,7 @@ async function loadSuspects() {
 
 function renderSuspects() {
   let rows = window._suspectsData || [];
-  const tbody = $('#suspectsTbody'); tbody.innerHTML = '';
+  const list = $('#suspectsList'); list.innerHTML = '';
 
   // 搜索过滤
   const search = ($('#suspectSearch').value || '').trim().toLowerCase();
@@ -1272,52 +1252,80 @@ function renderSuspects() {
   });
 
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="10" class="empty-state">暂无上报数据或无匹配结果</td></tr>';
+    list.innerHTML = '<div class="empty-state">暂无上报数据或无匹配结果</div>';
     return;
   }
   for (const r of rows) {
-    const tr = document.createElement('tr');
-    tr.style.cursor = 'pointer';
-    tr.title = '点击展开详情';
-    const usageRatio = r.traffic_total > 0 ? (r.traffic_used / r.traffic_total * 100).toFixed(1) + '%' : '-';
-    const flags = '🚩'.repeat(r.red_flags) || '<span class="muted">—</span>';
-    tr.innerHTML = `
-      <td>${flags}</td>
-      <td>${escapeHTML(r.tenant)}</td>
-      <td class="mono copyable" data-copy="${escapeHTML(r.token)}" title="点击复制" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHTML(r.token)}</td>
-      <td>${escapeHTML(r.email || '-')}</td>
-      <td class="mono" style="text-align:right"><strong>${r.pull_count}</strong></td>
-      <td class="mono" style="text-align:right">${r.distinct_ips}</td>
-      <td class="mono" style="text-align:right">${r.distinct_uas}</td>
-      <td class="mono" style="text-align:right">${fmtBytes(r.traffic_used)}</td>
-      <td class="mono" style="text-align:right">${fmtBytes(r.traffic_total)}</td>
-      <td class="mono" style="text-align:right"><strong>${usageRatio}</strong></td>
-    `;
-    tr.addEventListener('click', (e) => {
-      if (e.target.closest('.copyable')) return; // 不拦截复制
-      toggleSuspectDetail(tr, r);
-    });
-    tbody.appendChild(tr);
+    list.appendChild(renderSuspectCard(r));
   }
-  bindCopyHandlers(tbody);
+  bindCopyHandlers(list);
 }
 
-async function toggleSuspectDetail(tr, r) {
-  const existing = tr.nextElementSibling;
-  if (existing && existing.classList.contains('suspect-detail-row')) {
-    existing.remove();
+// 嫌疑用户卡片:与请求日志 .ev-card 同款样式
+function renderSuspectCard(r) {
+  const card = document.createElement('div');
+  card.className = 'ev-card';
+  const tokenFull = r.token || '';
+  const usageRatio = r.traffic_total > 0 ? (r.traffic_used / r.traffic_total * 100) : -1;
+  // 红旗 pill:按数量取色阶。0=灰、1-2=黄、3+=红
+  const flagCls = r.red_flags >= 3 ? 'red' : (r.red_flags >= 1 ? 'yellow' : 'empty');
+  const flagTxt = r.red_flags ? '🚩'.repeat(r.red_flags) : '无标记';
+  // 使用率 pill:<5% 红、<20% 黄、其余靛蓝
+  const usageCls = usageRatio < 0 ? 'empty' : (usageRatio < 5 ? 'red' : (usageRatio < 20 ? 'yellow' : 'tag'));
+  const usageTxt = usageRatio < 0 ? '使用率 -' : '使用率 ' + usageRatio.toFixed(1) + '%';
+
+  card.innerHTML = `
+    <div class="ev-card-head">
+      <span class="pill ${flagCls}">${flagTxt}</span>
+      <span class="ev-tenant mono">${escapeHTML(r.tenant)}</span>
+      <span class="ev-spacer"></span>
+      <span class="pill ${usageCls}">${usageTxt}</span>
+    </div>
+    <div class="ev-row-full">
+      <span class="ev-label">订阅</span>
+      ${tokenFull
+        ? `<span class="mono copyable ev-token ev-token-expand" data-copy="${escapeHTML(tokenFull)}" data-full="${escapeHTML(tokenFull)}" data-short="${escapeHTML(tokenShort(tokenFull))}" title="点击展开 / 再点复制">${escapeHTML(tokenShort(tokenFull))}</span>`
+        : '<span class="muted">(无)</span>'}
+    </div>
+    <div class="ev-row-full">
+      <span class="ev-label">邮箱</span>
+      ${r.email ? `<span class="mono">${escapeHTML(r.email)}</span>` : '<span class="muted">(无)</span>'}
+    </div>
+    <div class="ev-meta">
+      <span class="ev-meta-item"><span class="ev-label">拉取</span><span class="mono"><strong>${r.pull_count}</strong></span></span>
+      <span class="ev-meta-item"><span class="ev-label">独立IP</span><span class="mono">${r.distinct_ips}</span></span>
+      <span class="ev-meta-item"><span class="ev-label">独立UA</span><span class="mono">${r.distinct_uas}</span></span>
+      <span class="ev-meta-item"><span class="ev-label">已用</span><span class="mono">${fmtBytes(r.traffic_used)}</span></span>
+      <span class="ev-meta-item"><span class="ev-label">总量</span><span class="mono">${fmtBytes(r.traffic_total)}</span></span>
+    </div>
+    <div class="suspect-detail" style="display:none"></div>
+  `;
+  card.style.cursor = 'pointer';
+  card.title = '点击展开详情';
+  card.addEventListener('click', (e) => {
+    if (e.target.closest('.copyable')) return; // 不拦截复制
+    toggleSuspectDetail(card, r);
+  });
+  return card;
+}
+
+async function toggleSuspectDetail(card, r) {
+  const box = card.querySelector('.suspect-detail');
+  if (!box) return;
+  // 已展开 → 收起
+  if (box.style.display !== 'none' && box.dataset.loaded) {
+    box.style.display = 'none';
     return;
   }
   // 收起其他已展开的
-  document.querySelectorAll('.suspect-detail-row').forEach(el => el.remove());
+  document.querySelectorAll('#suspectsList .suspect-detail').forEach(el => {
+    if (el !== box) { el.style.display = 'none'; }
+  });
 
-  const detailRow = document.createElement('tr');
-  detailRow.className = 'suspect-detail-row';
-  const td = document.createElement('td');
-  td.colSpan = 10;
-  td.innerHTML = '<div style="padding:12px 16px;color:#6b7280;font-size:12px">加载中...</div>';
-  detailRow.appendChild(td);
-  tr.after(detailRow);
+  box.style.display = 'block';
+  if (box.dataset.loaded) return; // 已加载过,直接显示
+
+  box.innerHTML = '<div style="padding:8px 0;color:#6b7280;font-size:12px">加载中...</div>';
 
   const q = new URLSearchParams({
     token: r.token,
@@ -1325,25 +1333,9 @@ async function toggleSuspectDetail(tr, r) {
     window: $('#suspectWindow').value || '168h',
   });
   const detail = await api('/api/suspect-detail?' + q);
-  if (!detail) { td.innerHTML = '<div style="padding:12px 16px;color:#ef4444">加载失败</div>'; return; }
+  if (!detail) { box.innerHTML = '<div style="padding:8px 0;color:#ef4444">加载失败</div>'; return; }
 
-  let html = '<div style="padding:12px 16px;display:grid;grid-template-columns:1fr 1fr;gap:16px">';
-
-  // 连接 IP(节点侧) — 含 geoip 位置富化
-  const connIPs = detail.connect_ips || [];
-  if (connIPs.length) {
-    html += '<div style="grid-column:1/-1;margin-bottom:4px"><div style="font-weight:600;font-size:12px;margin-bottom:6px;color:#374151">连接 IP (节点侧, ' + connIPs.length + ')</div>';
-    html += '<table style="width:100%;font-size:11.5px;border-collapse:collapse">';
-    html += '<tr style="color:#6b7280;border-bottom:1px solid #e5e7eb"><th style="text-align:left;padding:2px 6px">IP</th><th style="text-align:left;padding:2px 6px">位置</th><th style="text-align:left;padding:2px 6px">ISP</th><th style="text-align:left;padding:2px 6px">ASN</th><th style="text-align:left;padding:2px 6px">类型</th></tr>';
-    for (const ip of connIPs) {
-      const loc = ip.country || '-';
-      const isp = ip.isp || '-';
-      const asn = ip.asn || '-';
-      const usage = ip.usage_type || '-';
-      html += `<tr style="border-bottom:1px solid #f3f4f6"><td class="mono" style="padding:3px 6px">${escapeHTML(ip.ip)}</td><td style="padding:3px 6px">${escapeHTML(loc)}</td><td style="padding:3px 6px">${escapeHTML(isp)}</td><td class="mono" style="padding:3px 6px">${escapeHTML(asn)}</td><td style="padding:3px 6px">${escapeHTML(usage)}</td></tr>`;
-    }
-    html += '</table></div>';
-  }
+  let html = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:10px;padding-top:10px;border-top:1px dashed var(--border)">';
 
   // IP 列表
   html += '<div><div style="font-weight:600;font-size:12px;margin-bottom:6px;color:#374151">IP 列表 (' + (detail.ips||[]).length + ')</div>';
@@ -1375,7 +1367,8 @@ async function toggleSuspectDetail(tr, r) {
   } else { html += '<div style="color:#9ca3af;font-size:11px">无记录</div>'; }
   html += '</div></div>';
 
-  td.innerHTML = html;
+  box.innerHTML = html;
+  box.dataset.loaded = '1';
 }
 
 $('#suspectWindow').addEventListener('change', () => loadSuspects());

@@ -321,16 +321,7 @@
           <p class="muted" style="margin:0 0 12px">
             基于 v2board 上报的流量数据 × 订阅拉取行为交叉分析。🚩 越多越可疑。支持顶栏机场筛选。
           </p>
-          <div class="datatable">
-            <table>
-              <thead><tr>
-                <th>🚩</th><th>机场</th><th>Token</th><th>邮箱</th>
-                <th>拉取次数</th><th>独立IP</th><th>独立UA</th>
-                <th>已用流量</th><th>总流量</th><th>使用率</th>
-              </tr></thead>
-              <tbody id="suspectsTbody"></tbody>
-            </table>
-          </div>
+          <div id="suspectsList" class="ev-list"></div>
         </div>
       </section>
 

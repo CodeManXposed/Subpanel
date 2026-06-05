@@ -24,25 +24,6 @@
 $subPanelUrl = 'http://你的域名/r/你的report_id';  // 从面板「接入代码」弹窗复制
 $subPanelKey = '你的上报密钥';                       // 面板设置页配置
 
-// 连接 IP：从设备数限制的在线 IP 缓存读（ALIVE_IP_USER_{用户id}）
-// 结构：['节点type+id' => ['aliveips' => ['1.2.3.4_5', ...], 'lastupdateAt' => ts], 'alive_ip' => count]
-$connectIps = [];
-$aliveData = \Illuminate\Support\Facades\Cache::get('ALIVE_IP_USER_' . $user->id);
-if (is_array($aliveData)) {
-    foreach ($aliveData as $nodeKey => $nodeData) {
-        if ($nodeKey === 'alive_ip' || !is_array($nodeData) || !isset($nodeData['aliveips'])) {
-            continue; // 跳过统计字段 alive_ip 和无效节点
-        }
-        foreach ($nodeData['aliveips'] as $ipNodeId) {
-            $ip = explode('_', $ipNodeId)[0]; // 元素是 "IP_节点ID"，取 IP 段
-            if ($ip !== '') {
-                $connectIps[$ip] = true; // 用 key 去重
-            }
-        }
-    }
-}
-$connectIps = array_values(array_keys($connectIps));
-
 $reportData = [
     'token'              => $user->token,
     'uuid'               => $user->uuid,
@@ -57,7 +38,6 @@ $reportData = [
                             ?? $request->ip(),
     'user_agent'         => $request->userAgent() ?? '',
     'site_domain'        => $request->getHost(),
-    'connect_ips'        => $connectIps, // 节点侧实际连接 IP 列表（去重）
 ];
 
 try {
@@ -94,9 +74,6 @@ try {
 - ip (string): 拉取时客户端 IP
 - user_agent (string): 拉取时 UA
 - site_domain (string): 请求来源域名
-- connect_ips (string[]): 节点侧实际连接 IP 列表（去重，来自 `ALIVE_IP_USER_{用户id}` 缓存）
-
-> ⚠️ **connect_ips 时效**：该数据来自节点上报的在线 IP 缓存（TTL 120s）。订阅拉取的那一刻，若用户当前没有活跃连接（缓存为空或过期），`connect_ips` 会是空数组——这是正常的，连接IP表只在用户有活跃节点连接时才有数据。设备数限制功能需在节点侧开启上报，否则 `ALIVE_IP_USER_*` 缓存不存在。
 
 ## 6. 嫌疑分析
 
