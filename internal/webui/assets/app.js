@@ -1309,6 +1309,12 @@ async function toggleSuspectDetail(tr, r) {
 
   let html = '<div style="padding:12px 16px;display:grid;grid-template-columns:1fr 1fr;gap:16px">';
 
+  // 连接 IP(节点侧)
+  if (r.connect_ips) {
+    html += '<div style="grid-column:1/-1;margin-bottom:4px"><div style="font-weight:600;font-size:12px;margin-bottom:4px;color:#374151">连接 IP (节点侧)</div>';
+    html += '<div class="mono" style="font-size:11.5px;color:#1f2937">' + escapeHTML(r.connect_ips).split(',').join(' · ') + '</div></div>';
+  }
+
   // IP 列表
   html += '<div><div style="font-weight:600;font-size:12px;margin-bottom:6px;color:#374151">IP 列表 (' + (detail.ips||[]).length + ')</div>';
   if (detail.ips && detail.ips.length) {

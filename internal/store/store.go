@@ -238,6 +238,8 @@ func Open(path string, flushEvery time.Duration, flushSize int) (*Store, error) 
 		last_seen         INTEGER NOT NULL,
 		PRIMARY KEY(token, tenant)
 	)`)
+	// 新增列(兼容旧库)
+	_, _ = db.Exec(`ALTER TABLE user_reports ADD COLUMN connect_ips TEXT DEFAULT ''`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_user_reports_tenant ON user_reports(tenant, last_seen)`)
 	s := &Store{
 		db:         db,
@@ -1295,6 +1297,7 @@ type UserReport struct {
 	LastIP            string `json:"last_ip"`
 	LastUA            string `json:"last_ua"`
 	SiteDomain        string `json:"site_domain"`
+	ConnectIPs        string `json:"connect_ips"`
 	ReportCount       int64  `json:"report_count"`
 	FirstSeen         int64  `json:"first_seen"`
 	LastSeen          int64  `json:"last_seen"`
@@ -1305,25 +1308,25 @@ func (s *Store) UpsertUserReport(r UserReport) error {
 	_, err := s.db.Exec(`
 		INSERT INTO user_reports (token, tenant, uuid, email, traffic_used, traffic_total,
 			wallet_balance, commission_balance, user_created_at, last_ip, last_ua, site_domain,
-			report_count, first_seen, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+			connect_ips, report_count, first_seen, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
 		ON CONFLICT(token, tenant) DO UPDATE SET
 			uuid=excluded.uuid, email=excluded.email,
 			traffic_used=excluded.traffic_used, traffic_total=excluded.traffic_total,
 			wallet_balance=excluded.wallet_balance, commission_balance=excluded.commission_balance,
 			user_created_at=excluded.user_created_at, last_ip=excluded.last_ip, last_ua=excluded.last_ua,
-			site_domain=excluded.site_domain,
+			site_domain=excluded.site_domain, connect_ips=excluded.connect_ips,
 			report_count=report_count+1, last_seen=excluded.last_seen`,
 		r.Token, r.Tenant, r.UUID, r.Email, r.TrafficUsed, r.TrafficTotal,
 		r.WalletBalance, r.CommissionBalance, r.UserCreatedAt, r.LastIP, r.LastUA, r.SiteDomain,
-		now, now)
+		r.ConnectIPs, now, now)
 	return err
 }
 
 func (s *Store) ListUserReports(tenant string) ([]UserReport, error) {
 	q := `SELECT token, tenant, uuid, email, traffic_used, traffic_total,
 		wallet_balance, commission_balance, user_created_at, last_ip, last_ua, site_domain,
-		report_count, first_seen, last_seen FROM user_reports`
+		COALESCE(connect_ips,''), report_count, first_seen, last_seen FROM user_reports`
 	var args []any
 	if tenant != "" {
 		q += ` WHERE tenant=?`
@@ -1340,7 +1343,7 @@ func (s *Store) ListUserReports(tenant string) ([]UserReport, error) {
 		var r UserReport
 		if err := rows.Scan(&r.Token, &r.Tenant, &r.UUID, &r.Email, &r.TrafficUsed, &r.TrafficTotal,
 			&r.WalletBalance, &r.CommissionBalance, &r.UserCreatedAt, &r.LastIP, &r.LastUA, &r.SiteDomain,
-			&r.ReportCount, &r.FirstSeen, &r.LastSeen); err != nil {
+			&r.ConnectIPs, &r.ReportCount, &r.FirstSeen, &r.LastSeen); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -1434,6 +1437,28 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 			RedFlags:    flags,
 		})
 	}
+
+	// 按邮箱合并:同邮箱只保留最近的 token(last_seen 最大的)
+	emailMap := make(map[string]int, len(out)) // email -> index in merged
+	merged := make([]SuspectRow, 0, len(out))
+	for _, row := range out {
+		key := row.Email + "\x00" + row.Tenant
+		if row.Email == "" {
+			// 无邮箱不合并
+			merged = append(merged, row)
+			continue
+		}
+		if idx, exists := emailMap[key]; exists {
+			// 保留 last_seen 更大的
+			if row.LastSeen > merged[idx].LastSeen {
+				merged[idx] = row
+			}
+		} else {
+			emailMap[key] = len(merged)
+			merged = append(merged, row)
+		}
+	}
+	out = merged
 
 	// 按红旗数降序,同分按 pull_count 降序
 	for i := range out {

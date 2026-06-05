@@ -43,17 +43,18 @@ func (s *Server) apiReport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Token             string `json:"token"`
-		UUID              string `json:"uuid"`
-		Email             string `json:"email"`
-		TrafficUsed       int64  `json:"traffic_used"`
-		TrafficTotal      int64  `json:"traffic_total"`
-		WalletBalance     int64  `json:"wallet_balance"`
-		CommissionBalance int64  `json:"commission_balance"`
-		UserCreatedAt     string `json:"user_created_at"`
-		IP                string `json:"ip"`
-		UserAgent         string `json:"user_agent"`
-		SiteDomain        string `json:"site_domain"`
+		Token             string   `json:"token"`
+		UUID              string   `json:"uuid"`
+		Email             string   `json:"email"`
+		TrafficUsed       int64    `json:"traffic_used"`
+		TrafficTotal      int64    `json:"traffic_total"`
+		WalletBalance     int64    `json:"wallet_balance"`
+		CommissionBalance int64    `json:"commission_balance"`
+		UserCreatedAt     string   `json:"user_created_at"`
+		IP                string   `json:"ip"`
+		UserAgent         string   `json:"user_agent"`
+		SiteDomain        string   `json:"site_domain"`
+		ConnectIPs        []string `json:"connect_ips"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, 400, map[string]any{"error": "bad json: " + err.Error()})
@@ -77,6 +78,7 @@ func (s *Server) apiReport(w http.ResponseWriter, r *http.Request) {
 		LastIP:            body.IP,
 		LastUA:            body.UserAgent,
 		SiteDomain:        body.SiteDomain,
+		ConnectIPs:        strings.Join(body.ConnectIPs, ","),
 	}
 	if err := s.st.UpsertUserReport(report); err != nil {
 		s.logger.Error("upsert user report", "err", err)
