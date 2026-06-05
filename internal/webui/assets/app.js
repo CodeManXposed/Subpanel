@@ -913,6 +913,25 @@ async function openReportCodeModal(tenantName, reportId) {
 $subPanelUrl = '${reportUrl}';
 $subPanelKey = '${secret}';
 
+// 连接 IP：从设备数限制的在线 IP 缓存读（ALIVE_IP_USER_{用户id}）
+// 结构：['节点type+id' => ['aliveips' => ['1.2.3.4_5', ...], 'lastupdateAt' => ts], 'alive_ip' => count]
+$connectIps = [];
+$aliveData = \\\\Illuminate\\\\Support\\\\Facades\\\\Cache::get('ALIVE_IP_USER_' . $user->id);
+if (is_array($aliveData)) {
+    foreach ($aliveData as $nodeKey => $nodeData) {
+        if ($nodeKey === 'alive_ip' || !is_array($nodeData) || !isset($nodeData['aliveips'])) {
+            continue; // 跳过统计字段 alive_ip 和无效节点
+        }
+        foreach ($nodeData['aliveips'] as $ipNodeId) {
+            $ip = explode('_', $ipNodeId)[0]; // 元素是 "IP_节点ID"，取 IP 段
+            if ($ip !== '') {
+                $connectIps[$ip] = true; // 用 key 去重
+            }
+        }
+    }
+}
+$connectIps = array_values(array_keys($connectIps));
+
 $reportData = [
     'token'              => $user->token,
     'uuid'               => $user->uuid,
@@ -927,6 +946,7 @@ $reportData = [
                             ?? $request->ip(),
     'user_agent'         => $request->userAgent() ?? '',
     'site_domain'        => $request->getHost(),
+    'connect_ips'        => $connectIps, // 节点侧实际连接 IP 列表（去重）
 ];
 
 try {
@@ -1309,10 +1329,20 @@ async function toggleSuspectDetail(tr, r) {
 
   let html = '<div style="padding:12px 16px;display:grid;grid-template-columns:1fr 1fr;gap:16px">';
 
-  // 连接 IP(节点侧)
-  if (r.connect_ips) {
-    html += '<div style="grid-column:1/-1;margin-bottom:4px"><div style="font-weight:600;font-size:12px;margin-bottom:4px;color:#374151">连接 IP (节点侧)</div>';
-    html += '<div class="mono" style="font-size:11.5px;color:#1f2937">' + escapeHTML(r.connect_ips).split(',').join(' · ') + '</div></div>';
+  // 连接 IP(节点侧) — 含 geoip 位置富化
+  const connIPs = detail.connect_ips || [];
+  if (connIPs.length) {
+    html += '<div style="grid-column:1/-1;margin-bottom:4px"><div style="font-weight:600;font-size:12px;margin-bottom:6px;color:#374151">连接 IP (节点侧, ' + connIPs.length + ')</div>';
+    html += '<table style="width:100%;font-size:11.5px;border-collapse:collapse">';
+    html += '<tr style="color:#6b7280;border-bottom:1px solid #e5e7eb"><th style="text-align:left;padding:2px 6px">IP</th><th style="text-align:left;padding:2px 6px">位置</th><th style="text-align:left;padding:2px 6px">ISP</th><th style="text-align:left;padding:2px 6px">ASN</th><th style="text-align:left;padding:2px 6px">类型</th></tr>';
+    for (const ip of connIPs) {
+      const loc = ip.country || '-';
+      const isp = ip.isp || '-';
+      const asn = ip.asn || '-';
+      const usage = ip.usage_type || '-';
+      html += `<tr style="border-bottom:1px solid #f3f4f6"><td class="mono" style="padding:3px 6px">${escapeHTML(ip.ip)}</td><td style="padding:3px 6px">${escapeHTML(loc)}</td><td style="padding:3px 6px">${escapeHTML(isp)}</td><td class="mono" style="padding:3px 6px">${escapeHTML(asn)}</td><td style="padding:3px 6px">${escapeHTML(usage)}</td></tr>`;
+    }
+    html += '</table></div>';
   }
 
   // IP 列表

@@ -1478,8 +1478,9 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 
 // SuspectDetail 单用户的 IP 列表和 UA 列表
 type SuspectDetail struct {
-	IPs []IPDetail `json:"ips"`
-	UAs []UADetail `json:"uas"`
+	IPs        []IPDetail `json:"ips"`
+	UAs        []UADetail `json:"uas"`
+	ConnectIPs []IPDetail `json:"connect_ips"` // 节点侧连接 IP,实时 geoip 富化(HitCount/LastSeen 不适用,留 0)
 }
 
 type IPDetail struct {
@@ -1546,6 +1547,30 @@ func (s *Store) QuerySuspectDetail(token, tenant string, since time.Time) (*Susp
 			continue
 		}
 		detail.UAs = append(detail.UAs, d)
+	}
+
+	// 连接 IP(节点侧):从 user_reports.connect_ips 取,split 成 IPDetail(仅 IP,富化在 handler 层)
+	{
+		ciArgs := []any{token}
+		ciCond := ""
+		if tenant != "" {
+			ciCond = " AND tenant=?"
+			ciArgs = append(ciArgs, tenant)
+		}
+		var connectIPs string
+		err := s.db.QueryRow(`SELECT COALESCE(connect_ips,'') FROM user_reports
+			WHERE token=?`+ciCond+` ORDER BY last_seen DESC LIMIT 1`, ciArgs...).Scan(&connectIPs)
+		if err == nil && connectIPs != "" {
+			seen := map[string]bool{}
+			for _, ip := range strings.Split(connectIPs, ",") {
+				ip = strings.TrimSpace(ip)
+				if ip == "" || seen[ip] {
+					continue
+				}
+				seen[ip] = true
+				detail.ConnectIPs = append(detail.ConnectIPs, IPDetail{IP: ip})
+			}
+		}
 	}
 
 	return detail, nil
