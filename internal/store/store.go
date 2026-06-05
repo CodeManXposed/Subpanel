@@ -929,7 +929,8 @@ func (s *Store) PurgeEvents(ctx context.Context, tenant string) (int64, int64, e
 	evN, _ := evRes.RowsAffected()
 	inN, _ := inRes.RowsAffected()
 
-	// 释放磁盘空间
+	// 强制 WAL 合并回主库,再释放磁盘空间
+	_, _ = s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
 	_, _ = s.db.ExecContext(ctx, "VACUUM")
 
 	return evN, inN, nil
