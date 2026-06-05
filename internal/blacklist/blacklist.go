@@ -114,9 +114,47 @@ func IsOverseaCountry(iso, country string) bool {
 }
 
 // IsBrowser 简单判断 — Accept 头含 text/html。
-// 订阅客户端基本都发 */* 或不带,误伤面小。
+// 真浏览器打开订阅链接时 Accept 带 text/html;但部分订阅客户端
+//(如 clash-verge)底层 HTTP 也发 text/html,故需配合 UA 白名单豁免,
+// 见 Evaluate 中 !IsKnownSubClient(ua) 的判断。
 func IsBrowser(acceptHeader string) bool {
 	return strings.Contains(strings.ToLower(acceptHeader), "text/html")
+}
+
+// SubClientUAKeywords 常见订阅客户端 UA 关键字(小写,子串匹配)。
+// 命中任一即视为正常订阅客户端,即便 Accept 带 text/html 也不按浏览器直访拦。
+// 浏览器 UA(Mozilla/Chrome/Safari/Firefox/Edge)与这些关键字无交集,子串匹配安全。
+// 出现新客户端在这里加关键字即可。
+var SubClientUAKeywords = []string{
+	"clash",        // clash / clash-verge / clash-meta / clashx / ClashForAndroid / FlClash
+	"mihomo",       // mihomo / mihomo party
+	"v2ray",        // v2rayN / v2rayNG / v2rayU
+	"sing-box",     // sing-box
+	"singbox",      // 部分发不带连字符
+	"shadowrocket", // 小火箭
+	"shadowsocks",  // SS 系
+	"quantumult",   // Quantumult / Quantumult X
+	"surge",        // Surge
+	"loon",         // Loon
+	"stash",        // Stash
+	"neko",         // NekoBox / NekoRay
+	"hiddify",      // Hiddify
+	"streisand",    // Streisand
+	"surfboard",    // Surfboard
+}
+
+// IsKnownSubClient 判断 UA 是否命中已知订阅客户端关键字。空 UA 不豁免。
+func IsKnownSubClient(ua string) bool {
+	if ua == "" {
+		return false
+	}
+	low := strings.ToLower(ua)
+	for _, kw := range SubClientUAKeywords {
+		if strings.Contains(low, kw) {
+			return true
+		}
+	}
+	return false
 }
 
 // ISPHitKeyword 检查 ISP 字段是否包含任一关键字(子串、忽略大小写)。
@@ -141,10 +179,11 @@ func (m *Manager) ISPHitKeyword(isp string) (bool, string) {
 //   - isp:        GeoIP ISP 字段
 //   - isCloud:    云厂商命中标志(调用方查 cloudMatcher 后传入)
 //   - accept:     Accept 请求头
+//   - ua:         User-Agent 请求头(用于浏览器判定的订阅客户端豁免)
 //
 // 评估顺序:海外 → 云厂商 → CN-IDC → ISP 关键字 → 浏览器。任一命中即返回。
 // 顺序选择:粗→细,命中投毒后短路,省去后续 lookup。
-func (m *Manager) Evaluate(iso, country, usageType, isp string, isCloud bool, accept string) (bool, string) {
+func (m *Manager) Evaluate(iso, country, usageType, isp string, isCloud bool, accept, ua string) (bool, string) {
 	sn := m.Get()
 	if sn.OverseaEnabled && IsOverseaCountry(iso, country) {
 		c := iso
@@ -167,7 +206,9 @@ func (m *Manager) Evaluate(iso, country, usageType, isp string, isCloud bool, ac
 			return true, "bl_isp:" + kw
 		}
 	}
-	if sn.BrowserEnabled && IsBrowser(accept) {
+	// 浏览器直访:Accept 带 text/html 即疑似浏览器,但已知订阅客户端
+	// (clash-verge 等)底层也发 text/html,故 UA 命中白名单时豁免,只拦真浏览器。
+	if sn.BrowserEnabled && IsBrowser(accept) && !IsKnownSubClient(ua) {
 		return true, "bl_browser"
 	}
 	return false, ""

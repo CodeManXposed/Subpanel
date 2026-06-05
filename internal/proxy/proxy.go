@@ -270,7 +270,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			isCloud, _ = g.cloudLookup(pr.ClientIP)
 		}
 		accept := r.Header.Get("Accept")
-		if hit, tag := g.bl.Evaluate(iso, country, usageType, isp, isCloud, accept); hit {
+		if hit, tag := g.bl.Evaluate(iso, country, usageType, isp, isCloud, accept, pr.UA); hit {
 			g.respondFake(w, r, pr, tokenHash, []string{tag}, start)
 			return
 		}
