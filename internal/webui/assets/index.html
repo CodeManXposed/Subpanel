@@ -311,15 +311,15 @@
                 <option value="720h">30 天</option>
               </select>
               <select id="suspectSort" style="width:auto">
-                <option value="flags">按红旗数</option>
+                <option value="ips" selected>按独立IP</option>
+                <option value="uas">按独立UA</option>
                 <option value="pull">按拉取次数</option>
-                <option value="ips">按独立IP</option>
                 <option value="usage">按使用率(低→高)</option>
               </select>
             </div>
           </div>
           <p class="muted" style="margin:0 0 12px">
-            基于 v2board 上报的流量数据 × 订阅拉取行为交叉分析。🚩 越多越可疑。支持顶栏机场筛选。
+            基于 v2board 上报的流量数据 × 订阅拉取行为交叉分析。按独立 IP / UA / 拉取次数 / 使用率排序,自行研判。支持顶栏机场筛选。
           </p>
           <div id="suspectsList" class="ev-list"></div>
         </div>

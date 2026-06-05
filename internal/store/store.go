@@ -1356,7 +1356,6 @@ type SuspectRow struct {
 	PullCount   int `json:"pull_count"`
 	DistinctIPs int `json:"distinct_ips"`
 	DistinctUAs int `json:"distinct_uas"`
-	RedFlags    int `json:"red_flags"`
 }
 
 func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, error) {
@@ -1409,31 +1408,11 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 		distinctIPs := st.distinctIPs
 		distinctUAs := st.distinctUAs
 
-		// 红旗计算
-		flags := 0
-		usageRatio := float64(0)
-		if r.TrafficTotal > 0 {
-			usageRatio = float64(r.TrafficUsed) / float64(r.TrafficTotal)
-		}
-		if usageRatio < 0.05 && pullCount >= 10 {
-			flags++
-		}
-		if r.TrafficUsed == 0 && pullCount >= 5 {
-			flags++
-		}
-		if distinctIPs >= 5 {
-			flags++
-		}
-		if distinctUAs >= 3 {
-			flags++
-		}
-
 		out = append(out, SuspectRow{
 			UserReport:  r,
 			PullCount:   pullCount,
 			DistinctIPs: distinctIPs,
 			DistinctUAs: distinctUAs,
-			RedFlags:    flags,
 		})
 	}
 
@@ -1459,11 +1438,11 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 	}
 	out = merged
 
-	// 按红旗数降序,同分按 pull_count 降序
+	// 按独立 IP 降序,同分按 pull_count 降序(共享/倒卖最直观信号)
 	for i := range out {
 		for j := i + 1; j < len(out); j++ {
-			if out[j].RedFlags > out[i].RedFlags ||
-				(out[j].RedFlags == out[i].RedFlags && out[j].PullCount > out[i].PullCount) {
+			if out[j].DistinctIPs > out[i].DistinctIPs ||
+				(out[j].DistinctIPs == out[i].DistinctIPs && out[j].PullCount > out[i].PullCount) {
 				out[i], out[j] = out[j], out[i]
 			}
 		}

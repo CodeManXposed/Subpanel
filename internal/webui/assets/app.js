@@ -1241,14 +1241,14 @@ function renderSuspects() {
   const sort = $('#suspectSort').value;
   rows = [...rows].sort((a, b) => {
     if (sort === 'pull') return b.pull_count - a.pull_count;
-    if (sort === 'ips') return b.distinct_ips - a.distinct_ips;
+    if (sort === 'uas') return b.distinct_uas - a.distinct_uas || b.distinct_ips - a.distinct_ips;
     if (sort === 'usage') {
       const ra = a.traffic_total > 0 ? a.traffic_used / a.traffic_total : 2;
       const rb = b.traffic_total > 0 ? b.traffic_used / b.traffic_total : 2;
       return ra - rb; // 低使用率排前面
     }
-    // 默认: flags desc, pull desc
-    return b.red_flags - a.red_flags || b.pull_count - a.pull_count;
+    // 默认 + ips: 独立IP 降序,同分按拉取降序
+    return b.distinct_ips - a.distinct_ips || b.pull_count - a.pull_count;
   });
 
   if (!rows.length) {
@@ -1270,10 +1270,6 @@ function renderSuspectCard(r) {
   // 主指标:独立 IP 数。共享/倒卖最直观的信号 → 卡片头部大号数字,按数量上色阶
   // <5 正常(灰) / 5-9 注意(琥珀) / 10+ 高危(红)
   const ipCls = r.distinct_ips >= 10 ? 'sus-ip-hi' : (r.distinct_ips >= 5 ? 'sus-ip-mid' : 'sus-ip-lo');
-  // 风险等级标签:替代 emoji 红旗。0=正常 / 1-2=注意 N / 3+=高危 N
-  const riskCls = r.red_flags >= 3 ? 'red' : (r.red_flags >= 1 ? 'yellow' : 'empty');
-  const riskTxt = r.red_flags >= 3 ? '高危 ' + r.red_flags
-                : (r.red_flags >= 1 ? '注意 ' + r.red_flags : '正常');
   // 使用率 pill:<5% 红、<20% 黄、其余靛蓝
   const usageCls = usageRatio < 0 ? 'empty' : (usageRatio < 5 ? 'red' : (usageRatio < 20 ? 'yellow' : 'tag'));
   const usageTxt = usageRatio < 0 ? '使用率 -' : '使用率 ' + usageRatio.toFixed(1) + '%';
@@ -1284,7 +1280,6 @@ function renderSuspectCard(r) {
         <span class="sus-ip-num">${r.distinct_ips}</span>
         <span class="sus-ip-lbl">独立 IP</span>
       </span>
-      <span class="pill ${riskCls}">${riskTxt}</span>
       <span class="ev-tenant mono">${escapeHTML(r.tenant)}</span>
       <span class="ev-spacer"></span>
       <span class="pill ${usageCls}">${usageTxt}</span>
