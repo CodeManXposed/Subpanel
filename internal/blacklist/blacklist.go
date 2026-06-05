@@ -94,25 +94,21 @@ func (m *Manager) Update(s Snapshot) error {
 	return m.Reload()
 }
 
-// IsOverseaCountry 判断是否非中国(含港澳台)。iso 优先 ISO 码,空 = 未知。
+// IsOverseaCountry 判断是否非中国大陆。iso 优先 ISO 码,空 = 未知。
 // 未知一律视为海外(防 xdb 漏库被绕过)。
+// 注:港澳台按非 CN 算海外,符合"CN 以外全拦"的需求。
 func IsOverseaCountry(iso, country string) bool {
 	iso = strings.ToUpper(strings.TrimSpace(iso))
 	country = strings.TrimSpace(country)
 	if iso == "" && country == "" {
 		return true // 未知 = 当海外拒
 	}
-	// CN / HK / MO / TW 均视为"非海外"
-	switch iso {
-	case "CN", "HK", "MO", "TW":
+	if iso == "CN" {
 		return false
 	}
 	// 没有 ISO 码时用中文名兜底
-	if iso == "" {
-		switch country {
-		case "中国", "香港", "澳门", "台湾":
-			return false
-		}
+	if iso == "" && country == "中国" {
+		return false
 	}
 	return true
 }
