@@ -1453,11 +1453,13 @@ type SuspectDetail struct {
 }
 
 type IPDetail struct {
-	IP       string `json:"ip"`
-	Country  string `json:"country"`
-	ISP      string `json:"isp"`
-	HitCount int    `json:"hit_count"`
-	LastSeen int64  `json:"last_seen"` // unix ms
+	IP        string `json:"ip"`
+	Country   string `json:"country"`
+	ISP       string `json:"isp"`
+	ASN       string `json:"asn"`
+	UsageType string `json:"usage_type"`
+	HitCount  int    `json:"hit_count"`
+	LastSeen  int64  `json:"last_seen"` // unix ms
 }
 
 type UADetail struct {

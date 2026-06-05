@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/huabanmao168/SubPanel/internal/geoip"
 	"github.com/huabanmao168/SubPanel/internal/store"
 )
 
@@ -161,6 +162,24 @@ func (s *Server) apiSuspectDetail(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("query suspect detail", "err", err)
 		writeJSON(w, 500, map[string]any{"error": "query error"})
 		return
+	}
+	// 实时 geoip 富化:补省市 + ASN + UsageType
+	gi := geoip.Global()
+	for i := range detail.IPs {
+		if info := gi.Lookup(detail.IPs[i].IP); info != nil {
+			parts := []string{}
+			for _, p := range []string{info.Country, info.Province, info.City} {
+				if p != "" && p != "0" {
+					parts = append(parts, p)
+				}
+			}
+			detail.IPs[i].Country = strings.Join(parts, " · ")
+			if info.ISP != "" && info.ISP != "0" {
+				detail.IPs[i].ISP = info.ISP
+			}
+			detail.IPs[i].ASN = info.ASN
+			detail.IPs[i].UsageType = info.UsageType
+		}
 	}
 	writeJSON(w, 200, detail)
 }
