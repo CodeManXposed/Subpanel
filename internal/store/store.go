@@ -1439,6 +1439,10 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 			}
 		}
 	}
+	// 最多返回 top 100
+	if len(out) > 100 {
+		out = out[:100]
+	}
 	return out, nil
 }
 
