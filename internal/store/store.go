@@ -928,6 +928,10 @@ func (s *Store) PurgeEvents(ctx context.Context, tenant string) (int64, int64, e
 	_, _ = s.db.ExecContext(ctx, urQ, urArgs...)
 	evN, _ := evRes.RowsAffected()
 	inN, _ := inRes.RowsAffected()
+
+	// 释放磁盘空间
+	_, _ = s.db.ExecContext(ctx, "VACUUM")
+
 	return evN, inN, nil
 }
 
