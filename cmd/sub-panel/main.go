@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -197,6 +198,18 @@ func main() {
 		country := info.ISOCode
 		if country == "" {
 			country = info.Country
+		}
+		// ip2region 把港澳台 ISO 标为 CN,需要按中文名修正,
+		// 否则「禁海外」规则无法拦截港澳台。
+		if country == "CN" {
+			switch {
+			case strings.Contains(info.Country, "香港"):
+				country = "HK"
+			case strings.Contains(info.Country, "澳门"):
+				country = "MO"
+			case strings.Contains(info.Country, "台湾"):
+				country = "TW"
+			}
 		}
 		return country, info.UsageType, info.ISP
 	})
