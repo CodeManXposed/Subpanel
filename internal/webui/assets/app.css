@@ -428,6 +428,9 @@ table tbody tr:hover { background: #f8fafc; }
 .sus-ip.sus-ip-lo  { background: rgba(107,114,128,0.08); border-left-color: #9ca3af; color: #4b5563; }
 .sus-ip.sus-ip-mid { background: rgba(245,158,11,0.12); border-left-color: #f59e0b; color: #92400e; }
 .sus-ip.sus-ip-hi  { background: rgba(239,68,68,0.12);  border-left-color: #ef4444; color: #991b1b; }
+.sus-actions { padding: 6px 14px 2px; text-align: right; }
+.sus-resolve { font-size: 12px; padding: 3px 10px; border: 1px solid #d1d5db; border-radius: 4px; background: #f9fafb; color: #374151; cursor: pointer; transition: background .15s; }
+.sus-resolve:hover { background: #e0e7ff; border-color: #818cf8; color: #3730a3; }
 
 .filter-bar {
   display: flex;

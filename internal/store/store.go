@@ -1368,6 +1368,29 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 		return nil, nil
 	}
 
+	// 排除已处理 token
+	resolvedSet := make(map[string]bool)
+	resolvedRows, _ := s.db.Query(`SELECT token FROM resolved_tokens`)
+	if resolvedRows != nil {
+		defer resolvedRows.Close()
+		for resolvedRows.Next() {
+			var t string
+			if resolvedRows.Scan(&t) == nil {
+				resolvedSet[t] = true
+			}
+		}
+	}
+	filtered := reports[:0]
+	for _, r := range reports {
+		if !resolvedSet[r.Token] {
+			filtered = append(filtered, r)
+		}
+	}
+	reports = filtered
+	if len(reports) == 0 {
+		return nil, nil
+	}
+
 	sinceMs := since.UnixMilli()
 
 	// 一次性从 events 表批量聚合所有 token 的统计

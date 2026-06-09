@@ -1300,12 +1300,15 @@ function renderSuspectCard(r) {
       <span class="ev-meta-item"><span class="ev-label">已用</span><span class="mono">${fmtBytes(r.traffic_used)}</span></span>
       <span class="ev-meta-item"><span class="ev-label">总量</span><span class="mono">${fmtBytes(r.traffic_total)}</span></span>
     </div>
+    <div class="sus-actions">
+      ${tokenFull ? `<button class="sus-resolve" data-token="${escapeHTML(tokenFull)}" data-tenant="${escapeHTML(r.tenant || '')}">已处理</button>` : ''}
+    </div>
     <div class="suspect-detail" style="display:none"></div>
   `;
   card.style.cursor = 'pointer';
   card.title = '点击展开详情';
   card.addEventListener('click', (e) => {
-    if (e.target.closest('.copyable')) return; // 不拦截复制
+    if (e.target.closest('.copyable') || e.target.closest('.sus-resolve')) return;
     toggleSuspectDetail(card, r);
   });
   return card;
@@ -1376,6 +1379,19 @@ async function toggleSuspectDetail(card, r) {
 $('#suspectWindow').addEventListener('change', () => loadSuspects());
 $('#suspectSort').addEventListener('change', () => renderSuspects());
 $('#suspectSearch').addEventListener('input', () => renderSuspects());
+
+// 嫌疑卡片"已处理"按钮:事件委托
+$('#suspectsList').addEventListener('click', async (e) => {
+  const btn = e.target.closest('.sus-resolve');
+  if (!btn) return;
+  e.stopPropagation();
+  const token = btn.dataset.token;
+  const tenant = btn.dataset.tenant || '';
+  const note = prompt(`标记 token 为已处理(备注可选):\n\n${token}`, '');
+  if (note === null) return;
+  const r = await apiPost('/api/resolved/add', { token, tenant, note });
+  if (r && r.ok) loadSuspects();
+});
 
 // ════════════════════════════════════════════════════
 // 交互打磨:进度条 / 搜索高亮 / 快捷键 / 验证 / loading
