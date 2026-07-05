@@ -57,6 +57,14 @@ func TestParseRecord(t *testing.T) {
 	}
 }
 
+func TestParseRecord_CloudProviderOutsideISP(t *testing.T) {
+	raw := "中国|河北省|张家口市|阿里|CN|||||||||||||CN"
+	info := parseRecord(raw)
+	if info.CloudProvider != "aliyun" {
+		t.Errorf("cloud_provider: %q", info.CloudProvider)
+	}
+}
+
 func TestParseRecord_FamilyBroadband(t *testing.T) {
 	// 电信家宽用户
 	raw := "亚洲|中国|安徽|合肥|肥东|电信|117.47128|31.88525|340122|0551|230000|Asia/Shanghai|CNY|AS4134|MOB|22|CHXX0448|CN"

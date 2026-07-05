@@ -160,7 +160,14 @@ func parseRecord(raw string) *Info {
 		// 15: chxx_code(行政编码二级),跳过
 		ISOCode: get(len(parts) - 1), // 最后一个一般是 ISO2
 	}
-	info.CloudProvider = matchCloudProvider(info.ISP)
+	info.CloudProvider = matchCloudProvider(
+		info.ISP,
+		info.City,
+		info.Province,
+		info.Country,
+		info.ASN,
+		info.UsageType,
+	)
 	return info
 }
 
@@ -210,14 +217,16 @@ var cloudKeywords = []struct {
 	{"fastly", "fastly"},
 }
 
-func matchCloudProvider(isp string) string {
-	if isp == "" {
-		return ""
-	}
-	low := strings.ToLower(isp)
-	for _, kw := range cloudKeywords {
-		if strings.Contains(low, kw.keyword) {
-			return kw.provider
+func matchCloudProvider(fields ...string) string {
+	for _, field := range fields {
+		if field == "" {
+			continue
+		}
+		low := strings.ToLower(field)
+		for _, kw := range cloudKeywords {
+			if strings.Contains(low, kw.keyword) {
+				return kw.provider
+			}
 		}
 	}
 	return ""
