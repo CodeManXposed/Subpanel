@@ -124,6 +124,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/notifier/update", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 410, map[string]any{"error": "notifier removed"}) })))
 	mux.Handle("/api/test-notify", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 410, map[string]any{"error": "notifier removed"}) })))
 	mux.Handle("/api/auth/change_password", s.auth(http.HandlerFunc(s.apiChangePassword)))
+	mux.Handle("/api/settings/cdn", s.auth(http.HandlerFunc(s.apiCDNSettings)))
 	mux.Handle("/api/settings/passthrough", s.auth(http.HandlerFunc(s.apiPassthrough)))
 
 	// UA 规则已删除,改纯 IP 判断

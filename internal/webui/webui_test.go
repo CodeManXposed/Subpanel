@@ -38,6 +38,10 @@ func setup(t *testing.T) (*Server, *store.Store, *banlist.List) {
 			PasswordHash: string(pwdHash),
 			SessionTTL:   config.Duration(time.Hour),
 		},
+		RealIP: config.RealIP{
+			TrustHeaders: []string{"X-Real-IP", "X-Forwarded-For"},
+			TrustProxies: []string{"127.0.0.1"},
+		},
 		Tenants: []config.Tenant{{Name: "default", Host: "x", SubscribePath: "/sub/x", Upstream: "http://x"}},
 	}
 
@@ -132,6 +136,35 @@ func TestLoginAndAccessAPI(t *testing.T) {
 	}
 	if s.TotalEvents < 1 {
 		t.Errorf("expected at least 1 event, got %d", s.TotalEvents)
+	}
+}
+
+func TestCDNSettingsDiagnostic(t *testing.T) {
+	srv, _, _ := setup(t)
+	h := srv.Handler()
+	cookie := login(t, h)
+
+	req := httptest.NewRequest("GET", "/api/settings/cdn", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("X-Real-IP", "8.8.8.8")
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("want 200 got %d body=%s", w.Code, w.Body.String())
+	}
+	var out struct {
+		Diagnostic struct {
+			ClientIP     string `json:"client_ip"`
+			Source       string `json:"source"`
+			TrustedProxy bool   `json:"trusted_proxy"`
+		} `json:"diagnostic"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Diagnostic.ClientIP != "8.8.8.8" || out.Diagnostic.Source != "X-Real-IP" || !out.Diagnostic.TrustedProxy {
+		t.Fatalf("unexpected diagnostic: %+v", out.Diagnostic)
 	}
 }
 

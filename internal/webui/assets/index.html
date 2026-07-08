@@ -328,6 +328,22 @@
       <!-- 设置 -->
       <section id="tab-settings" class="tab">
         <div class="card">
+          <h3>前置 CDN / 真实 IP</h3>
+          <p class="muted" style="margin:0 0 12px">
+            Sub-Panel 建议放在 CDN 后面使用。CDN 回源到订阅网关时必须透传真实访客 IP,
+            否则短时间多设备、云厂商、频率规则都会只看到 CDN 节点 IP。
+          </p>
+          <div id="cdnSettingsBox" class="mono" style="background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;padding:12px;font-size:12px;line-height:1.7">
+            加载中…
+          </div>
+          <div style="margin-top:12px;display:grid;gap:8px">
+            <div class="muted"><strong>CDN 推荐配置</strong>: 回源地址填 <code>http://你的 SubPanel IP:18443</code>; 回源协议用 HTTP 即可,外层 HTTPS 交给 CDN 证书。</div>
+            <div class="muted"><strong>Header 要求</strong>: 优先传 <code>X-Real-IP</code>,同时保留 <code>X-Forwarded-For</code>; Cloudflare 可使用 <code>CF-Connecting-IP</code>。</div>
+            <div class="muted"><strong>安全边界</strong>: 只信任 <code>trust_proxies</code> 里的 CDN 回源 IP。不要把 <code>0.0.0.0/0</code> 加进去,否则任何人都能伪造真实 IP。</div>
+          </div>
+        </div>
+
+        <div class="card">
           <h3>上报密钥</h3>
           <p class="muted" style="margin:0 0 8px">v2board 上报接口鉴权用,留空则不校验。修改后立即生效,同步更新各机场「接入代码」里的密钥。</p>
           <div style="display:flex;gap:8px;align-items:center">

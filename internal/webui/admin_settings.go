@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/huabanmao168/SubPanel/internal/parser"
 )
 
 // apiChangePassword 改密。
@@ -87,4 +89,26 @@ func (s *Server) apiPassthrough(w http.ResponseWriter, r *http.Request) {
 		s.gw.SetPassthroughAll(body.Enabled)
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "enabled": body.Enabled})
+}
+
+// apiCDNSettings 返回 CDN 前置部署相关配置和当前请求的真实 IP 解析诊断。
+func (s *Server) apiCDNSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		writeJSON(w, 405, map[string]any{"error": "GET only"})
+		return
+	}
+	inspect := parser.InspectClientIP(r, &s.cfg.RealIP)
+	writeJSON(w, 200, map[string]any{
+		"real_ip": map[string]any{
+			"cloudflare":    s.cfg.RealIP.Cloudflare,
+			"trust_headers": s.cfg.RealIP.TrustHeaders,
+			"trust_proxies": s.cfg.RealIP.TrustProxies,
+		},
+		"diagnostic": inspect,
+		"notes": []string{
+			"RemoteAddr 必须属于 trust_proxies,SubPanel 才会信任 X-Real-IP / X-Forwarded-For / CF-Connecting-IP。",
+			"使用非 Cloudflare CDN 时,请把 CDN 回源 IP 段或固定回源代理 IP 写入 real_ip.trust_proxies。",
+			"若 client_ip 仍等于 remote_ip,说明当前请求没有通过可信代理头解析出真实用户 IP。",
+		},
+	})
 }

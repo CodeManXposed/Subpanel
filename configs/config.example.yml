@@ -15,10 +15,16 @@ storage:
   batch_flush_interval: 1s
   batch_flush_size: 100
 
-# 真实 IP 解析
+# 前置 CDN / 真实 IP 解析
+# Sub-Panel 推荐部署在 CDN 后面:
+#   客户端 → CDN(HTTPS 证书/防护) → Sub-Panel :18443(HTTP 回源) → V2Board 上游
+#
+# 只有 RemoteAddr 命中 trust_proxies 时,Sub-Panel 才会读取 trust_headers。
+# 不要把 0.0.0.0/0 加进 trust_proxies,否则公网用户可伪造 X-Forwarded-For。
 # - 如果你用 Cloudflare 当 CDN,把 cloudflare 设为 true,
 #   程序启动时会自动把 CF 全部 IP 段加进 trust_proxies,并优先读 CF-Connecting-IP。
-# - 如果是自建 nginx 反代,把反代机器 IP 填到 trust_proxies。
+# - 如果是其他 CDN / 自建 nginx 反代,把 CDN 回源 IP 段或反代机器 IP 填到 trust_proxies。
+# - CDN 面板里建议透传 X-Real-IP 和 X-Forwarded-For;管理面「设置」页可查看当前诊断。
 real_ip:
   cloudflare: false
   trust_headers:

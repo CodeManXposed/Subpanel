@@ -81,6 +81,45 @@ bash /opt/Sub-Panel/uninstall.sh --purge   # 完全卸载
 - `upstream`:上游 V2Board 地址(如 `https://panel.example.com`)
 - `upstream_path`:上游订阅路径(一般 `/api/v1/client/subscribe`)
 
+## 前置 CDN 部署
+
+推荐把 Sub-Panel 放在 CDN 后面,让用户只访问 CDN 域名:
+
+```text
+客户端 App → CDN(HTTPS/证书/抗扫) → Sub-Panel :18443 → V2Board 上游
+```
+
+CDN 站点建议:
+
+- 对外开启 HTTPS,证书绑定订阅域名。
+- 回源地址填 `http://<Sub-Panel 服务器 IP>:18443`。
+- 回源协议可用 HTTP,外层 TLS 交给 CDN;如果你的安全策略要求全链路 HTTPS,再在源站前加 Nginx/Caddy 终止 TLS。
+- 回源 Header 透传 `X-Real-IP` 和 `X-Forwarded-For`;Cloudflare 可使用 `CF-Connecting-IP`。
+- 不要让用户直接访问 V2Board 真实源站订阅地址,否则会绕过 Sub-Panel 规则。
+
+Sub-Panel 真实 IP 配置位于 `config.yml` 的 `real_ip`:
+
+```yaml
+real_ip:
+  cloudflare: false
+  trust_headers:
+    - "X-Real-IP"
+    - "X-Forwarded-For"
+  trust_proxies:
+    - "127.0.0.1"
+    - "::1"
+    - "你的 CDN 回源 IP 或 CIDR"
+```
+
+只有连接来源 `RemoteAddr` 命中 `trust_proxies` 时,Sub-Panel 才会信任 `trust_headers`。不要把 `0.0.0.0/0` 写进 `trust_proxies`,否则任意公网请求都能伪造真实 IP。
+
+管理面 → 设置 → **前置 CDN / 真实 IP** 会显示当前请求的诊断:
+
+- CDN 连接 IP 是否被信任。
+- 实际读取了哪个 Header。
+- 最终判定的 `client_ip`。
+- 当前 `trust_headers` / `trust_proxies` 配置。
+
 ## 本地构建
 
 ```bash

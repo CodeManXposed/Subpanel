@@ -42,6 +42,37 @@ func TestExtractClientIPFromHeader(t *testing.T) {
 	}
 }
 
+func TestInspectClientIPFromTrustedProxy(t *testing.T) {
+	r := mkReq(t, "example.com", "127.0.0.1:55555", map[string]string{
+		"X-Real-IP": "8.8.8.8",
+	})
+	rip := &config.RealIP{
+		TrustHeaders: []string{"X-Real-IP", "X-Forwarded-For"},
+		TrustProxies: []string{"127.0.0.1"},
+	}
+	got := InspectClientIP(r, rip)
+	if got.ClientIP != "8.8.8.8" || got.Source != "X-Real-IP" || !got.TrustedProxy {
+		t.Fatalf("unexpected inspect result: %+v", got)
+	}
+	if len(got.Headers) == 0 || !got.Headers[0].Selected {
+		t.Fatalf("header inspection should mark X-Real-IP selected: %+v", got.Headers)
+	}
+}
+
+func TestInspectClientIPUntrustedProxyIgnoresHeaders(t *testing.T) {
+	r := mkReq(t, "example.com", "9.9.9.9:55555", map[string]string{
+		"X-Real-IP": "8.8.8.8",
+	})
+	rip := &config.RealIP{
+		TrustHeaders: []string{"X-Real-IP"},
+		TrustProxies: []string{"127.0.0.1"},
+	}
+	got := InspectClientIP(r, rip)
+	if got.ClientIP != "9.9.9.9" || got.Source != "remote_addr" || got.TrustedProxy {
+		t.Fatalf("unexpected inspect result: %+v", got)
+	}
+}
+
 func TestExtractClientIPSkipsPrivateInXFF(t *testing.T) {
 	r := mkReq(t, "example.com", "127.0.0.1:55555", map[string]string{
 		"X-Forwarded-For": "10.0.0.1, 1.2.3.4",

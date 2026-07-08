@@ -152,7 +152,7 @@ const TAB_LOADERS = {
   'detect-rules': () => loadRulesTable(),
   'suspects': () => loadSuspects(),
   'tenants': () => loadTenantsTable(),
-  'settings': () => { loadSettings(); loadPassthrough(); loadReportSecret(); },
+  'settings': () => { loadSettings(); loadCDNSettings(); loadPassthrough(); loadReportSecret(); },
 };
 
 $$('.navlink').forEach(a => {
@@ -746,6 +746,43 @@ async function loadSettings() {
     paths: c.paths,
     faker: c.faker,
   }, null, 2);
+}
+
+function renderList(items) {
+  if (!items || !items.length) return '<span class="muted">未配置</span>';
+  return items.map(x => `<code>${escapeHTML(x)}</code>`).join(' ');
+}
+
+async function loadCDNSettings() {
+  const box = $('#cdnSettingsBox');
+  if (!box) return;
+  const r = await api('/api/settings/cdn');
+  if (!r || !r.real_ip || !r.diagnostic) {
+    box.innerHTML = '<span style="color:var(--danger)">读取 CDN 诊断失败</span>';
+    return;
+  }
+  const cfg = r.real_ip;
+  const d = r.diagnostic;
+  const headerRows = (d.headers || []).map(h => {
+    const mark = h.selected ? '✅' : '·';
+    const value = h.value ? escapeHTML(h.value) : '<span class="muted">空</span>';
+    return `<div>${mark} <code>${escapeHTML(h.name)}</code>: ${value} <span class="muted">(${escapeHTML(h.reason || '-')})</span></div>`;
+  }).join('') || '<div class="muted">当前请求没有可检查的真实 IP Header</div>';
+  const ok = d.trusted_proxy && d.client_ip && d.client_ip !== d.remote_ip;
+  const status = ok
+    ? '<span style="color:#16a34a;font-weight:700">已通过可信代理头识别真实 IP</span>'
+    : '<span style="color:#dc2626;font-weight:700">当前仍按连接 IP 处理</span>';
+  box.innerHTML = `
+    <div style="display:grid;gap:4px">
+      <div>状态: ${status}</div>
+      <div>Cloudflare 模式: <strong>${cfg.cloudflare ? '开启' : '关闭'}</strong></div>
+      <div>信任 Header: ${renderList(cfg.trust_headers)}</div>
+      <div>信任代理: ${renderList(cfg.trust_proxies)}</div>
+      <div>当前 RemoteAddr: <code>${escapeHTML(d.remote_addr || '-')}</code></div>
+      <div>当前 Remote IP: <code>${escapeHTML(d.remote_ip || '-')}</code> · 可信代理: <strong>${d.trusted_proxy ? '是' : '否'}</strong></div>
+      <div>最终 Client IP: <code>${escapeHTML(d.client_ip || '-')}</code> · 来源: <code>${escapeHTML(d.source || '-')}</code></div>
+      <div style="margin-top:6px;border-top:1px solid #e5e7eb;padding-top:6px">${headerRows}</div>
+    </div>`;
 }
 
 // ---- 工具(token hash 工具已删除,v2board 重置就失效) ----
