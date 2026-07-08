@@ -22,13 +22,13 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/huabanmao168/SubPanel/internal/banlist"
+	"github.com/huabanmao168/SubPanel/internal/blacklist"
 	"github.com/huabanmao168/SubPanel/internal/cloudip"
-	"github.com/huabanmao168/SubPanel/internal/geoip"
 	"github.com/huabanmao168/SubPanel/internal/config"
 	"github.com/huabanmao168/SubPanel/internal/detector"
 	"github.com/huabanmao168/SubPanel/internal/faker"
+	"github.com/huabanmao168/SubPanel/internal/geoip"
 	"github.com/huabanmao168/SubPanel/internal/proxy"
-	"github.com/huabanmao168/SubPanel/internal/blacklist"
 	"github.com/huabanmao168/SubPanel/internal/rules"
 	"github.com/huabanmao168/SubPanel/internal/slidingwin"
 	"github.com/huabanmao168/SubPanel/internal/store"
@@ -36,7 +36,7 @@ import (
 	"github.com/huabanmao168/SubPanel/internal/webui"
 )
 
-var Version = "0.1.0"
+var Version = "0.1.34"
 
 func main() {
 	if len(os.Args) >= 2 {
@@ -429,9 +429,9 @@ func loadDetectRulesFromDB(st *store.Store) ([]config.Rule, error) {
 			return nil, fmt.Errorf("规则 %s 反序列化失败: %w", r.Name, err)
 		}
 		out = append(out, config.Rule{
-			Name:     r.Name,
-			Desc:     r.Desc,
-			When:     when,
+			Name: r.Name,
+			Desc: r.Desc,
+			When: when,
 		})
 	}
 	return out, nil
