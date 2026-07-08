@@ -1350,7 +1350,7 @@ func (s *Store) ListUserReports(tenant string) ([]UserReport, error) {
 	return out, rows.Err()
 }
 
-// SuspectRow 是嫌疑分析结果:user_report + events 聚合
+// SuspectRow 是嫌疑分析结果:events 行为聚合 + 可选 user_report 画像。
 type SuspectRow struct {
 	UserReport
 	PullCount   int `json:"pull_count"`
@@ -1359,13 +1359,11 @@ type SuspectRow struct {
 }
 
 func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, error) {
-	// 先拿 user_reports
+	// 先拿 user_reports 作为画像补充。嫌疑判断本身不能依赖上游上报,
+	// 因为 SubPanel 处在 CDN -> SubPanel -> V2Board 的前置过滤位置。
 	reports, err := s.ListUserReports(tenant)
 	if err != nil {
 		return nil, err
-	}
-	if len(reports) == 0 {
-		return nil, nil
 	}
 
 	// 排除已处理 token
@@ -1380,6 +1378,7 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 			}
 		}
 	}
+
 	filtered := reports[:0]
 	for _, r := range reports {
 		if !resolvedSet[r.Token] {
@@ -1387,13 +1386,11 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 		}
 	}
 	reports = filtered
-	if len(reports) == 0 {
-		return nil, nil
-	}
 
 	sinceMs := since.UnixMilli()
 
-	// 一次性从 events 表批量聚合所有 token 的统计
+	// 一次性从 events 表聚合所有 token 的行为统计。即使 user_reports 为空,
+	// 也能按多 IP、多 UA、频率把嫌疑 token 列出来。
 	tenantCond := ""
 	args := []any{sinceMs}
 	if tenant != "" {
@@ -1401,9 +1398,9 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 		args = append(args, tenant)
 	}
 	rows, err := s.db.Query(`
-		SELECT token_hash, COUNT(*), COUNT(DISTINCT client_ip), COUNT(DISTINCT ua)
-		FROM events WHERE ts>=?`+tenantCond+`
-		GROUP BY token_hash`, args...)
+		SELECT token_hash, tenant, COUNT(*), COUNT(DISTINCT client_ip), COUNT(DISTINCT COALESCE(ua,'')), MAX(ts)
+		FROM events WHERE ts>=? AND token_hash<>''`+tenantCond+`
+		GROUP BY token_hash, tenant`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1413,20 +1410,61 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 		pullCount   int
 		distinctIPs int
 		distinctUAs int
+		lastSeen    int64
+		lastIP      string
+		lastUA      string
+		tenant      string
 	}
-	statsMap := make(map[string]evStats, len(reports))
+	statsMap := make(map[string]evStats)
 	for rows.Next() {
 		var token string
 		var st evStats
-		if err := rows.Scan(&token, &st.pullCount, &st.distinctIPs, &st.distinctUAs); err != nil {
+		if err := rows.Scan(&token, &st.tenant, &st.pullCount, &st.distinctIPs, &st.distinctUAs, &st.lastSeen); err != nil {
 			continue
 		}
-		statsMap[token] = st
+		if resolvedSet[token] {
+			continue
+		}
+		statsMap[st.tenant+"\x00"+token] = st
+	}
+	latestRows, err := s.db.Query(`
+		SELECT token_hash, tenant, client_ip, COALESCE(ua,'')
+		FROM (
+			SELECT token_hash, tenant, client_ip, ua,
+			       ROW_NUMBER() OVER (PARTITION BY token_hash, tenant ORDER BY ts DESC, id DESC) AS rn
+			FROM events WHERE ts>=? AND token_hash<>''`+tenantCond+`
+		) WHERE rn=1`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer latestRows.Close()
+	for latestRows.Next() {
+		var token, t, ip, ua string
+		if err := latestRows.Scan(&token, &t, &ip, &ua); err != nil {
+			continue
+		}
+		key := t + "\x00" + token
+		st, ok := statsMap[key]
+		if !ok {
+			continue
+		}
+		st.lastIP = ip
+		st.lastUA = ua
+		statsMap[key] = st
 	}
 
-	out := make([]SuspectRow, 0, len(reports))
+	out := make([]SuspectRow, 0, len(reports)+len(statsMap))
+	seen := make(map[string]bool, len(reports))
 	for _, r := range reports {
-		st := statsMap[r.Token]
+		key := r.Tenant + "\x00" + r.Token
+		st := statsMap[key]
+		seen[key] = true
+		if r.LastIP == "" {
+			r.LastIP = st.lastIP
+		}
+		if r.LastUA == "" {
+			r.LastUA = st.lastUA
+		}
 		pullCount := st.pullCount
 		distinctIPs := st.distinctIPs
 		distinctUAs := st.distinctUAs
@@ -1437,6 +1475,30 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 			DistinctIPs: distinctIPs,
 			DistinctUAs: distinctUAs,
 		})
+	}
+	for key, st := range statsMap {
+		if seen[key] {
+			continue
+		}
+		parts := strings.SplitN(key, "\x00", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		out = append(out, SuspectRow{
+			UserReport: UserReport{
+				Token:    parts[1],
+				Tenant:   parts[0],
+				LastIP:   st.lastIP,
+				LastUA:   st.lastUA,
+				LastSeen: st.lastSeen / 1000,
+			},
+			PullCount:   st.pullCount,
+			DistinctIPs: st.distinctIPs,
+			DistinctUAs: st.distinctUAs,
+		})
+	}
+	if len(out) == 0 {
+		return nil, nil
 	}
 
 	// 按邮箱合并:同邮箱只保留最近的 token(last_seen 最大的)

@@ -118,3 +118,80 @@ func TestSummary(t *testing.T) {
 		t.Errorf("unique tokens: %d", s.UniqueTokens)
 	}
 }
+
+func TestQuerySuspectsFromEventsWithoutReports(t *testing.T) {
+	st := newTestStore(t)
+	now := time.Now()
+	events := []Event{
+		{TS: now, Tenant: "t1", ClientIP: "1.1.1.1", UA: "clash", TokenHash: "tok-a", Action: "pass"},
+		{TS: now, Tenant: "t1", ClientIP: "2.2.2.2", UA: "shadowrocket", TokenHash: "tok-a", Action: "pass"},
+		{TS: now, Tenant: "t1", ClientIP: "2.2.2.2", UA: "shadowrocket", TokenHash: "tok-a", Action: "fake"},
+		{TS: now, Tenant: "t1", ClientIP: "3.3.3.3", UA: "clash", TokenHash: "tok-b", Action: "pass"},
+	}
+	for _, e := range events {
+		st.SubmitEvent(e)
+	}
+	time.Sleep(400 * time.Millisecond)
+
+	rows, err := st.QuerySuspects("t1", now.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("want 2 suspects, got %d: %+v", len(rows), rows)
+	}
+	if rows[0].Token != "tok-a" {
+		t.Fatalf("want tok-a first, got %+v", rows[0])
+	}
+	if rows[0].PullCount != 3 || rows[0].DistinctIPs != 2 || rows[0].DistinctUAs != 2 {
+		t.Fatalf("unexpected tok-a stats: %+v", rows[0])
+	}
+	if rows[0].Email != "" {
+		t.Fatalf("event-only suspect should not require report profile: %+v", rows[0])
+	}
+	if rows[0].LastIP != "2.2.2.2" || rows[0].LastUA != "shadowrocket" {
+		t.Fatalf("event-only suspect should expose latest ip/ua: %+v", rows[0])
+	}
+
+	if err := st.AddResolvedToken(context.Background(), "tok-a", "t1", "done"); err != nil {
+		t.Fatal(err)
+	}
+	rows, err = st.QuerySuspects("t1", now.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Token != "tok-b" {
+		t.Fatalf("resolved token should be hidden, got %+v", rows)
+	}
+}
+
+func TestQuerySuspectsEnrichesEventStatsWithReportProfile(t *testing.T) {
+	st := newTestStore(t)
+	now := time.Now()
+	if err := st.UpsertUserReport(UserReport{
+		Token:        "tok-a",
+		Tenant:       "t1",
+		Email:        "user@example.com",
+		TrafficUsed:  123,
+		TrafficTotal: 456,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st.SubmitEvent(Event{TS: now, Tenant: "t1", ClientIP: "1.1.1.1", UA: "clash", TokenHash: "tok-a", Action: "pass"})
+	st.SubmitEvent(Event{TS: now, Tenant: "t1", ClientIP: "2.2.2.2", UA: "clash", TokenHash: "tok-a", Action: "pass"})
+	time.Sleep(400 * time.Millisecond)
+
+	rows, err := st.QuerySuspects("t1", now.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("want 1 suspect, got %d: %+v", len(rows), rows)
+	}
+	if rows[0].Email != "user@example.com" || rows[0].TrafficTotal != 456 {
+		t.Fatalf("missing report profile: %+v", rows[0])
+	}
+	if rows[0].PullCount != 2 || rows[0].DistinctIPs != 2 {
+		t.Fatalf("missing event stats: %+v", rows[0])
+	}
+}
