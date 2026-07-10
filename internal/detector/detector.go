@@ -15,7 +15,7 @@ import (
 type Detector struct {
 	cfg         *config.DetectorCfg
 	rulesSnap   atomic.Pointer[[]config.Rule] // 热更:nil → 用 cfg.Rules
-	maxWindow   time.Duration
+	maxWindow   atomic.Int64
 	tokenFreq   *slidingwin.Counter
 	ipFreq      *slidingwin.Counter
 	tokenIPSet  *slidingwin.DistinctSet
@@ -55,16 +55,7 @@ func (d *Detector) SetDynamicIPWhitelist(fn func(string) bool) {
 }
 
 func New(cfg *config.DetectorCfg) (*Detector, error) {
-	// 找出最大窗口
-	maxWindow := time.Hour
-	for _, r := range cfg.Rules {
-		w := r.When
-		for _, c := range []*config.Cond{w.TokenFreq, w.IPFreq, w.TokenDistinctIPs, w.IPDistinctTokens} {
-			if c != nil && c.Window.Std() > maxWindow {
-				maxWindow = c.Window.Std()
-			}
-		}
-	}
+	maxWindow := rulesMaxWindow(cfg.Rules)
 	bucket := time.Minute
 	if maxWindow < 5*time.Minute {
 		bucket = 30 * time.Second
@@ -72,13 +63,13 @@ func New(cfg *config.DetectorCfg) (*Detector, error) {
 
 	d := &Detector{
 		cfg:         cfg,
-		maxWindow:   maxWindow,
 		tokenFreq:   slidingwin.NewCounter(bucket, maxWindow),
 		ipFreq:      slidingwin.NewCounter(bucket, maxWindow),
 		tokenIPSet:  slidingwin.NewDistinctSet(bucket, maxWindow),
 		ipTokenSet:  slidingwin.NewDistinctSet(bucket, maxWindow),
 		ipWhitelist: map[string]struct{}{},
 	}
+	d.maxWindow.Store(int64(maxWindow))
 
 	for _, ip := range cfg.Whitelist.IPs {
 		d.ipWhitelist[ip] = struct{}{}
@@ -87,7 +78,7 @@ func New(cfg *config.DetectorCfg) (*Detector, error) {
 	return d, nil
 }
 
-func (d *Detector) MaxWindow() time.Duration { return d.maxWindow }
+func (d *Detector) MaxWindow() time.Duration { return time.Duration(d.maxWindow.Load()) }
 
 // ResetAll 清空所有滑窗状态(tokenFreq/ipFreq/tokenIPSet/ipTokenSet)。
 // 配合"清空日志"使用,语义统一:用户视角一切归零。
@@ -248,15 +239,35 @@ func itoa(n int) string {
 	return string(buf[i:])
 }
 
-
 // SetRules 用 DB 来源的规则覆盖 yaml 静态规则,热生效。
-// 传 nil 或空 slice 会清空快照,detector 回退到 cfg.Rules。
+// nil 表示回退到 cfg.Rules;空 slice 表示禁用所有规则。
 func (d *Detector) SetRules(rs []config.Rule) {
 	if rs == nil {
 		d.rulesSnap.Store(nil)
-		return
+		rs = d.cfg.Rules
+	} else {
+		cp := make([]config.Rule, len(rs))
+		copy(cp, rs)
+		d.rulesSnap.Store(&cp)
+		rs = cp
 	}
-	cp := make([]config.Rule, len(rs))
-	copy(cp, rs)
-	d.rulesSnap.Store(&cp)
+	maxWindow := rulesMaxWindow(rs)
+	d.maxWindow.Store(int64(maxWindow))
+	d.tokenFreq.SetMaxWindow(maxWindow)
+	d.ipFreq.SetMaxWindow(maxWindow)
+	d.tokenIPSet.SetMaxWindow(maxWindow)
+	d.ipTokenSet.SetMaxWindow(maxWindow)
+}
+
+func rulesMaxWindow(rules []config.Rule) time.Duration {
+	maxWindow := time.Hour
+	for _, r := range rules {
+		w := r.When
+		for _, c := range []*config.Cond{w.TokenFreq, w.IPFreq, w.TokenDistinctIPs, w.IPDistinctTokens} {
+			if c != nil && c.Window.Std() > maxWindow {
+				maxWindow = c.Window.Std()
+			}
+		}
+	}
+	return maxWindow
 }

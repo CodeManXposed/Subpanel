@@ -2,7 +2,7 @@
 # 注释里 ${VAR} 仅作说明用,YAML 本身不展开变量。
 
 listen: "0.0.0.0:18443"          # 反代监听端口(对外订阅入口)
-admin_listen: "0.0.0.0:19090"    # 管理面监听端口
+admin_listen: "127.0.0.1:19090"  # 管理面默认仅本机,公网访问建议走 VPN/SSH 隧道
 
 # HMAC 盐文件,首次启动自动生成 32 字节随机
 hmac_salt_file: "/opt/Sub-Panel/data/salt"
@@ -34,21 +34,22 @@ real_ip:
     - "127.0.0.1"
     - "::1"
 
-# GeoIP(ip2region xdb 满载版,放 tmpfs 内存盘加速)
+# GeoIP(ip2region IPv4 xdb,放 tmpfs 后由进程加载到内存)
 geoip:
   xdb_path: "/tmp/sub-panel/ip2region.xdb"
+  asn_path: "/tmp/sub-panel/ip2asn-v4.tsv.gz"
 
-# 管理员账号(默认 admin/admin123456,装完务必登录改密)
-# 改密在管理面「设置」页,新哈希会写入 SQLite,不再读这里。
+# 管理员账号。install.sh 首装时会替换为随机密码对应的 bcrypt。
+# 手工部署可用 `sub-panel hashpwd <密码>` 生成哈希。
 admin:
   username: "admin"
-  # bcrypt(admin123456) - 首次登录后请改密
+  # 仅作手工配置示例;正式部署必须替换。
   password_hash: "$2a$10$4X17qnFIVcMqpszFGboBBeF0LMWDHxhR21dgL9UKU9EjjH0gtTBCG"
 
 # 租户(订阅前置)。可以在管理面 → 租户管理 增删
 tenants: []
 
-# 检测规则(可在管理面 → 检测规则 查看,阈值需改本文件后重启)
+# 检测规则种子(首次启动写入数据库,之后在管理面热更新)
 detector:
   observe_only: false
   windows:
@@ -62,7 +63,6 @@ detector:
         token_freq:
           window: 5m
           gte: 30
-      severity: red
 
     - name: token_multi_ip
       desc: 单 token 5 分钟多 IP
@@ -70,4 +70,3 @@ detector:
         token_distinct_ips:
           window: 5m
           gte: 5
-      severity: yellow

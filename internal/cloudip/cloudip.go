@@ -69,9 +69,9 @@ func (m *Matcher) Snapshot() Snapshot {
 	return out
 }
 
-// ----------------- Fetcher (空实现,兼容旧接口) -----------------
+// ----------------- Fetcher -----------------
 
-// Fetcher 旧版会定期爬数据源,新版 xdb 由用户手动更新文件,这里只保留 stub。
+// Fetcher 不再爬多数据源,但会重新加载 geoip.xdb_path 指向的本地文件。
 type Fetcher struct {
 	matcher *Matcher
 	logger  *slog.Logger
@@ -84,9 +84,8 @@ func NewFetcher(m *Matcher, _ any, logger *slog.Logger) *Fetcher {
 	return &Fetcher{matcher: m, logger: logger}
 }
 
-// RunOnce 不再做网络拉取,仅返回 xdb 当前状态。
-// 保留接口让 webui 的"立即更新"按钮不报错,前端改成"重新加载 xdb"语义。
-func (f *Fetcher) RunOnce(_ context.Context) (int, error) {
+// RunOnce 从当前路径重新读取 xdb 并原子替换查询快照。
+func (f *Fetcher) RunOnce(ctx context.Context) (int, error) {
 	if !f.running.CompareAndSwap(false, true) {
 		return 0, errors.New("已有任务在运行中")
 	}
@@ -97,18 +96,46 @@ func (f *Fetcher) RunOnce(_ context.Context) (int, error) {
 	if f.matcher == nil || f.matcher.geo == nil || !f.matcher.geo.Loaded() {
 		return 0, errors.New("xdb 未加载,请检查 geoip.xdb_path 配置")
 	}
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	default:
+	}
+	path := f.matcher.geo.Path()
+	if err := f.matcher.geo.Load(path); err != nil {
+		return 0, err
+	}
+	if asnPath := f.matcher.geo.ASNPath(); asnPath != "" {
+		if err := f.matcher.geo.LoadASN(asnPath); err != nil {
+			return 0, err
+		}
+	}
 	if f.logger != nil {
-		f.logger.Info("云 IP 库: xdb 已就绪",
-			"path", f.matcher.geo.Path(),
+		f.logger.Info("云 IP 库: xdb 已重新加载",
+			"path", path,
 			"version", f.matcher.geo.Snapshot().Version,
 		)
 	}
 	return 0, nil
 }
 
-// RunPeriodic 旧版后台周期任务,新版 xdb 不需要,留空 stub。
-func (f *Fetcher) RunPeriodic(_ context.Context, _ time.Duration) {
-	if f.logger != nil {
-		f.logger.Info("云 IP 库: 已切换为 xdb 模式,不再定时拉取数据源")
+// RunPeriodic 定期重载本地 xdb 文件。文件更新由安装器或运维流程负责。
+func (f *Fetcher) RunPeriodic(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		return
 	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if _, err := f.RunOnce(ctx); err != nil && f.logger != nil {
+					f.logger.Warn("云 IP 库定时重载失败", "err", err)
+				}
+			}
+		}
+	}()
 }

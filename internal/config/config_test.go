@@ -220,3 +220,11 @@ func TestTenantByPathLongestPrefix(t *testing.T) {
 		t.Errorf("短前缀兜底应命中 a, got=%+v", got)
 	}
 }
+
+func TestASNPathDefaultsNextToXDB(t *testing.T) {
+	c := &Config{GeoIP: GeoIPCfg{XDBPath: "/tmp/sub-panel/ip2region.xdb"}}
+	c.applyDefaults()
+	if got, want := c.GeoIP.ASNPath, "/tmp/sub-panel/ip2asn-v4.tsv.gz"; got != want {
+		t.Fatalf("asn path=%q, want %q", got, want)
+	}
+}

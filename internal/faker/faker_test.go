@@ -106,3 +106,49 @@ func TestSubInfoHeader(t *testing.T) {
 		t.Errorf("missing Subscription-Userinfo header")
 	}
 }
+
+func TestPoisonWithResultCountsAddressReplacements(t *testing.T) {
+	plain := "ss://aaaa@1.2.3.4:443#hk\nss://bbbb@5.6.7.8:8443#jp\n"
+	body := []byte(base64.StdEncoding.EncodeToString([]byte(plain)))
+	result := PoisonWithResult(body, "text/plain")
+	if !result.Complete() || result.Replacements != 2 {
+		t.Fatalf("result=%+v, want complete with 2 replacements", result)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(string(result.Body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(decoded), "1.2.3.4") || strings.Contains(string(decoded), "5.6.7.8") {
+		t.Fatalf("real node address remained: %q", decoded)
+	}
+}
+
+func TestPoisonWithResultDetectsPartialRewrite(t *testing.T) {
+	body := []byte("ss://aaaa@1.2.3.4:443#supported\nss://YWVzLTI1Ni1nY206cGFzc3dvcmQ#sip002\n")
+	result := PoisonWithResult(body, "text/plain")
+	if result.Complete() {
+		t.Fatalf("partial rewrite must not be accepted: %+v", result)
+	}
+	if result.Candidates != 2 || result.Replacements != 1 {
+		t.Fatalf("unexpected partial rewrite counts: %+v", result)
+	}
+}
+
+func TestPoisonWithResultRewritesBracketedIPv6(t *testing.T) {
+	body := []byte("vless://uuid@[2001:db8::1]:443#ipv6\n")
+	result := PoisonWithResult(body, "text/plain")
+	if !result.Complete() || strings.Contains(string(result.Body), "2001:db8") {
+		t.Fatalf("IPv6 node was not fully rewritten: %+v body=%q", result, result.Body)
+	}
+}
+
+func TestPoisonWithResultReportsUnsupportedFormat(t *testing.T) {
+	body := []byte("REAL-SUB-FROM-V2BOARD")
+	result := PoisonWithResult(body, "text/plain")
+	if result.Replacements != 0 {
+		t.Fatalf("replacements=%d, want 0", result.Replacements)
+	}
+	if string(result.Body) != string(body) {
+		t.Fatalf("unsupported format should be reported unchanged to caller")
+	}
+}

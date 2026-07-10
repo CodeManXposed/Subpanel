@@ -8,7 +8,7 @@
 
 进入面板「机场管理」→ 点击目标机场的「接入代码」按钮。弹窗会显示：
 
-- **上报 URL**：`http://你的域名/r/{report_id}`（挂在订阅网关 80 端口）
+- **上报 URL**：`https://你的订阅域名/r/{report_id}`（挂在订阅网关入口）
 - **上报密钥**：面板设置页中配的 secret
 
 每个机场有独立的随机 `report_id`，URL 不暴露机场名。
@@ -21,7 +21,7 @@
 
 ```php
 // ─── Sub-Panel 上报 ───
-$subPanelUrl = 'http://你的域名/r/你的report_id';  // 从面板「接入代码」弹窗复制
+$subPanelUrl = 'https://你的订阅域名/r/你的report_id';  // 从面板「接入代码」弹窗复制
 $subPanelKey = '你的上报密钥';                       // 面板设置页配置
 
 $reportData = [
@@ -55,8 +55,8 @@ try {
 每个机场在面板里有独立的 `report_id`，各自从「接入代码」弹窗复制对应 URL 即可：
 
 ```
-机场A: POST http://panel.example.com/r/a1b2c3d4...
-机场B: POST http://panel.example.com/r/e5f6g7h8...
+机场A: POST https://sub-a.example.com/r/a1b2c3d4...
+机场B: POST https://sub-b.example.com/r/e5f6g7h8...
 ```
 
 `上报密钥` 全局共用一个。

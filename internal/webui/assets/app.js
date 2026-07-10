@@ -262,8 +262,8 @@ function renderEventCard(e) {
   const tenantBit = (e.Tenant && e.Tenant !== '_unmatched') ? `<span class="kv-sep">·</span><span class="ev-tenant">${escapeHTML(e.Tenant)}</span>` : '';
   const pathBit = e.Path ? `<span class="mono ev-path" title="${escapeHTML(e.Path)}">${escapeHTML(e.Path)}</span>` : '<span class="muted">(无)</span>';
   const usageBit = e.Usage
-    ? `<span class="pill usage ${escapeHTML(String(e.Usage).toLowerCase())}" title="${escapeHTML(e.Usage)}">${escapeHTML(usageLabel(e.Usage))}</span>`
-    : '';
+	? `<span class="pill usage ${escapeHTML(String(e.Usage).toLowerCase())}" title="${escapeHTML(e.UsageSource === 'inferred' ? '根据 ISP/ASN 推断' : e.Usage)}">${escapeHTML(usageLabel(e.Usage))}${e.UsageSource === 'inferred' ? ' *' : ''}</span>`
+	: '';
   // 已处理按钮:仅当有 token 时显示。data-tenant 用事件自己的 tenant(不是当前过滤)。
   const resolveBtn = tokenFull
     ? `<button class="ev-resolve" data-token="${escapeHTML(tokenFull)}" data-tenant="${escapeHTML(e.Tenant || '')}" title="标记此 token 为已处理,后续不再出现">已处理</button>`
@@ -306,7 +306,7 @@ function renderEventCard(e) {
       </span>
       <span class="ev-meta-item"><span class="ev-label">地区</span><span>${escapeHTML(region)}</span></span>
       <span class="ev-meta-item"><span class="ev-label">ISP</span><span>${isp}</span></span>
-      <span class="ev-meta-item"><span class="ev-label">ASN</span><span class="mono">${e.ASN ? escapeHTML(e.ASN) : '—'}</span></span>
+	  <span class="ev-meta-item"><span class="ev-label">ASN</span><span class="mono" title="${escapeHTML(e.ASNOrg || '')}">${e.ASN ? escapeHTML(e.ASN) : '—'}</span></span>
       ${usageBit ? `<span class="ev-meta-item"><span class="ev-label">用途</span>${usageBit}</span>` : ''}
     </div>
   `;
@@ -686,7 +686,8 @@ async function loadGeoIPInfo() {
   if (!s) return;
   const el = $('#geoipStatus');
   if (s.loaded) {
-    el.innerHTML = `已加载 · 版本 <strong>${escapeHTML(s.version || '-')}</strong> · 路径 <code>${escapeHTML(s.path || '-')}</code>`;
+	const asn = s.asn_loaded ? ` · ASN <strong>${Number(s.asn_records || 0).toLocaleString()}</strong> 条` : ' · <span style="color:var(--danger)">ASN 未加载</span>';
+	el.innerHTML = `已加载 · 版本 <strong>${escapeHTML(s.version || '-')}</strong>${asn} · 路径 <code>${escapeHTML(s.path || '-')}</code>`;
   } else {
     el.innerHTML = `<span style="color:var(--danger)">未加载</span> — 请检查 <code>geoip.xdb_path</code> 配置`;
   }
@@ -698,9 +699,10 @@ function renderGeoInfo(info) {
     ['国家', info.country, info.iso_code ? ` (${info.iso_code})` : ''],
     ['省市区', [info.province, info.city, info.district].filter(Boolean).join(' / ')],
     ['ISP', info.isp],
-    ['用途', info.usage_type ? `${usageLabel(info.usage_type)} (${info.usage_type})` : ''],
-    ['云厂商', info.cloud_provider],
-    ['ASN', info.asn],
+	['用途', info.usage_type ? `${usageLabel(info.usage_type)} (${info.usage_type})${info.usage_type_source === 'inferred' ? ' · 推断' : ''}` : ''],
+	['云厂商', info.cloud_provider],
+	['ASN', info.asn],
+	['ASN 组织', info.asn_org],
     ['经纬度', (info.lon && info.lat) ? `${info.lon}, ${info.lat}` : ''],
     ['时区', info.timezone],
     ['邮编', info.zip_code],
@@ -1387,10 +1389,10 @@ async function toggleSuspectDetail(card, r) {
     for (const ip of detail.ips) {
       const loc = ip.country || '-';
       const isp = ip.isp || '-';
-      const asn = ip.asn || '-';
-      const usage = ip.usage_type ? usageLabel(ip.usage_type) : '-';
+	  const asn = ip.asn || '-';
+	  const usage = ip.usage_type ? `${usageLabel(ip.usage_type)}${ip.usage_source === 'inferred' ? ' *' : ''}` : '-';
       const last = new Date(ip.last_seen).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
-      html += `<tr style="border-bottom:1px solid #f3f4f6"><td class="mono" style="padding:3px 6px">${escapeHTML(ip.ip)}</td><td style="padding:3px 6px">${escapeHTML(loc)}</td><td style="padding:3px 6px">${escapeHTML(isp)}</td><td class="mono" style="padding:3px 6px">${escapeHTML(asn)}</td><td style="padding:3px 6px">${escapeHTML(usage)}</td><td class="mono" style="text-align:right;padding:3px 6px">${ip.hit_count}</td><td class="mono" style="text-align:right;padding:3px 6px">${last}</td></tr>`;
+	  html += `<tr style="border-bottom:1px solid #f3f4f6"><td class="mono" style="padding:3px 6px">${escapeHTML(ip.ip)}</td><td style="padding:3px 6px">${escapeHTML(loc)}</td><td style="padding:3px 6px">${escapeHTML(isp)}</td><td class="mono" style="padding:3px 6px" title="${escapeHTML(ip.asn_org || '')}">${escapeHTML(asn)}</td><td style="padding:3px 6px">${escapeHTML(usage)}</td><td class="mono" style="text-align:right;padding:3px 6px">${ip.hit_count}</td><td class="mono" style="text-align:right;padding:3px 6px">${last}</td></tr>`;
     }
     html += '</table>';
   } else { html += '<div style="color:#9ca3af;font-size:11px">无记录</div>'; }

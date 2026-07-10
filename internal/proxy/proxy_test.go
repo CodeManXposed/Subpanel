@@ -142,6 +142,9 @@ func TestE2EPassNormalRequest(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "8.8.8.8") {
 		t.Errorf("X-Forwarded-For not propagated: %q", w.Body.String())
 	}
+	if got := w.Header().Get("Cache-Control"); !strings.Contains(got, "no-store") {
+		t.Errorf("subscription response must disable caching, got %q", got)
+	}
 }
 
 func TestE2EUnknownTenantReturns404(t *testing.T) {
@@ -158,8 +161,11 @@ func TestE2EUnknownTenantReturns404(t *testing.T) {
 	}
 }
 
-func TestE2EBadUAReturnsFake(t *testing.T) {
-	gw, _, _, _, cleanup := newE2E(t, false)
+func TestE2EUnsupportedUpstreamFallsBackToGeneratedFake(t *testing.T) {
+	gw, _, _, _, cleanup := newE2E(t, false, config.Rule{
+		Name: "ip_once",
+		When: config.When{IPFreq: &config.Cond{Window: config.Duration(time.Minute), GTE: 1}},
+	})
 	defer cleanup()
 
 	w := httptest.NewRecorder()
@@ -167,10 +173,12 @@ func TestE2EBadUAReturnsFake(t *testing.T) {
 	if w.Code != 200 {
 		t.Errorf("fake should return 200, got %d", w.Code)
 	}
-	// 新 fake 逻辑:拉上游真订阅 + 改节点 host 为 RFC5737。
-	// 测试 upstream 返回的不是节点 URI,因此 Poison 不动 body,直接透传。
-	if !strings.Contains(w.Body.String(), "REAL-SUB-FROM-V2BOARD") {
-		t.Errorf("fake should proxy upstream and return upstream body, got %q", w.Body.String())
+	if strings.Contains(w.Body.String(), "REAL-SUB-FROM-V2BOARD") {
+		t.Fatalf("unsupported upstream format leaked real subscription: %q", w.Body.String())
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(w.Body.String()))
+	if err != nil || !strings.Contains(string(decoded), "192.0.2.1") {
+		t.Fatalf("expected generated blackhole subscription, err=%v body=%q", err, w.Body.String())
 	}
 }
 
@@ -200,14 +208,35 @@ func TestE2EObserveOnly(t *testing.T) {
 	gw, _, _, _, cleanup := newE2E(t, true)
 	defer cleanup()
 
-	// observe_only 下,curl UA 命中规则但不该 fake
+	// 先累计 4 次,第 5 次达到 token_freq >= 5。
+	for i := 0; i < 4; i++ {
+		w := httptest.NewRecorder()
+		gw.ServeHTTP(w, mkSubReq("sub.example.com", "ClientApp/1.0", "tok", "ss", "8.8.8.8"))
+	}
+	// observe_only 下即使命中规则,也必须继续透传真实上游。
 	w := httptest.NewRecorder()
-	gw.ServeHTTP(w, mkSubReq("sub.example.com", "curl/8.0", "tok", "ss", ""))
+	gw.ServeHTTP(w, mkSubReq("sub.example.com", "ClientApp/1.0", "tok", "ss", "8.8.8.8"))
 	if w.Code != 200 {
 		t.Errorf("status: %d", w.Code)
 	}
 	if !strings.Contains(w.Body.String(), "REAL-SUB-FROM-V2BOARD") {
 		t.Errorf("observe_only should pass through, got %q", w.Body.String())
+	}
+}
+
+func TestBufferingWriterCapsMemory(t *testing.T) {
+	bw := &bufferingWriter{
+		header:  http.Header{},
+		status:  http.StatusOK,
+		body:    &bytes.Buffer{},
+		maxSize: 8,
+	}
+	n, err := bw.Write([]byte("0123456789"))
+	if err != nil || n != 10 {
+		t.Fatalf("Write() = (%d, %v), want (10, nil)", n, err)
+	}
+	if !bw.tooLarge || bw.body.Len() != 8 {
+		t.Fatalf("buffer cap failed: tooLarge=%v len=%d", bw.tooLarge, bw.body.Len())
 	}
 }
 

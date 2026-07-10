@@ -120,9 +120,15 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/detect_rules/save", s.auth(http.HandlerFunc(s.apiDetectRuleSave)))
 	mux.Handle("/api/detect_rules/remove", s.auth(http.HandlerFunc(s.apiDetectRuleRemove)))
 	mux.Handle("/api/config", s.auth(http.HandlerFunc(s.apiConfig)))
-	mux.Handle("/api/notifier", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 410, map[string]any{"error": "notifier removed"}) })))
-	mux.Handle("/api/notifier/update", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 410, map[string]any{"error": "notifier removed"}) })))
-	mux.Handle("/api/test-notify", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 410, map[string]any{"error": "notifier removed"}) })))
+	mux.Handle("/api/notifier", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 410, map[string]any{"error": "notifier removed"})
+	})))
+	mux.Handle("/api/notifier/update", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 410, map[string]any{"error": "notifier removed"})
+	})))
+	mux.Handle("/api/test-notify", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 410, map[string]any{"error": "notifier removed"})
+	})))
 	mux.Handle("/api/auth/change_password", s.auth(http.HandlerFunc(s.apiChangePassword)))
 	mux.Handle("/api/settings/cdn", s.auth(http.HandlerFunc(s.apiCDNSettings)))
 	mux.Handle("/api/settings/passthrough", s.auth(http.HandlerFunc(s.apiPassthrough)))
@@ -262,7 +268,7 @@ func (s *Server) apiSummary(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
 	}
-	// Top IPs 富化:加地区 + ISP(xdb mmap 查询很轻,Top 10 无压力)
+	// Top IPs 富化:加地区 + ISP(全内存查询,Top 10 无压力)
 	gi := geoip.Global()
 	for i := range st.TopIPs {
 		ip := st.TopIPs[i].Key
@@ -323,7 +329,9 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 		Province    string `json:"Province"`
 		City        string `json:"City"`
 		ASN         string `json:"ASN"`
+		ASNOrg      string `json:"ASNOrg"`
 		Usage       string `json:"Usage"`
+		UsageSource string `json:"UsageSource"`
 	}
 	gi := geoip.Global()
 	out := make([]eventOut, 0, len(evs))
@@ -338,7 +346,9 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 				row.Province = info.Province
 				row.City = info.City
 				row.ASN = info.ASN
+				row.ASNOrg = info.ASNOrg
 				row.Usage = info.UsageType
+				row.UsageSource = info.UsageTypeSource
 				// 覆盖嵌入 Event.ISP / Event.Country / Event.UsageType
 				// (DB 里写入时可能为空,以 xdb 实时为准)
 				if info.ISP != "" {
@@ -900,9 +910,12 @@ func (s *Server) apiCloudIPCheck(w http.ResponseWriter, r *http.Request) {
 func (s *Server) apiGeoIPInfo(w http.ResponseWriter, r *http.Request) {
 	snap := geoip.Global().Snapshot()
 	writeJSON(w, 200, map[string]any{
-		"loaded":  snap.Loaded,
-		"path":    snap.Path,
-		"version": snap.Version,
+		"loaded":      snap.Loaded,
+		"path":        snap.Path,
+		"version":     snap.Version,
+		"asn_loaded":  snap.ASNLoaded,
+		"asn_path":    snap.ASNPath,
+		"asn_records": snap.ASNRecords,
 	})
 }
 

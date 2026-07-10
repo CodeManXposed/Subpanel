@@ -468,8 +468,9 @@ type EventFilter struct {
 }
 
 func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error) {
-	q := `SELECT ts,tenant,client_ip,ua,token_hash,flag,path,status,action,rule_tags,upstream_ms,resp_size
-		FROM events WHERE 1=1`
+	q := `SELECT ts,tenant,client_ip,ua,token_hash,flag,path,status,action,rule_tags,upstream_ms,resp_size,
+			COALESCE(country,''),COALESCE(usage_type,''),COALESCE(isp,'')
+			FROM events WHERE 1=1`
 	args := []any{}
 	if f.Tenant != "" {
 		q += " AND tenant=?"
@@ -527,7 +528,8 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error)
 		var tags sql.NullString
 		var ua, tokenHash, flag, path, action sql.NullString
 		if err := rows.Scan(&ts, &e.Tenant, &e.ClientIP, &ua, &tokenHash, &flag,
-			&path, &e.Status, &action, &tags, &e.UpstreamMS, &e.RespSize); err != nil {
+			&path, &e.Status, &action, &tags, &e.UpstreamMS, &e.RespSize,
+			&e.Country, &e.UsageType, &e.ISP); err != nil {
 			return nil, err
 		}
 		e.TS = time.UnixMilli(ts)
@@ -1546,13 +1548,15 @@ type SuspectDetail struct {
 }
 
 type IPDetail struct {
-	IP        string `json:"ip"`
-	Country   string `json:"country"`
-	ISP       string `json:"isp"`
-	ASN       string `json:"asn"`
-	UsageType string `json:"usage_type"`
-	HitCount  int    `json:"hit_count"`
-	LastSeen  int64  `json:"last_seen"` // unix ms
+	IP          string `json:"ip"`
+	Country     string `json:"country"`
+	ISP         string `json:"isp"`
+	ASN         string `json:"asn"`
+	ASNOrg      string `json:"asn_org"`
+	UsageType   string `json:"usage_type"`
+	UsageSource string `json:"usage_source"`
+	HitCount    int    `json:"hit_count"`
+	LastSeen    int64  `json:"last_seen"` // unix ms
 }
 
 type UADetail struct {

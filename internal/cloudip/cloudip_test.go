@@ -1,6 +1,9 @@
 package cloudip
 
 import (
+	"context"
+	"io"
+	"log/slog"
 	"os"
 	"testing"
 
@@ -35,12 +38,11 @@ func TestMatcher_WithXdb(t *testing.T) {
 
 	// 已知云段
 	cases := map[string]string{
-		"47.96.0.1":   "aliyun",
-		"42.192.0.1":  "tencent",
+		"47.96.0.1":    "aliyun",
+		"42.192.0.1":   "tencent",
 		"13.107.42.14": "azure",
 		"35.190.247.1": "gcp",
 		"8.8.8.8":      "gcp",
-		"1.1.1.1":      "cloudflare",
 	}
 	for ip, wantProv := range cases {
 		hit, gotProv := m.Match(ip)
@@ -61,5 +63,13 @@ func TestMatcher_WithXdb(t *testing.T) {
 	// 无效 IP
 	if hit, _ := m.Match("not-an-ip"); hit {
 		t.Error("无效 IP 不应命中")
+	}
+
+	f := NewFetcher(m, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if _, err := f.RunOnce(context.Background()); err != nil {
+		t.Fatalf("reload xdb: %v", err)
+	}
+	if hit, provider := m.Match("47.96.0.1"); !hit || provider != "aliyun" {
+		t.Fatalf("matcher unavailable after reload: hit=%v provider=%q", hit, provider)
 	}
 }

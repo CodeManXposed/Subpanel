@@ -1,10 +1,10 @@
 // Package geoip 用 ip2region xdb 提供 IP -> 地理 + 运营商 + 用途类型 查询。
 //
-// 数据源:lionsoul2014/ip2region 满载版 xdb 文件。
-// 字段格式:洲|国|省|市|区|ISP|经度|纬度|adcode|区号|邮编|时区|币种|ASN|usage_type|...
+// 数据源:lionsoul2014/ip2region IPv4 xdb + IPtoASN IPv4 TSV.GZ。
+// 同时兼容旧的 18 字段满载 xdb。
 //
 // 设计:
-//   - 启动加载 xdb 到内存(file-only 模式,首次访问惰性 mmap,内存占用 ~350MB)
+//   - 启动加载完整 xdb 到内存,查询不走共享文件句柄
 //   - Lookup 线程安全,O(log N) 二分查找
 //   - 同时把 ISP 字段映射成"云厂商 provider"用于反爬规则
 package geoip
@@ -36,7 +36,10 @@ type Info struct {
 	Timezone  string `json:"timezone"`   // Asia/Shanghai
 	Currency  string `json:"currency"`   // CNY/USD
 	ASN       string `json:"asn"`        // AS4134
+	ASNOrg    string `json:"asn_org"`    // ASN 注册组织
 	UsageType string `json:"usage_type"` // IDC/CDN/DYN/MOB/COM/...
+	// UsageTypeSource 为 xdb 或 inferred,避免把推断类型误认为原始数据。
+	UsageTypeSource string `json:"usage_type_source,omitempty"`
 	// 后续字段(adcode_secondary / chxx_code / iso2)按需补
 	ISOCode string `json:"iso_code"` // CN/US
 
@@ -49,11 +52,14 @@ type Searcher struct {
 	cur     atomic.Pointer[xdbHandle]
 	xdbPath atomic.Value // string
 	loaded  atomic.Bool
+	asnCur  atomic.Pointer[asnSnapshot]
+	asnPath atomic.Value // string
 }
 
 type xdbHandle struct {
-	s   *xdb.Searcher
-	ver *xdb.Version
+	ver     *xdb.Version
+	content []byte
+	pool    sync.Pool
 }
 
 // New 返回未加载的 Searcher。空路径合法(意味着 geoip 关闭),所有查询返回 nil。
@@ -77,16 +83,23 @@ func (s *Searcher) Load(path string) error {
 	if err != nil {
 		return fmt.Errorf("xdb version: %w", err)
 	}
-	searcher, err := xdb.NewWithFileOnly(ver, path)
+	content, err := xdb.LoadContentFromFile(path)
 	if err != nil {
-		return fmt.Errorf("xdb open: %w", err)
+		return fmt.Errorf("xdb content: %w", err)
 	}
-	old := s.cur.Swap(&xdbHandle{s: searcher, ver: ver})
+	h := &xdbHandle{ver: ver, content: content}
+	probe, err := xdb.NewWithBuffer(ver, content)
+	if err != nil {
+		return fmt.Errorf("xdb searcher: %w", err)
+	}
+	h.pool.Put(probe)
+	h.pool.New = func() any {
+		searcher, _ := xdb.NewWithBuffer(ver, content)
+		return searcher
+	}
+	s.cur.Store(h)
 	s.xdbPath.Store(path)
 	s.loaded.Store(true)
-	if old != nil {
-		old.s.Close()
-	}
 	return nil
 }
 
@@ -102,32 +115,91 @@ func (s *Searcher) Path() string {
 	return v.(string)
 }
 
+// LoadASN 加载 IPtoASN 的 IPv4 TSV/TSV.GZ 数据。空路径表示禁用。
+func (s *Searcher) LoadASN(path string) error {
+	if path == "" {
+		s.asnCur.Store(nil)
+		s.asnPath.Store("")
+		return nil
+	}
+	snap, err := loadASNSnapshot(path)
+	if err != nil {
+		return err
+	}
+	s.asnCur.Store(snap)
+	s.asnPath.Store(path)
+	return nil
+}
+
+func (s *Searcher) ASNPath() string {
+	v := s.asnPath.Load()
+	if v == nil {
+		return ""
+	}
+	return v.(string)
+}
+
+func (s *Searcher) ASNLoaded() bool { return s.asnCur.Load() != nil }
+
 // Close 释放底层资源。
 func (s *Searcher) Close() {
-	if h := s.cur.Swap(nil); h != nil {
-		h.s.Close()
-	}
+	s.cur.Store(nil)
+	s.asnCur.Store(nil)
 	s.loaded.Store(false)
 }
 
 // ErrNotLoaded xdb 没加载,Lookup 不会做事。
 var ErrNotLoaded = errors.New("geoip xdb 未加载")
 
-// Lookup 查 IP。返回 nil 表示 IP 无效或 xdb 没加载。
+// Lookup 查 IP,并用 ASN 数据补充 ASN/组织/国家码以及推断网络类型。
 func (s *Searcher) Lookup(ipStr string) *Info {
-	h := s.cur.Load()
-	if h == nil {
-		return nil
-	}
 	ip := net.ParseIP(strings.TrimSpace(ipStr))
 	if ip == nil {
 		return nil
 	}
-	raw, err := h.s.Search(ipStr)
-	if err != nil || raw == "" {
+	var info *Info
+	if h := s.cur.Load(); h != nil {
+		searcher := h.pool.Get().(*xdb.Searcher)
+		raw, err := searcher.Search(ip.String())
+		h.pool.Put(searcher)
+		if err == nil && raw != "" {
+			info = parseRecord(raw)
+		}
+	}
+	var asn *ASNInfo
+	if snap := s.asnCur.Load(); snap != nil {
+		asn = snap.lookup(ip)
+	}
+	if info == nil && asn == nil {
 		return nil
 	}
-	return parseRecord(raw)
+	if info == nil {
+		info = &Info{}
+	}
+	if info.ISP == "0" {
+		info.ISP = ""
+	}
+	if asn != nil {
+		if info.ASN == "" {
+			info.ASN = asn.ASN
+		}
+		info.ASNOrg = asn.Organization
+		if info.ISOCode == "" && asn.CountryCode != "None" {
+			info.ISOCode = asn.CountryCode
+		}
+		if info.ISP == "" {
+			info.ISP = asn.Organization
+		}
+	}
+	info.CloudProvider = matchCloudProvider(
+		info.ISP, info.ASNOrg, info.City, info.Province, info.Country, info.ASN, info.UsageType,
+	)
+	if info.UsageType == "" {
+		info.UsageType, info.UsageTypeSource = inferUsageType(info)
+	} else {
+		info.UsageTypeSource = "xdb"
+	}
+	return info
 }
 
 // parseRecord 解析 xdb 返回的 | 分隔字段。
@@ -140,6 +212,19 @@ func parseRecord(raw string) *Info {
 			return ""
 		}
 		return strings.TrimSpace(parts[i])
+	}
+	// 官方 ip2region_v4.xdb 使用 5 字段格式:
+	// 国家|区域|省份|城市|ISP。旧的满载版使用下面的 18 字段格式。
+	if len(parts) == 5 {
+		info := &Info{
+			Country:  get(0),
+			Province: get(2),
+			City:     get(3),
+			ISP:      get(4),
+		}
+		info.ISOCode = inferISOCode(info.Country, info.Province)
+		info.CloudProvider = matchCloudProvider(info.ISP, info.City, info.Province, info.Country)
+		return info
 	}
 	info := &Info{
 		Continent: get(0),
@@ -169,6 +254,21 @@ func parseRecord(raw string) *Info {
 		info.UsageType,
 	)
 	return info
+}
+
+func inferISOCode(country, province string) string {
+	switch {
+	case strings.Contains(province, "香港"):
+		return "HK"
+	case strings.Contains(province, "澳门"):
+		return "MO"
+	case strings.Contains(province, "台湾"):
+		return "TW"
+	case country == "中国" || strings.EqualFold(country, "China"):
+		return "CN"
+	default:
+		return ""
+	}
 }
 
 // cloudKeywords ISP 字段关键词 → provider 英文标识。
@@ -234,15 +334,26 @@ func matchCloudProvider(fields ...string) string {
 
 // Snapshot 提供给 UI 的状态摘要。
 type Snapshot struct {
-	Loaded  bool   `json:"loaded"`
-	Path    string `json:"path"`
-	Version string `json:"version"` // IPv4/IPv6
+	Loaded     bool   `json:"loaded"`
+	Path       string `json:"path"`
+	Version    string `json:"version"` // IPv4/IPv6
+	ASNLoaded  bool   `json:"asn_loaded"`
+	ASNPath    string `json:"asn_path"`
+	ASNRecords int    `json:"asn_records"`
 }
 
 func (s *Searcher) Snapshot() Snapshot {
-	out := Snapshot{Loaded: s.loaded.Load(), Path: s.Path()}
+	out := Snapshot{
+		Loaded:    s.loaded.Load(),
+		Path:      s.Path(),
+		ASNLoaded: s.ASNLoaded(),
+		ASNPath:   s.ASNPath(),
+	}
 	if h := s.cur.Load(); h != nil && h.ver != nil {
 		out.Version = h.ver.Name
+	}
+	if snap := s.asnCur.Load(); snap != nil {
+		out.ASNRecords = len(snap.ranges)
 	}
 	return out
 }

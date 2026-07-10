@@ -28,14 +28,19 @@ import (
 	"github.com/huabanmao168/SubPanel/internal/token"
 )
 
+const (
+	maxUpstreamSubscriptionBytes = 16 << 20
+	maxDecodedSubscriptionBytes  = 32 << 20
+)
+
 type Gateway struct {
-	cfg      *config.Config
-	hasher   *token.Hasher
-	st       *store.Store
-	bans     *banlist.List
-	det      *detector.Detector
-	faker    *faker.Renderer
-	rng      *rand.Rand
+	cfg    *config.Config
+	hasher *token.Hasher
+	st     *store.Store
+	bans   *banlist.List
+	det    *detector.Detector
+	faker  *faker.Renderer
+	rng    *rand.Rand
 	// passthroughAll 一键透传:网关入口短路直接透传,不进任何规则/黑白名单。
 	passthroughAll atomic.Bool
 	// autoBan 字段已删除:命中规则统一投毒,无自动封禁逻辑。
@@ -140,7 +145,13 @@ func buildProxy(t config.Tenant, logger *slog.Logger) (*httputil.ReverseProxy, e
 	}
 	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		logger.Warn("上游请求失败", "err", err, "host", r.Host)
+		setNoStoreHeaders(w.Header())
 		http.Error(w, "上游服务不可用", http.StatusBadGateway)
+	}
+	rp.ModifyResponse = func(resp *http.Response) error {
+		clearBodyValidators(resp.Header)
+		setNoStoreHeaders(resp.Header)
+		return nil
 	}
 	return rp, nil
 }
@@ -293,6 +304,11 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Note:      res.Note,
 		})
 	}
+	if res.Hit && g.cfg.Detector.ObserveOnly {
+		tags := append(append([]string(nil), res.Tags...), "observe_only")
+		g.transparentProxyWithLog(w, r, pr, tokenHash, tags, "pass", start)
+		return
+	}
 
 	// 7) 执行:命中即投毒,未命中放行
 	if res.Hit {
@@ -366,7 +382,17 @@ func (g *Gateway) respondFake(
 	}
 	// 剥掉 Accept-Encoding,强制上游返回明文,否则 Poison 无法对 gzip 字节流做正则替换。
 	r.Header.Del("Accept-Encoding")
-	bw := &bufferingWriter{header: http.Header{}, status: 200, body: &bytes.Buffer{}}
+	for _, name := range []string{
+		"If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since", "If-Range", "Range",
+	} {
+		r.Header.Del(name)
+	}
+	bw := &bufferingWriter{
+		header:  http.Header{},
+		status:  http.StatusOK,
+		body:    &bytes.Buffer{},
+		maxSize: maxUpstreamSubscriptionBytes,
+	}
 	rp.ServeHTTP(bw, r)
 
 	// 上游失败(非 2xx)直接透传错误,标 fake_failed
@@ -382,17 +408,37 @@ func (g *Gateway) respondFake(
 		return
 	}
 
-	// 投毒:host 改 RFC5737。先按 Content-Encoding 解压,改完再按原编码压回去。
-	rawBody := bw.body.Bytes()
+	// 投毒:只有确认至少改写了一个节点地址才返回改写结果。
+	// 上游过大、解压失败或格式不支持时,退回独立生成的伪订阅,绝不回传原文。
+	var poisoned []byte
 	enc := strings.ToLower(strings.TrimSpace(bw.header.Get("Content-Encoding")))
-	decoded, decErr := decodeBody(rawBody, enc)
-	if decErr != nil {
-		// 解压失败时退化为原样投毒(几乎不会命中,但兜底)
-		decoded = rawBody
-		enc = ""
+	fallbackReason := ""
+	if bw.tooLarge {
+		fallbackReason = "poison_upstream_too_large"
+	} else {
+		decoded, decErr := decodeBody(bw.body.Bytes(), enc)
+		if decErr != nil {
+			fallbackReason = "poison_decode_failed"
+		} else {
+			result := faker.PoisonWithResult(decoded, bw.header.Get("Content-Type"))
+			if !result.Complete() {
+				fallbackReason = "poison_no_replacements"
+			} else {
+				poisoned = result.Body
+			}
+		}
 	}
-	poisoned := faker.Poison(decoded, bw.header.Get("Content-Type"))
-	if enc != "" {
+	if fallbackReason != "" {
+		fallback := g.faker.Render(pr.Flag, pr.UA)
+		poisoned = fallback.Body
+		bw.header.Set("Content-Type", fallback.ContentType)
+		bw.header.Del("Content-Encoding")
+		enc = ""
+		for k, v := range fallback.Headers {
+			bw.header.Set(k, v)
+		}
+		tags = append(append([]string(nil), tags...), fallbackReason)
+	} else if enc != "" {
 		if reEncoded, encErr := encodeBody(poisoned, enc); encErr == nil {
 			poisoned = reEncoded
 		} else {
@@ -400,6 +446,8 @@ func (g *Gateway) respondFake(
 			bw.header.Del("Content-Encoding")
 		}
 	}
+	clearBodyValidators(bw.header)
+	setNoStoreHeaders(bw.header)
 
 	// 头透传(去掉 Content-Length,后面重写)
 	for k, vs := range bw.header {
@@ -436,14 +484,44 @@ func (g *Gateway) respondFake(
 
 // bufferingWriter 拦截上游响应,buffer 在内存里方便改写。
 type bufferingWriter struct {
-	header http.Header
-	status int
-	body   *bytes.Buffer
+	header    http.Header
+	status    int
+	body      *bytes.Buffer
+	maxSize   int
+	tooLarge  bool
+	wroteHead bool
 }
 
-func (b *bufferingWriter) Header() http.Header        { return b.header }
-func (b *bufferingWriter) WriteHeader(s int)          { b.status = s }
-func (b *bufferingWriter) Write(p []byte) (int, error) { return b.body.Write(p) }
+func (b *bufferingWriter) Header() http.Header { return b.header }
+
+func (b *bufferingWriter) WriteHeader(s int) {
+	if b.wroteHead {
+		return
+	}
+	b.wroteHead = true
+	b.status = s
+}
+
+func (b *bufferingWriter) Write(p []byte) (int, error) {
+	if !b.wroteHead {
+		b.WriteHeader(http.StatusOK)
+	}
+	if b.tooLarge {
+		return len(p), nil
+	}
+	remaining := b.maxSize - b.body.Len()
+	if remaining <= 0 {
+		b.tooLarge = true
+		return len(p), nil
+	}
+	if len(p) > remaining {
+		_, _ = b.body.Write(p[:remaining])
+		b.tooLarge = true
+		return len(p), nil
+	}
+	_, _ = b.body.Write(p)
+	return len(p), nil
+}
 
 // handleDeny 已删除:命中规则统一投毒,banlist 命中也走投毒。
 
@@ -514,10 +592,25 @@ func Healthz(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, `{"ok":true}`)
 }
 
+func setNoStoreHeaders(h http.Header) {
+	h.Set("Cache-Control", "private, no-store, no-cache, max-age=0")
+	h.Set("Pragma", "no-cache")
+	h.Set("Expires", "0")
+}
+
+func clearBodyValidators(h http.Header) {
+	for _, name := range []string{"ETag", "Last-Modified", "Content-MD5", "Content-Range", "Accept-Ranges"} {
+		h.Del(name)
+	}
+}
+
 // decodeBody 按 Content-Encoding 解压响应体。空 enc 直接返回原样。
 func decodeBody(body []byte, enc string) ([]byte, error) {
 	switch enc {
 	case "", "identity":
+		if len(body) > maxDecodedSubscriptionBytes {
+			return nil, fmt.Errorf("decoded body exceeds %d bytes", maxDecodedSubscriptionBytes)
+		}
 		return body, nil
 	case "gzip":
 		r, err := gzip.NewReader(bytes.NewReader(body))
@@ -525,15 +618,26 @@ func decodeBody(body []byte, enc string) ([]byte, error) {
 			return nil, err
 		}
 		defer r.Close()
-		return io.ReadAll(r)
+		return readAllLimited(r, maxDecodedSubscriptionBytes)
 	case "deflate":
 		r := flate.NewReader(bytes.NewReader(body))
 		defer r.Close()
-		return io.ReadAll(r)
+		return readAllLimited(r, maxDecodedSubscriptionBytes)
 	default:
 		// br/zstd 等暂不支持
 		return nil, fmt.Errorf("unsupported encoding: %s", enc)
 	}
+}
+
+func readAllLimited(r io.Reader, max int64) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(r, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > max {
+		return nil, fmt.Errorf("decoded body exceeds %d bytes", max)
+	}
+	return b, nil
 }
 
 // encodeBody 按 enc 把投毒后的明文压回去。

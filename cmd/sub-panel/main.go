@@ -36,7 +36,7 @@ import (
 	"github.com/huabanmao168/SubPanel/internal/webui"
 )
 
-var Version = "0.1.34"
+var Version = "0.1.35"
 
 func main() {
 	if len(os.Args) >= 2 {
@@ -141,7 +141,7 @@ func main() {
 	stopCh := make(chan struct{})
 	slidingwin.RunGC(stopCh, time.Minute, det.GCTargets()...)
 
-	// GeoIP xdb (ip2region 满载版) - 提供 IP -> 地理 + 运营商 + 用途类型 查询
+	// GeoIP xdb - 新版官方库提供地理/运营商,旧满载库还可提供用途类型等扩展字段
 	geo := geoip.Global()
 	if p := cfg.GeoIP.XDBPath; p != "" {
 		if err := geo.Load(p); err != nil {
@@ -152,6 +152,14 @@ func main() {
 		}
 	} else {
 		logger.Info("未配置 geoip.xdb_path,GeoIP 功能禁用")
+	}
+	if p := cfg.GeoIP.ASNPath; p != "" {
+		if err := geo.LoadASN(p); err != nil {
+			logger.Warn("加载 ASN 数据库失败,ASN 与推断类型将为空", "path", p, "err", err)
+		} else {
+			snap := geo.Snapshot()
+			logger.Info("ASN 数据库已加载", "path", p, "records", snap.ASNRecords)
+		}
 	}
 
 	// 云 IP 匹配器 (底层走 GeoIP xdb,按 ISP 字段反推云厂商)
@@ -233,7 +241,7 @@ func main() {
 	// 反代 server
 	subMux := http.NewServeMux()
 	subMux.HandleFunc("/healthz", proxy.Healthz)
-	subMux.Handle("/r/", ui.ReportHandler()) // v2board 上报走 80 端口
+	subMux.Handle("/r/", ui.ReportHandler()) // v2board 上报复用订阅网关入口
 	subMux.Handle("/", gw)
 	subSrv := &http.Server{
 		Addr:              cfg.Listen,

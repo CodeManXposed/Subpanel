@@ -78,7 +78,7 @@ jobs:
             ### 一键安装
 
             ```bash
-            curl -fsSL https://raw.githubusercontent.com/huabanmao168/SubPanel/main/install.sh | bash
+            curl -fsSL https://raw.githubusercontent.com/CodeManXposed/Subpanel/main/install.sh | bash
             ```
 
             ### 升级

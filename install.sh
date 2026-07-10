@@ -2,19 +2,20 @@
 # Sub-Panel 一键安装 / 升级脚本
 #
 # 用法:
-#   curl -fsSL https://raw.githubusercontent.com/huabanmao168/SubPanel/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/CodeManXposed/Subpanel/main/install.sh | bash
 #   或:wget -qO- ... | bash
 #   升级:再跑一次同样命令,会保留 /opt/Sub-Panel/{config.yml,data/}
 #
 # 卸载:/opt/Sub-Panel/uninstall.sh
 set -euo pipefail
 
-REPO="huabanmao168/SubPanel"
+REPO="${SUB_PANEL_REPO:-CodeManXposed/Subpanel}"
 INSTALL_DIR="/opt/Sub-Panel"
 TMPFS_DIR="/tmp/sub-panel"
 SERVICE_NAME="sub-panel"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-XDB_URL="https://github.com/lionsoul2014/ip2region/raw/master/data/ip2region.xdb"
+XDB_URL="https://raw.githubusercontent.com/lionsoul2014/ip2region/master/data/ip2region_v4.xdb"
+ASN_URL="https://iptoasn.com/data/ip2asn-v4.tsv.gz"
 
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[0;33m'
@@ -40,7 +41,7 @@ esac
 log "架构: $ARCH → $GOARCH"
 
 # 3) 检测依赖
-need_cmds=(curl tar systemctl)
+need_cmds=(curl tar systemctl sha256sum od gzip)
 for c in "${need_cmds[@]}"; do
   command -v "$c" >/dev/null 2>&1 || die "缺少命令: $c,请先 apt/yum install"
 done
@@ -58,6 +59,7 @@ fi
 
 ASSET="sub-panel-linux-${GOARCH}.tar.gz"
 DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${TAG}/${ASSET}"
+CHECKSUM_URL="${DOWNLOAD_URL}.sha256"
 
 # 5) 是升级还是首装?
 IS_UPGRADE=0
@@ -75,6 +77,11 @@ trap "rm -rf ${TMP_DIR}" EXIT
 log "下载: ${DOWNLOAD_URL}"
 curl -fL --progress-bar -o "${TMP_DIR}/${ASSET}" "${DOWNLOAD_URL}" \
   || die "下载失败,请检查网络或 Release 是否上传"
+curl -fsSL -o "${TMP_DIR}/${ASSET}.sha256" "${CHECKSUM_URL}" \
+  || die "校验文件下载失败"
+(cd "${TMP_DIR}" && sha256sum -c "${ASSET}.sha256") \
+  || die "SHA256 校验失败,拒绝安装"
+ok "Release SHA256 校验通过"
 
 log "解包…"
 tar -xzf "${TMP_DIR}/${ASSET}" -C "${TMP_DIR}"
@@ -100,13 +107,16 @@ if [[ "$IS_UPGRADE" -eq 0 ]]; then
     curl -fsSL -o "${INSTALL_DIR}/config.yml" \
       "https://raw.githubusercontent.com/${REPO}/main/configs/config.example.yml" \
       || die "下载默认配置失败"
+    ADMIN_PASSWORD="$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
+    ADMIN_HASH="$("${INSTALL_DIR}/sub-panel" hashpwd "${ADMIN_PASSWORD}")"
+    sed -i "s|^[[:space:]]*password_hash:.*|  password_hash: \"${ADMIN_HASH}\"|" "${INSTALL_DIR}/config.yml"
     ok "默认配置已写入: ${INSTALL_DIR}/config.yml"
   fi
 fi
 
-# 11) 下载 ip2region.xdb(放 tmpfs + 备份一份到 /opt/Sub-Panel)
+# 11) 下载 ip2region IPv4 xdb(放 tmpfs + 备份一份到 /opt/Sub-Panel)
 if [[ ! -f "${INSTALL_DIR}/ip2region.xdb" ]] || [[ "${SUB_PANEL_REFRESH_XDB:-0}" == "1" ]]; then
-  log "下载 ip2region.xdb(满载版,约 12MB)…"
+  log "下载 ip2region IPv4 xdb(约 11MB)…"
   curl -fL --progress-bar -o "${INSTALL_DIR}/ip2region.xdb" "$XDB_URL" \
     || warn "xdb 下载失败,可手动放到 ${INSTALL_DIR}/ip2region.xdb"
 fi
@@ -116,14 +126,25 @@ if [[ -f "${INSTALL_DIR}/ip2region.xdb" ]]; then
   ok "xdb 已就位: ${TMPFS_DIR}/ip2region.xdb(tmpfs)"
 fi
 
-# 12) 安装 systemd unit
+# 12) 下载 IPtoASN 离线库(约 6.6MB 压缩,每小时更新)
+if [[ ! -f "${INSTALL_DIR}/ip2asn-v4.tsv.gz" ]] || [[ "${SUB_PANEL_REFRESH_ASN:-0}" == "1" ]]; then
+  log "下载 IPtoASN IPv4 数据库…"
+  curl -fL --progress-bar -o "${TMP_DIR}/ip2asn-v4.tsv.gz" "$ASN_URL" \
+    || die "ASN 数据库下载失败"
+  gzip -t "${TMP_DIR}/ip2asn-v4.tsv.gz" || die "ASN 数据库 gzip 校验失败"
+  install -m 0644 "${TMP_DIR}/ip2asn-v4.tsv.gz" "${INSTALL_DIR}/ip2asn-v4.tsv.gz"
+fi
+cp -f "${INSTALL_DIR}/ip2asn-v4.tsv.gz" "${TMPFS_DIR}/ip2asn-v4.tsv.gz"
+ok "ASN 数据库已就位: ${TMPFS_DIR}/ip2asn-v4.tsv.gz"
+
+# 13) 安装 systemd unit
 log "写入 systemd unit…"
 curl -fsSL -o "$SERVICE_FILE" \
   "https://raw.githubusercontent.com/${REPO}/main/scripts/sub-panel.service" \
   || die "下载 systemd unit 失败"
 systemctl daemon-reload
 
-# 13) 写卸载脚本
+# 14) 写卸载脚本
 cat > "${INSTALL_DIR}/uninstall.sh" <<'UNINST'
 #!/usr/bin/env bash
 # Sub-Panel 卸载脚本。默认保留 config + data,加 --purge 才全删。
@@ -141,7 +162,7 @@ if [[ $PURGE -eq 1 ]]; then
   rm -rf /opt/Sub-Panel /tmp/sub-panel
   echo "✓ 已完全卸载(含 config + data)"
 else
-  rm -f /opt/Sub-Panel/sub-panel /opt/Sub-Panel/ip2region.xdb
+  rm -f /opt/Sub-Panel/sub-panel /opt/Sub-Panel/ip2region.xdb /opt/Sub-Panel/ip2asn-v4.tsv.gz
   rm -rf /tmp/sub-panel
   echo "✓ 已卸载(保留 /opt/Sub-Panel/config.yml + data/)"
   echo "  完全清除请加 --purge:bash /opt/Sub-Panel/uninstall.sh --purge"
@@ -149,7 +170,7 @@ fi
 UNINST
 chmod +x "${INSTALL_DIR}/uninstall.sh"
 
-# 14) 启动
+# 15) 启动
 log "启动服务…"
 systemctl enable "$SERVICE_NAME" >/dev/null 2>&1 || true
 systemctl restart "$SERVICE_NAME"
@@ -157,18 +178,25 @@ sleep 2
 
 if systemctl is-active --quiet "$SERVICE_NAME"; then
   ADMIN_PORT="$(grep -E "^admin_listen:" "${INSTALL_DIR}/config.yml" | awk -F'"' '{print $2}' | awk -F: '{print $2}')"
-  PUBLIC_IP="$(curl -fsSL --max-time 3 https://api.ipify.org 2>/dev/null || echo "<服务器 IP>")"
+  ADMIN_LISTEN="$(grep -E "^admin_listen:" "${INSTALL_DIR}/config.yml" | awk -F'"' '{print $2}')"
+  ADMIN_HOST="${ADMIN_LISTEN%:*}"
   echo ""
   ok "════════════════════════════════════════════"
   ok " Sub-Panel ${TAG} 安装成功 ✓"
   ok "════════════════════════════════════════════"
   echo ""
-  echo "  管理面:   http://${PUBLIC_IP}:${ADMIN_PORT:-19090}/"
+  if [[ "$ADMIN_HOST" == "127.0.0.1" || "$ADMIN_HOST" == "localhost" || "$ADMIN_HOST" == "::1" ]]; then
+    echo "  管理面:   http://127.0.0.1:${ADMIN_PORT:-19090}/ (仅本机)"
+    echo "  SSH 隧道: ssh -L ${ADMIN_PORT:-19090}:127.0.0.1:${ADMIN_PORT:-19090} root@<服务器 IP>"
+  else
+    PUBLIC_IP="$(curl -fsSL --max-time 3 https://api.ipify.org 2>/dev/null || echo "<服务器 IP>")"
+    echo "  管理面:   http://${PUBLIC_IP}:${ADMIN_PORT:-19090}/"
+  fi
   if [[ "$IS_UPGRADE" -eq 0 ]]; then
     echo "  默认账号: admin"
-    echo "  默认密码: admin123456"
+    echo "  初始密码: ${ADMIN_PASSWORD:-请检查现有配置}"
     echo ""
-    warn "  ⚠️  首次登录后请立刻去「设置」改密!"
+    warn "  请保存初始密码,首次登录后建议立即修改。"
   fi
   echo ""
   echo "  常用命令:"

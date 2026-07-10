@@ -14,6 +14,7 @@ package slidingwin
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -28,7 +29,7 @@ type counterBuckets struct {
 
 type Counter struct {
 	bucketSize time.Duration
-	maxWindow  time.Duration
+	maxWindow  atomic.Int64
 	data       sync.Map // key -> *counterBuckets
 	clock      func() time.Time
 }
@@ -40,15 +41,24 @@ func NewCounter(bucketSize, maxWindow time.Duration) *Counter {
 	if maxWindow < bucketSize {
 		maxWindow = bucketSize
 	}
-	return &Counter{
+	c := &Counter{
 		bucketSize: bucketSize,
-		maxWindow:  maxWindow,
 		clock:      time.Now,
 	}
+	c.maxWindow.Store(int64(maxWindow))
+	return c
 }
 
 // SetClock 仅供测试。
 func (c *Counter) SetClock(f func() time.Time) { c.clock = f }
+
+// SetMaxWindow 热更新保留窗口。缩短后由下一次 GC 释放旧桶。
+func (c *Counter) SetMaxWindow(window time.Duration) {
+	if window < c.bucketSize {
+		window = c.bucketSize
+	}
+	c.maxWindow.Store(int64(window))
+}
 
 func (c *Counter) bucketKey(t time.Time) int64 {
 	return t.Unix() / int64(c.bucketSize.Seconds())
@@ -77,8 +87,9 @@ func (c *Counter) IncBy(key string, n int) {
 
 // Sum 返回 key 在最近 window 内的总数。
 func (c *Counter) Sum(key string, window time.Duration) int {
-	if window > c.maxWindow {
-		window = c.maxWindow
+	maxWindow := time.Duration(c.maxWindow.Load())
+	if window > maxWindow {
+		window = maxWindow
 	}
 	v, ok := c.data.Load(key)
 	if !ok {
@@ -101,7 +112,8 @@ func (c *Counter) Sum(key string, window time.Duration) int {
 
 // GC 清理超出 maxWindow 的桶。
 func (c *Counter) GC() {
-	cutoff := c.bucketKey(c.clock().Add(-c.maxWindow))
+	maxWindow := time.Duration(c.maxWindow.Load())
+	cutoff := c.bucketKey(c.clock().Add(-maxWindow))
 	c.data.Range(func(k, v any) bool {
 		cb := v.(*counterBuckets)
 		cb.mu.Lock()
@@ -128,7 +140,7 @@ type distinctBuckets struct {
 
 type DistinctSet struct {
 	bucketSize time.Duration
-	maxWindow  time.Duration
+	maxWindow  atomic.Int64
 	data       sync.Map
 	clock      func() time.Time
 }
@@ -140,14 +152,23 @@ func NewDistinctSet(bucketSize, maxWindow time.Duration) *DistinctSet {
 	if maxWindow < bucketSize {
 		maxWindow = bucketSize
 	}
-	return &DistinctSet{
+	d := &DistinctSet{
 		bucketSize: bucketSize,
-		maxWindow:  maxWindow,
 		clock:      time.Now,
 	}
+	d.maxWindow.Store(int64(maxWindow))
+	return d
 }
 
 func (d *DistinctSet) SetClock(f func() time.Time) { d.clock = f }
+
+// SetMaxWindow 热更新保留窗口。缩短后由下一次 GC 释放旧桶。
+func (d *DistinctSet) SetMaxWindow(window time.Duration) {
+	if window < d.bucketSize {
+		window = d.bucketSize
+	}
+	d.maxWindow.Store(int64(window))
+}
 
 func (d *DistinctSet) bucketKey(t time.Time) int64 {
 	return t.Unix() / int64(d.bucketSize.Seconds())
@@ -203,8 +224,9 @@ func (d *DistinctSet) Add(key, val string) {
 
 // Count 返回 key 在最近 window 内 distinct val 的数量。
 func (d *DistinctSet) Count(key string, window time.Duration) int {
-	if window > d.maxWindow {
-		window = d.maxWindow
+	maxWindow := time.Duration(d.maxWindow.Load())
+	if window > maxWindow {
+		window = maxWindow
 	}
 	v, ok := d.data.Load(key)
 	if !ok {
@@ -228,7 +250,8 @@ func (d *DistinctSet) Count(key string, window time.Duration) int {
 }
 
 func (d *DistinctSet) GC() {
-	cutoff := d.bucketKey(d.clock().Add(-d.maxWindow))
+	maxWindow := time.Duration(d.maxWindow.Load())
+	cutoff := d.bucketKey(d.clock().Add(-maxWindow))
 	d.data.Range(func(k, v any) bool {
 		db := v.(*distinctBuckets)
 		db.mu.Lock()

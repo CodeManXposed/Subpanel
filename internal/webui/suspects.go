@@ -11,7 +11,7 @@ import (
 )
 
 // POST /r/{report_id} — v2board 上报接口(不走登录,用 secret key 鉴权)
-// 挂在订阅网关(80端口),路径不暴露机场名,用随机 report_id。
+// 挂在订阅网关入口,路径不暴露机场名,用随机 report_id。
 func (s *Server) apiReport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
@@ -43,17 +43,17 @@ func (s *Server) apiReport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Token             string   `json:"token"`
-		UUID              string   `json:"uuid"`
-		Email             string   `json:"email"`
-		TrafficUsed       int64    `json:"traffic_used"`
-		TrafficTotal      int64    `json:"traffic_total"`
-		WalletBalance     int64    `json:"wallet_balance"`
-		CommissionBalance int64    `json:"commission_balance"`
-		UserCreatedAt     string   `json:"user_created_at"`
-		IP                string   `json:"ip"`
-		UserAgent         string   `json:"user_agent"`
-		SiteDomain        string   `json:"site_domain"`
+		Token             string `json:"token"`
+		UUID              string `json:"uuid"`
+		Email             string `json:"email"`
+		TrafficUsed       int64  `json:"traffic_used"`
+		TrafficTotal      int64  `json:"traffic_total"`
+		WalletBalance     int64  `json:"wallet_balance"`
+		CommissionBalance int64  `json:"commission_balance"`
+		UserCreatedAt     string `json:"user_created_at"`
+		IP                string `json:"ip"`
+		UserAgent         string `json:"user_agent"`
+		SiteDomain        string `json:"site_domain"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, 400, map[string]any{"error": "bad json: " + err.Error()})
@@ -86,7 +86,7 @@ func (s *Server) apiReport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
-// ReportHandler 返回挂在订阅网关(80端口)的上报路由 handler。
+// ReportHandler 返回挂在订阅网关入口的上报路由 handler。
 func (s *Server) ReportHandler() http.Handler {
 	return http.HandlerFunc(s.apiReport)
 }
@@ -181,7 +181,9 @@ func (s *Server) apiSuspectDetail(w http.ResponseWriter, r *http.Request) {
 			d.ISP = info.ISP
 		}
 		d.ASN = info.ASN
+		d.ASNOrg = info.ASNOrg
 		d.UsageType = info.UsageType
+		d.UsageSource = info.UsageTypeSource
 	}
 	for i := range detail.IPs {
 		enrich(&detail.IPs[i])

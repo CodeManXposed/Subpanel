@@ -2,6 +2,7 @@ package geoip
 
 import (
 	"os"
+	"sync"
 	"testing"
 )
 
@@ -57,6 +58,16 @@ func TestParseRecord(t *testing.T) {
 	}
 }
 
+func TestParseRecord_OfficialFiveFields(t *testing.T) {
+	info := parseRecord("中国|0|浙江省|杭州市|阿里云")
+	if info.Country != "中国" || info.Province != "浙江省" || info.City != "杭州市" {
+		t.Fatalf("unexpected location: %+v", info)
+	}
+	if info.ISOCode != "CN" || info.CloudProvider != "aliyun" {
+		t.Fatalf("unexpected derived fields: %+v", info)
+	}
+}
+
 func TestParseRecord_CloudProviderOutsideISP(t *testing.T) {
 	raw := "中国|河北省|张家口市|阿里|CN|||||||||||||CN"
 	info := parseRecord(raw)
@@ -99,6 +110,11 @@ func TestLookup_WithXdb(t *testing.T) {
 	if err := s.Load(path); err != nil {
 		t.Fatalf("load: %v", err)
 	}
+	if asnPath := os.Getenv("SUBGW_TEST_ASN"); asnPath != "" {
+		if err := s.LoadASN(asnPath); err != nil {
+			t.Fatalf("load ASN: %v", err)
+		}
+	}
 	defer s.Close()
 
 	info := s.Lookup("47.96.0.1")
@@ -111,9 +127,54 @@ func TestLookup_WithXdb(t *testing.T) {
 	if info.CloudProvider != "aliyun" {
 		t.Errorf("cloud_provider: %q", info.CloudProvider)
 	}
+	if info.ISP == "" {
+		t.Error("ISP should not be empty")
+	}
+	if os.Getenv("SUBGW_TEST_ASN") != "" {
+		if info.ASN != "AS37963" || info.ASNOrg == "" || info.UsageType == "" {
+			t.Errorf("ASN enrichment incomplete: %+v", info)
+		}
+		cf := s.Lookup("1.1.1.1")
+		if cf == nil || cf.ASN != "AS13335" || cf.UsageType != "CDN" || cf.UsageTypeSource != "inferred" {
+			t.Errorf("Cloudflare enrichment incomplete: %+v", cf)
+		}
+	}
 
 	// 无效 IP
 	if info := s.Lookup("not-an-ip"); info != nil {
 		t.Errorf("无效 IP 应返回 nil")
 	}
+}
+
+func TestLookupConcurrentWithXdb(t *testing.T) {
+	path := os.Getenv("SUBGW_TEST_XDB")
+	if path == "" {
+		t.Skip("SUBGW_TEST_XDB 未设置,跳过 xdb 并发集成测试")
+	}
+	s := New()
+	if err := s.Load(path); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if asnPath := os.Getenv("SUBGW_TEST_ASN"); asnPath != "" {
+		if err := s.LoadASN(asnPath); err != nil {
+			t.Fatalf("load ASN: %v", err)
+		}
+	}
+	defer s.Close()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				info := s.Lookup("47.96.0.1")
+				if info == nil || info.Country != "中国" || info.CloudProvider != "aliyun" {
+					t.Errorf("concurrent lookup returned %+v", info)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }

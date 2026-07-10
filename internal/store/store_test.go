@@ -24,6 +24,7 @@ func TestSubmitAndQueryEvent(t *testing.T) {
 		TS: time.Now(), Tenant: "t1", ClientIP: "1.1.1.1", UA: "curl/8",
 		TokenHash: "abc", Flag: "clash", Path: "/api/v1/client/subscribe",
 		Status: 200, Action: "pass", RuleTags: []string{}, UpstreamMS: 12, RespSize: 1234,
+		Country: "US", UsageType: "CDN", ISP: "Cloudflare",
 	})
 	// 等待 flush
 	time.Sleep(400 * time.Millisecond)
@@ -37,6 +38,9 @@ func TestSubmitAndQueryEvent(t *testing.T) {
 	}
 	if evs[0].ClientIP != "1.1.1.1" || evs[0].Action != "pass" {
 		t.Errorf("unexpected event: %+v", evs[0])
+	}
+	if evs[0].Country != "US" || evs[0].UsageType != "CDN" || evs[0].ISP != "Cloudflare" {
+		t.Errorf("geo fields were not restored: %+v", evs[0])
 	}
 }
 

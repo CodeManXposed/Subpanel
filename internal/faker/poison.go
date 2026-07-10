@@ -3,13 +3,13 @@
 // 保留节点数量、名字、端口、加密方式、UUID/密码不变。
 //
 // 思路:
-//   1. 顶层 body 若是 base64 整体编码(常见于 v2board 默认订阅),先解码;
-//   2. 对纯文本里的 URI 节点(ss / trojan / vless / ssr / hysteria(2) / tuic / anytls / naive 等)
-//      用正则替换 @HOST:PORT 中的 HOST;
-//   3. vmess:// 特殊处理:解 base64 JSON → 改 "add" → 重编;
-//   4. Clash YAML 用正则改 `server: xxx`;
-//   5. sing-box JSON 用正则改 `"server":"xxx"`;
-//   6. 处理完若原 body 是 base64,重新编码回去。
+//  1. 顶层 body 若是 base64 整体编码(常见于 v2board 默认订阅),先解码;
+//  2. 对纯文本里的 URI 节点(ss / trojan / vless / ssr / hysteria(2) / tuic / anytls / naive 等)
+//     用正则替换 @HOST:PORT 中的 HOST;
+//  3. vmess:// 特殊处理:解 base64 JSON → 改 "add" → 重编;
+//  4. Clash YAML 用正则改 `server: xxx`;
+//  5. sing-box JSON 用正则改 `"server":"xxx"`;
+//  6. 处理完若原 body 是 base64,重新编码回去。
 //
 // 解析失败的字段保持原样,绝不抛错(投毒永远要"看起来正常")。
 package faker
@@ -35,12 +35,16 @@ func randBlackholeIP() string {
 var (
 	// vmess://<base64-json>
 	vmessRE = regexp.MustCompile(`vmess://([A-Za-z0-9+/=_-]+)`)
+	// 所有声明支持的 URI 节点候选。用于确认没有出现只改写一部分节点的情况。
+	proxyURIRE = regexp.MustCompile(
+		`(?i)(vmess|ssr?|trojan|vless|hysteria2?|tuic|anytls|naive\+https?|naive)://[^\s]+`,
+	)
 
 	// ss/trojan/vless/ssr/hysteria/hysteria2/tuic/anytls/naive 等 URI 形态:
 	//   scheme://<userinfo>@<host>[:<port>][?...][#name]
 	// 抓 host 段(不含 :port)。
 	uriHostRE = regexp.MustCompile(
-		`(ssr?|trojan|vless|hysteria2?|tuic|anytls|naive\+https?|naive)://([^@\s/?#]+)@([^:/\s?#]+)`,
+		`(ssr?|trojan|vless|hysteria2?|tuic|anytls|naive\+https?|naive)://([^@\s/?#]+)@(\[[^\]\s]+\]|[^:/\s?#]+)`,
 	)
 
 	// Clash YAML: 行内 `server: 1.2.3.4` 或 `server: example.com`
@@ -60,18 +64,43 @@ var (
 // 会被 route 引用,所以这里只标 URI fragment / vmess ps / Clash name。
 const poisonMark = "!"
 
-// Poison 改写 body 中所有节点 host 为 RFC5737 黑洞 IP。content-type 仅作参考。
+// PoisonResult 是投毒结果。Replacements 只统计实际改写的节点地址,
+// 调用方必须在它为 0 时走安全兜底,不能把原订阅返回给可疑请求。
+type PoisonResult struct {
+	Body         []byte
+	Candidates   int
+	Replacements int
+}
+
+// Complete 表示至少识别到一个节点,且每个候选节点地址都已完成改写。
+func (r PoisonResult) Complete() bool {
+	return r.Candidates > 0 && r.Replacements == r.Candidates
+}
+
+// Poison 改写 body 中所有节点 host 为 RFC5737 黑洞 IP。
+// 保留旧签名给包内外兼容;需要判断是否真正投毒成功时使用 PoisonWithResult。
 func Poison(body []byte, contentType string) []byte {
+	return PoisonWithResult(body, contentType).Body
+}
+
+// PoisonWithResult 改写节点地址并返回实际改写数量。content-type 仅作参考。
+func PoisonWithResult(body []byte, contentType string) PoisonResult {
+	_ = contentType
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 {
-		return body
+		return PoisonResult{Body: body}
 	}
 	// 步骤 1:尝试整体 base64 解码(v2board 默认订阅常见)。
 	if dec, ok := tryBase64(trimmed); ok && looksLikeProxyURIs(dec) {
-		out := poisonText(dec)
-		return []byte(base64.StdEncoding.EncodeToString(out))
+		out, candidates, replacements := poisonText(dec)
+		return PoisonResult{
+			Body:         []byte(base64.StdEncoding.EncodeToString(out)),
+			Candidates:   candidates,
+			Replacements: replacements,
+		}
 	}
-	return poisonText(body)
+	out, candidates, replacements := poisonText(body)
+	return PoisonResult{Body: out, Candidates: candidates, Replacements: replacements}
 }
 
 func tryBase64(b []byte) ([]byte, bool) {
@@ -103,25 +132,48 @@ func looksLikeProxyURIs(b []byte) bool {
 			strings.Contains(s, "tuic://") || strings.Contains(s, "anytls://"))
 }
 
-func poisonText(b []byte) []byte {
+func poisonText(b []byte) ([]byte, int, int) {
 	s := string(b)
+	candidates := len(proxyURIRE.FindAllStringIndex(s, -1)) +
+		len(yamlServerRE.FindAllStringIndex(s, -1)) +
+		len(jsonServerRE.FindAllStringIndex(s, -1))
+	replacements := 0
 	// 1) vmess://<b64-json>(改 add + 在 ps 前加 !)
-	s = vmessRE.ReplaceAllStringFunc(s, replaceVmess)
+	s = vmessRE.ReplaceAllStringFunc(s, func(match string) string {
+		out := replaceVmess(match)
+		if out != match {
+			replacements++
+		}
+		return out
+	})
 	// 2) URI 形态 host
-	s = uriHostRE.ReplaceAllStringFunc(s, replaceURIHost)
+	s = uriHostRE.ReplaceAllStringFunc(s, func(match string) string {
+		out := replaceURIHost(match)
+		if out != match {
+			replacements++
+		}
+		return out
+	})
 	// 3) URI fragment #name —— 节点名前加 !
 	s = uriNameRE.ReplaceAllStringFunc(s, replaceURIName)
 	// 4) Clash YAML `server: xxx`
-	s = yamlServerRE.ReplaceAllStringFunc(s, replaceYAMLServer)
+	s = yamlServerRE.ReplaceAllStringFunc(s, func(match string) string {
+		out := replaceYAMLServer(match)
+		if out != match {
+			replacements++
+		}
+		return out
+	})
 	// 5) Clash YAML `- name: xxx` —— 节点名前加 !
 	s = yamlNameRE.ReplaceAllStringFunc(s, replaceYAMLName)
 	// 6) sing-box / 通用 JSON `"server":"xxx"`
+	replacements += len(jsonServerRE.FindAllStringIndex(s, -1))
 	s = jsonServerRE.ReplaceAllString(s, `"server":"`+"__BH__"+`"`)
 	// JSON 的占位符要逐个换成不同的随机 IP,避免所有节点同 IP
 	for strings.Contains(s, "__BH__") {
 		s = strings.Replace(s, "__BH__", randBlackholeIP(), 1)
 	}
-	return []byte(s)
+	return []byte(s), candidates, replacements
 }
 
 func replaceVmess(match string) string {

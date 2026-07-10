@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -12,26 +13,27 @@ import (
 )
 
 type Config struct {
-	Listen       string      `yaml:"listen"`         // gateway 反代监听,如 127.0.0.1:8443
-	AdminListen  string      `yaml:"admin_listen"`   // Web UI 监听,如 127.0.0.1:9090
-	HMACSaltFile string      `yaml:"hmac_salt_file"` // HMAC salt 文件路径
-	Storage      Storage     `yaml:"storage"`
-	RealIP       RealIP      `yaml:"real_ip"`
-	Tenants      []Tenant    `yaml:"tenants"`
+	Listen       string   `yaml:"listen"`         // gateway 反代监听,如 127.0.0.1:8443
+	AdminListen  string   `yaml:"admin_listen"`   // Web UI 监听,如 127.0.0.1:9090
+	HMACSaltFile string   `yaml:"hmac_salt_file"` // HMAC salt 文件路径
+	Storage      Storage  `yaml:"storage"`
+	RealIP       RealIP   `yaml:"real_ip"`
+	Tenants      []Tenant `yaml:"tenants"`
 	// Paths 全局订阅路径已弃用,改为每租户独立 subscribe_path。
 	// 保留字段用于解析旧配置时给个明确报错提示(见 validate)。
-	Paths Paths `yaml:"paths,omitempty"`
-	Detector     DetectorCfg `yaml:"detector"`
+	Paths    Paths       `yaml:"paths,omitempty"`
+	Detector DetectorCfg `yaml:"detector"`
 	// Actions 已废弃:命中规则即投毒,无等级映射。yaml 老配置里的 actions 节会被忽略。
-	Faker        FakerCfg    `yaml:"faker"`
-	Admin        AdminCfg    `yaml:"admin"`
-	GeoIP        GeoIPCfg    `yaml:"geoip"`
+	Faker FakerCfg `yaml:"faker"`
+	Admin AdminCfg `yaml:"admin"`
+	GeoIP GeoIPCfg `yaml:"geoip"`
 }
 
 // GeoIPCfg ip2region xdb 配置。xdb_path 为空时整体禁用 geoip 功能,
 // from_cloud_ip / country / usage_type / isp 规则全部失效。
 type GeoIPCfg struct {
-	XDBPath string `yaml:"xdb_path"` // 绝对路径,例如 /tmp/sub-panel/ip2region.xdb
+	XDBPath string `yaml:"xdb_path"` // 城市/ISP xdb
+	ASNPath string `yaml:"asn_path"` // IPtoASN IPv4 TSV.GZ
 }
 
 type Storage struct {
@@ -83,17 +85,17 @@ type Rule struct {
 }
 
 type When struct {
-	TokenFreq        *Cond    `yaml:"token_freq"`
-	IPFreq           *Cond    `yaml:"ip_freq"`
-	TokenDistinctIPs *Cond    `yaml:"token_distinct_ips"`
-	IPDistinctTokens *Cond    `yaml:"ip_distinct_tokens"`
-	FromCloudIP      bool     `yaml:"from_cloud_ip"` // 命中云厂商 IP 库
+	TokenFreq        *Cond `yaml:"token_freq"`
+	IPFreq           *Cond `yaml:"ip_freq"`
+	TokenDistinctIPs *Cond `yaml:"token_distinct_ips"`
+	IPDistinctTokens *Cond `yaml:"ip_distinct_tokens"`
+	FromCloudIP      bool  `yaml:"from_cloud_ip"` // 命中云厂商 IP 库
 
 	// GeoIP 字段(需配 geoip.xdb_path 才生效)
 	// 同一字段 in 和 not_in 同时配时,not_in 优先(用于"非 CN 拒"这种反向白名单语义)
-	CountryIn      []string `yaml:"country_in"`       // 国家命中列表(ISO2/中文名都行)
-	CountryNotIn   []string `yaml:"country_not_in"`   // 国家不在列表则命中(反向白名单)
-	UsageTypeIn    []string `yaml:"usage_type_in"`    // IDC/CDN/DYN/MOB/COM 命中
+	CountryIn      []string `yaml:"country_in"`     // 国家命中列表(ISO2/中文名都行)
+	CountryNotIn   []string `yaml:"country_not_in"` // 国家不在列表则命中(反向白名单)
+	UsageTypeIn    []string `yaml:"usage_type_in"`  // IDC/CDN/DYN/MOB/COM 命中
 	UsageTypeNotIn []string `yaml:"usage_type_not_in"`
 	ISPContains    []string `yaml:"isp_contains"` // ISP 子串包含,任一命中即触发
 }
@@ -116,7 +118,7 @@ type AdminCfg struct {
 	Username     string   `yaml:"username"`
 	PasswordHash string   `yaml:"password_hash"` // bcrypt
 	SessionTTL   Duration `yaml:"session_ttl"`
-	SessionKey   string   `yaml:"session_key"`   // 用于签 cookie,空则自动生成
+	SessionKey   string   `yaml:"session_key"` // 用于签 cookie,空则自动生成
 }
 
 // Duration 支持 "5m" / "24h" / "30d" 这种字符串
@@ -211,6 +213,9 @@ func (c *Config) validate() error {
 // validAction / ActionsCfg 已删除:命中规则统一投毒,无 action 概念。
 
 func (c *Config) applyDefaults() {
+	if c.GeoIP.ASNPath == "" && c.GeoIP.XDBPath != "" {
+		c.GeoIP.ASNPath = filepath.Join(filepath.Dir(c.GeoIP.XDBPath), "ip2asn-v4.tsv.gz")
+	}
 	if c.Storage.BatchFlushInterval == 0 {
 		c.Storage.BatchFlushInterval = Duration(time.Second)
 	}
@@ -245,8 +250,9 @@ func (c *Config) applyDefaults() {
 // 匹配规则:取请求路径,按 tenant.SubscribePath 做"路径前缀"匹配,
 // 命中后 pathMatched=true。Host 头不参与路由。
 // 兼容两种命中形态:
-//   1. 完全相等(tp == urlPath)
-//   2. urlPath 以 tp+"/" 开头(允许子路径,例如 /sub/cat/extra)
+//  1. 完全相等(tp == urlPath)
+//  2. urlPath 以 tp+"/" 开头(允许子路径,例如 /sub/cat/extra)
+//
 // 没命中任何 tenant 返回 (nil, false)。
 func (c *Config) TenantByPath(urlPath string) (tenant *Tenant, pathMatched bool) {
 	urlPath = strings.TrimRight(urlPath, "/")
