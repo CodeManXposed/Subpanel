@@ -17,6 +17,7 @@ salt
 # 测试 / 临时配置
 config.yml
 config.local.yml
+.codex-tmp/
 
 # IDE
 .idea/

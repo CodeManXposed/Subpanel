@@ -44,6 +44,48 @@ func TestSubmitAndQueryEvent(t *testing.T) {
 	}
 }
 
+func TestCloudASNEventFiltersAndSuspectStats(t *testing.T) {
+	st := newTestStore(t)
+	now := time.Now()
+	st.SubmitEvent(Event{
+		TS: now, Tenant: "t1", ClientIP: "3.5.140.1", TokenHash: "cloud-user", Action: "pass",
+		ASN: "AS16509", ASNOrg: "Amazon.com, Inc.", CloudProvider: "aws", UsageType: "IDC",
+	})
+	st.SubmitEvent(Event{
+		TS: now, Tenant: "t1", ClientIP: "8.8.8.8", TokenHash: "normal-user", Action: "pass",
+		ASN: "AS15169", ASNOrg: "Google LLC",
+	})
+	time.Sleep(400 * time.Millisecond)
+
+	for name, filter := range map[string]EventFilter{
+		"cloud":    {Tenant: "t1", Cloud: "yes"},
+		"provider": {Tenant: "t1", Provider: "AWS"},
+		"asn":      {Tenant: "t1", ASN: "as16509"},
+	} {
+		evs, err := st.QueryEvents(context.Background(), filter)
+		if err != nil {
+			t.Fatalf("%s filter: %v", name, err)
+		}
+		if len(evs) != 1 || evs[0].TokenHash != "cloud-user" || evs[0].ASNOrg != "Amazon.com, Inc." {
+			t.Fatalf("%s filter returned %+v", name, evs)
+		}
+	}
+
+	rows, err := st.QuerySuspects("t1", now.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cloud SuspectRow
+	for _, row := range rows {
+		if row.Token == "cloud-user" {
+			cloud = row
+		}
+	}
+	if cloud.CloudPullCount != 1 || len(cloud.CloudProviders) != 1 || cloud.CloudProviders[0] != "aws" || len(cloud.CloudASNs) != 1 || cloud.CloudASNs[0] != "AS16509" {
+		t.Fatalf("unexpected cloud suspect stats: %+v", cloud)
+	}
+}
+
 func TestAddAndListBans(t *testing.T) {
 	st := newTestStore(t)
 	exp := time.Now().Add(time.Hour)
@@ -123,6 +165,32 @@ func TestSummary(t *testing.T) {
 	}
 }
 
+func TestSummaryTopTokensIncludeTenantAndStaySeparate(t *testing.T) {
+	st := newTestStore(t)
+	now := time.Now()
+	st.SubmitEvent(Event{TS: now, Tenant: "sled", ClientIP: "1.1.1.1", TokenHash: "same-token", Action: "pass"})
+	st.SubmitEvent(Event{TS: now, Tenant: "rfs", ClientIP: "2.2.2.2", TokenHash: "same-token", Action: "pass"})
+	time.Sleep(400 * time.Millisecond)
+
+	s, err := st.Summary(context.Background(), "", now.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.TopTokens) != 2 {
+		t.Fatalf("same token from two tenants must stay separate: %+v", s.TopTokens)
+	}
+	seen := map[string]bool{}
+	for _, row := range s.TopTokens {
+		if row.Key != "same-token" || row.Count != 1 {
+			t.Fatalf("unexpected top token row: %+v", row)
+		}
+		seen[row.Tenant] = true
+	}
+	if !seen["sled"] || !seen["rfs"] {
+		t.Fatalf("tenant missing from top tokens: %+v", s.TopTokens)
+	}
+}
+
 func TestQuerySuspectsFromEventsWithoutReports(t *testing.T) {
 	st := newTestStore(t)
 	now := time.Now()
@@ -166,6 +234,24 @@ func TestQuerySuspectsFromEventsWithoutReports(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].Token != "tok-b" {
 		t.Fatalf("resolved token should be hidden, got %+v", rows)
+	}
+
+	// 已处理后再次出现的新请求必须重新进入列表，并标记为重点关注。
+	st.SubmitEvent(Event{TS: time.Now().Add(time.Second), Tenant: "t1", ClientIP: "9.9.9.9", UA: "clash", TokenHash: "tok-a", Action: "fake"})
+	time.Sleep(400 * time.Millisecond)
+	rows, err = st.QuerySuspects("t1", now.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].Token != "tok-a" || !rows[0].ReTriggered || rows[0].PullCount != 1 {
+		t.Fatalf("retriggered token should return as first priority: %+v", rows)
+	}
+	evs, err := st.QueryEvents(context.Background(), EventFilter{Tenant: "t1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evs) != 2 || evs[0].TokenHash != "tok-a" || !evs[0].ReTriggered {
+		t.Fatalf("events should hide archived rows and show retrigger: %+v", evs)
 	}
 }
 

@@ -198,6 +198,13 @@ button {
   gap: 6px;
 }
 button:hover { background: var(--surface-hover); border-color: #cbd5e1; }
+button.ip-copy-btn {
+  margin-left: 6px;
+  padding: 2px 7px;
+  font-size: 11px;
+  line-height: 1.3;
+  vertical-align: middle;
+}
 button.primary {
   background: var(--primary);
   color: #fff;

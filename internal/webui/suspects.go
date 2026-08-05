@@ -182,6 +182,7 @@ func (s *Server) apiSuspectDetail(w http.ResponseWriter, r *http.Request) {
 		}
 		d.ASN = info.ASN
 		d.ASNOrg = info.ASNOrg
+		d.CloudProvider = info.CloudProvider
 		d.UsageType = info.UsageType
 		d.UsageSource = info.UsageTypeSource
 	}

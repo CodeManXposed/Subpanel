@@ -70,7 +70,7 @@
       <div class="avatar" id="userAvatar">A</div>
       <div>
         <div class="user-name">admin</div>
-        <div class="muted" style="font-size:11px">Sub-Panel v0.1.35</div>
+        <div class="muted" style="font-size:11px">Sub-Panel v0.1.40</div>
       </div>
       <button class="logout-btn" id="logoutBtn" title="退出">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
@@ -109,7 +109,7 @@
           </div>
           <div class="card">
             <h3>请求量最高 订阅</h3>
-            <table id="topTokens"><thead><tr><th>Token</th><th style="text-align:right">请求数</th></tr></thead><tbody></tbody></table>
+            <table id="topTokens"><thead><tr><th>站点 / Token</th><th style="text-align:right">请求数</th></tr></thead><tbody></tbody></table>
           </div>
         </div>
       </section>
@@ -162,6 +162,25 @@
               <option value="NET">基础设施 NET</option>
               <option value="BOGON">保留 IP</option>
             </select>
+            <select id="evCloud" title="只看云厂商或非云厂商 ASN">
+              <option value="">所有网络</option>
+              <option value="yes">仅云厂商 ASN</option>
+              <option value="no">排除云厂商 ASN</option>
+            </select>
+            <select id="evProvider" title="按具体云厂商筛选">
+              <option value="">所有云厂商</option>
+              <option value="aws">AWS</option><option value="azure">Azure</option>
+              <option value="gcp">Google Cloud</option><option value="oracle">Oracle Cloud</option>
+              <option value="aliyun">阿里云</option><option value="tencent">腾讯云</option>
+              <option value="huawei">华为云</option><option value="bytedance">火山/字节云</option>
+              <option value="baidu">百度云</option><option value="jdcloud">京东云</option>
+              <option value="ucloud">UCloud</option><option value="qingcloud">青云</option>
+              <option value="vultr">Vultr</option><option value="digitalocean">DigitalOcean</option>
+              <option value="linode">Linode/Akamai</option><option value="hetzner">Hetzner</option>
+              <option value="ovh">OVH</option><option value="cloudflare">Cloudflare</option>
+              <option value="akamai">Akamai</option><option value="fastly">Fastly</option>
+            </select>
+            <input id="evASN" placeholder="ASN，如 AS16509" style="width:145px">
             <label class="bl-toggle" style="margin:0;padding:6px 10px" title="默认隐藏白名单 IP 的请求"><input type="checkbox" id="evShowWL"><span style="font-size:13px">显示白名单</span></label>
             <button class="primary" id="evQuery">查询</button>
             <button class="danger" id="evPurge" title="清空当前机场的请求日志和异常记录">清空日志</button>
@@ -316,12 +335,49 @@
                 <option value="pull">按拉取次数</option>
                 <option value="usage">按使用率(低→高)</option>
               </select>
+              <select id="suspectCloud" style="width:auto" title="按云厂商拉取行为筛选">
+                <option value="">全部网络</option>
+                <option value="yes">使用过云厂商 ASN</option>
+                <option value="only">仅按云拉取排序</option>
+                <option value="no">未使用云厂商 ASN</option>
+              </select>
+              <select id="suspectProvider" style="width:auto" title="筛选具体云厂商">
+                <option value="">所有云厂商</option>
+                <option value="aws">AWS</option><option value="azure">Azure</option>
+                <option value="gcp">Google Cloud</option><option value="oracle">Oracle Cloud</option>
+                <option value="aliyun">阿里云</option><option value="tencent">腾讯云</option>
+                <option value="huawei">华为云</option><option value="bytedance">火山/字节云</option>
+                <option value="baidu">百度云</option><option value="jdcloud">京东云</option>
+                <option value="ucloud">UCloud</option><option value="qingcloud">青云</option>
+                <option value="vultr">Vultr</option><option value="digitalocean">DigitalOcean</option>
+                <option value="linode">Linode/Akamai</option><option value="hetzner">Hetzner</option>
+                <option value="ovh">OVH</option><option value="cloudflare">Cloudflare</option>
+                <option value="akamai">Akamai</option><option value="fastly">Fastly</option>
+              </select>
+              <input id="suspectASN" placeholder="筛选 ASN，如 AS16509" style="width:165px">
             </div>
           </div>
           <p class="muted" style="margin:0 0 12px">
-            基于 v2board 上报的流量数据 × 订阅拉取行为交叉分析。按独立 IP / UA / 拉取次数 / 使用率排序,自行研判。支持顶栏机场筛选。
+            基于 v2board 上报的流量数据 × 订阅拉取行为交叉分析。可筛选使用云厂商 IP 拉取订阅的用户，并查看具体厂商、ASN 与 ASN 组织。支持顶栏机场筛选。
           </p>
           <div id="suspectsList" class="ev-list"></div>
+        </div>
+        <div class="card" style="margin-top:16px">
+          <div class="card-header">
+            <h3>已处理用户</h3>
+            <span class="muted" style="font-size:13px">已归档的用户会保留在这里；后续再次触发仍会重新进入上方嫌疑列表。</span>
+          </div>
+          <div class="datatable" style="margin-top:8px">
+            <table>
+              <thead><tr>
+                <th>Token</th>
+                <th>机场</th>
+                <th>处理时间</th>
+                <th style="width:100px">操作</th>
+              </tr></thead>
+              <tbody id="suspectResolvedTbody"></tbody>
+            </table>
+          </div>
         </div>
       </section>
 

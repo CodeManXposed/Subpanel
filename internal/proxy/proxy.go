@@ -47,9 +47,8 @@ type Gateway struct {
 	requests atomic.Uint64
 	logger   *slog.Logger
 
-	// 可选:GeoIP 查询,用于把 country/usage_type/isp 落进请求日志
-	// nil 时三个字段留空,不影响其他流程
-	geoLookup func(ip string) (country, usageType, isp string)
+	// 可选:GeoIP 查询,用于把地区、ASN 与云厂商信息落进请求日志。
+	geoLookup func(ip string) NetworkInfo
 
 	// 可选:云厂商 IP 命中查询(给全局黑名单"云厂商一键"用)
 	cloudLookup func(ip string) (bool, string)
@@ -65,8 +64,18 @@ type Gateway struct {
 	snap atomic.Pointer[tenantSnap]
 }
 
+// NetworkInfo 是写入请求事件的网络画像。
+type NetworkInfo struct {
+	Country       string
+	UsageType     string
+	ISP           string
+	ASN           string
+	ASNOrg        string
+	CloudProvider string
+}
+
 // SetGeoLookup 注入 GeoIP 查询(给请求日志用)。
-func (g *Gateway) SetGeoLookup(fn func(ip string) (country, usageType, isp string)) {
+func (g *Gateway) SetGeoLookup(fn func(ip string) NetworkInfo) {
 	g.geoLookup = fn
 }
 
@@ -89,9 +98,9 @@ func (g *Gateway) SetIPWhitelist(fn func(ip string) bool) {
 }
 
 // geoFor 包装 geoLookup,nil-safe。
-func (g *Gateway) geoFor(ip string) (country, usageType, isp string) {
+func (g *Gateway) geoFor(ip string) NetworkInfo {
 	if g.geoLookup == nil || ip == "" {
-		return
+		return NetworkInfo{}
 	}
 	return g.geoLookup(ip)
 }
@@ -268,10 +277,11 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 3.5) 全局黑名单(海外/云/ISP/浏览器)— 粗粒度规则,优先于触发规则。
 	// 命中即投毒,不进 detector.Observe(不污染频率窗口)。
 	if g.bl != nil {
-		country, usageType, isp := g.geoFor(pr.ClientIP)
+		network := g.geoFor(pr.ClientIP)
 		// xdb 返回的 country 字段是中文,需要 ISO 码就要单独存。这里把 country
 		// 当 ISO 兜底字段两边都传,IsOverseaCountry 会两个都判。
 		var iso string
+		country := network.Country
 		if len(country) == 2 { // 启发式:两字母大写视作 ISO
 			iso = country
 			country = ""
@@ -281,7 +291,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			isCloud, _ = g.cloudLookup(pr.ClientIP)
 		}
 		accept := r.Header.Get("Accept")
-		if hit, tag := g.bl.Evaluate(iso, country, usageType, isp, isCloud, accept, pr.UA); hit {
+		if hit, tag := g.bl.Evaluate(iso, country, network.UsageType, network.ISP, isCloud, accept, pr.UA); hit {
 			g.respondFake(w, r, pr, tokenHash, []string{tag}, start)
 			return
 		}
@@ -341,23 +351,26 @@ func (g *Gateway) transparentProxyWithLog(
 	rp.ServeHTTP(rw, r)
 
 	upstreamMS := time.Since(start).Milliseconds()
-	country, usageType, isp := g.geoFor(pr.ClientIP)
+	network := g.geoFor(pr.ClientIP)
 	g.st.SubmitEvent(store.Event{
-		TS:         start,
-		Tenant:     pr.Tenant.Name,
-		ClientIP:   pr.ClientIP,
-		UA:         pr.UA,
-		TokenHash:  tokenHash,
-		Flag:       pr.Flag,
-		Path:       pr.Path,
-		Status:     rw.status,
-		Action:     action,
-		RuleTags:   tags,
-		UpstreamMS: upstreamMS,
-		RespSize:   rw.size,
-		Country:    country,
-		UsageType:  usageType,
-		ISP:        isp,
+		TS:            start,
+		Tenant:        pr.Tenant.Name,
+		ClientIP:      pr.ClientIP,
+		UA:            pr.UA,
+		TokenHash:     tokenHash,
+		Flag:          pr.Flag,
+		Path:          pr.Path,
+		Status:        rw.status,
+		Action:        action,
+		RuleTags:      tags,
+		UpstreamMS:    upstreamMS,
+		RespSize:      rw.size,
+		Country:       network.Country,
+		UsageType:     network.UsageType,
+		ISP:           network.ISP,
+		ASN:           network.ASN,
+		ASNOrg:        network.ASNOrg,
+		CloudProvider: network.CloudProvider,
 	})
 }
 
@@ -462,23 +475,26 @@ func (g *Gateway) respondFake(
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(poisoned)
 
-	country, usageType, isp := g.geoFor(pr.ClientIP)
+	network := g.geoFor(pr.ClientIP)
 	g.st.SubmitEvent(store.Event{
-		TS:         start,
-		Tenant:     pr.Tenant.Name,
-		ClientIP:   pr.ClientIP,
-		UA:         pr.UA,
-		TokenHash:  tokenHash,
-		Flag:       pr.Flag,
-		Path:       pr.Path,
-		Status:     200,
-		Action:     "fake",
-		RuleTags:   tags,
-		UpstreamMS: time.Since(start).Milliseconds(),
-		RespSize:   int64(len(poisoned)),
-		Country:    country,
-		UsageType:  usageType,
-		ISP:        isp,
+		TS:            start,
+		Tenant:        pr.Tenant.Name,
+		ClientIP:      pr.ClientIP,
+		UA:            pr.UA,
+		TokenHash:     tokenHash,
+		Flag:          pr.Flag,
+		Path:          pr.Path,
+		Status:        200,
+		Action:        "fake",
+		RuleTags:      tags,
+		UpstreamMS:    time.Since(start).Milliseconds(),
+		RespSize:      int64(len(poisoned)),
+		Country:       network.Country,
+		UsageType:     network.UsageType,
+		ISP:           network.ISP,
+		ASN:           network.ASN,
+		ASNOrg:        network.ASNOrg,
+		CloudProvider: network.CloudProvider,
 	})
 }
 
@@ -541,23 +557,26 @@ func (g *Gateway) logEvent(
 	if pr != nil {
 		clientIP, ua, flag, path = pr.ClientIP, pr.UA, pr.Flag, pr.Path
 	}
-	country, usageType, isp := g.geoFor(clientIP)
+	network := g.geoFor(clientIP)
 	g.st.SubmitEvent(store.Event{
-		TS:         start,
-		Tenant:     tenantName,
-		ClientIP:   clientIP,
-		UA:         ua,
-		TokenHash:  tokenHash,
-		Flag:       flag,
-		Path:       path,
-		Status:     status,
-		Action:     action,
-		RuleTags:   tags,
-		UpstreamMS: upstreamMS,
-		RespSize:   respSize,
-		Country:    country,
-		UsageType:  usageType,
-		ISP:        isp,
+		TS:            start,
+		Tenant:        tenantName,
+		ClientIP:      clientIP,
+		UA:            ua,
+		TokenHash:     tokenHash,
+		Flag:          flag,
+		Path:          path,
+		Status:        status,
+		Action:        action,
+		RuleTags:      tags,
+		UpstreamMS:    upstreamMS,
+		RespSize:      respSize,
+		Country:       network.Country,
+		UsageType:     network.UsageType,
+		ISP:           network.ISP,
+		ASN:           network.ASN,
+		ASNOrg:        network.ASNOrg,
+		CloudProvider: network.CloudProvider,
 	})
 }
 

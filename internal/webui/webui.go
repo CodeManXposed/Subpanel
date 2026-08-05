@@ -310,6 +310,9 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 		TokenHash: q.Get("token"),
 		Action:    q.Get("action"),
 		Usage:     strings.ToUpper(strings.TrimSpace(q.Get("usage"))),
+		Cloud:     strings.ToLower(strings.TrimSpace(q.Get("cloud"))),
+		Provider:  strings.ToLower(strings.TrimSpace(q.Get("provider"))),
+		ASN:       strings.ToUpper(strings.TrimSpace(q.Get("asn"))),
 		Since:     time.Now().Add(-dur),
 		Limit:     limit,
 		Offset:    offset,
@@ -347,6 +350,9 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 				row.City = info.City
 				row.ASN = info.ASN
 				row.ASNOrg = info.ASNOrg
+				row.Event.ASN = info.ASN
+				row.Event.ASNOrg = info.ASNOrg
+				row.Event.CloudProvider = info.CloudProvider
 				row.Usage = info.UsageType
 				row.UsageSource = info.UsageTypeSource
 				// 覆盖嵌入 Event.ISP / Event.Country / Event.UsageType

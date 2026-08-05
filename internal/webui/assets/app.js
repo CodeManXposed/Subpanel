@@ -87,6 +87,15 @@ function usageLabel(u) {
   return USAGE_LABEL[k] || u;
 }
 
+const CLOUD_PROVIDER_LABEL = {
+  aws: 'AWS', azure: 'Azure', gcp: 'Google Cloud', oracle: 'Oracle Cloud',
+  aliyun: '阿里云', tencent: '腾讯云', huawei: '华为云', bytedance: '火山/字节云',
+  baidu: '百度云', jdcloud: '京东云', kingsoft: '金山云', ucloud: 'UCloud', qingcloud: '青云',
+  vultr: 'Vultr', digitalocean: 'DigitalOcean', linode: 'Linode/Akamai',
+  hetzner: 'Hetzner', ovh: 'OVH', cloudflare: 'Cloudflare', akamai: 'Akamai', fastly: 'Fastly',
+};
+function cloudProviderLabel(p) { return CLOUD_PROVIDER_LABEL[p] || p || ''; }
+
 function tagLabel(t) {
   if (!t) return '';
   // 处理 token_freq=10>=5 window=60s 这种带 = 的格式
@@ -238,7 +247,9 @@ async function loadSummary() {
   const tokTbody = $('#topTokens tbody'); tokTbody.innerHTML = '';
   (s.top_tokens || []).forEach(k => {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td class="mono copyable ev-token-expand" data-copy="${escapeHTML(k.key)}" data-full="${escapeHTML(k.key)}" data-short="${escapeHTML(tokenShort(k.key))}" title="点击展开 / 再点复制">${escapeHTML(tokenShort(k.key))}</td><td style="text-align:right" class="mono">${k.count}</td>`;
+    const site = String(k.tenant || '-').toLowerCase();
+    const shown = `(${site})${k.key || ''}`;
+    tr.innerHTML = `<td class="mono"><span>${escapeHTML(shown)}</span><button type="button" class="ip-copy-btn copyable" data-copy="${escapeHTML(k.key || '')}" title="只复制原始 Token">复制</button></td><td style="text-align:right" class="mono">${k.count}</td>`;
     tokTbody.appendChild(tr);
   });
   bindCopyHandlers(tokTbody);
@@ -264,9 +275,12 @@ function renderEventCard(e) {
   const usageBit = e.Usage
 	? `<span class="pill usage ${escapeHTML(String(e.Usage).toLowerCase())}" title="${escapeHTML(e.UsageSource === 'inferred' ? '根据 ISP/ASN 推断' : e.Usage)}">${escapeHTML(usageLabel(e.Usage))}${e.UsageSource === 'inferred' ? ' *' : ''}</span>`
 	: '';
+  const cloudBit = e.CloudProvider
+    ? `<span class="pill red" title="命中云厂商 ASN">云厂商 · ${escapeHTML(cloudProviderLabel(e.CloudProvider))}</span>`
+    : '';
   // 已处理按钮:仅当有 token 时显示。data-tenant 用事件自己的 tenant(不是当前过滤)。
   const resolveBtn = tokenFull
-    ? `<button class="ev-resolve" data-token="${escapeHTML(tokenFull)}" data-tenant="${escapeHTML(e.Tenant || '')}" title="标记此 token 为已处理,后续不再出现">已处理</button>`
+    ? `<button class="ev-resolve" data-token="${escapeHTML(tokenFull)}" data-tenant="${escapeHTML(e.Tenant || '')}" title="归档当前记录；后续再次触发会重新出现">已处理</button>`
     : '';
   // 重置滑窗按钮:把此 token 在风控滑窗里的累计计数清掉,把它"拉出来"。
   // 不是免疫——下次再命中规则照样投毒。仅对 fake / fake_failed 事件显示。
@@ -279,6 +293,8 @@ function renderEventCard(e) {
       <span class="ev-time mono">${escapeHTML(fmtTime(e.TS))}</span>
       <span class="ev-status mono">HTTP ${e.Status || '—'}</span>
       <span class="ev-spacer"></span>
+      ${e.ReTriggered ? '<span class="pill red">⚠ 已处理后再次触发</span>' : ''}
+      ${cloudBit}
       ${tags}
       ${resetBtn}
       ${resolveBtn}
@@ -306,7 +322,7 @@ function renderEventCard(e) {
       </span>
       <span class="ev-meta-item"><span class="ev-label">地区</span><span>${escapeHTML(region)}</span></span>
       <span class="ev-meta-item"><span class="ev-label">ISP</span><span>${isp}</span></span>
-	  <span class="ev-meta-item"><span class="ev-label">ASN</span><span class="mono" title="${escapeHTML(e.ASNOrg || '')}">${e.ASN ? escapeHTML(e.ASN) : '—'}</span></span>
+	  <span class="ev-meta-item"><span class="ev-label">ASN</span><span class="mono">${e.ASN ? escapeHTML(e.ASN) : '—'}</span>${e.ASNOrg ? `<span title="${escapeHTML(e.ASNOrg)}"> · ${escapeHTML(e.ASNOrg)}</span>` : ''}</span>
       ${usageBit ? `<span class="ev-meta-item"><span class="ev-label">用途</span>${usageBit}</span>` : ''}
     </div>
   `;
@@ -363,6 +379,9 @@ async function loadEvents(append = false) {
     limit: String(EV_PAGE_SIZE), offset: String(evOffset),
     ip: $('#evIP').value, token: $('#evToken').value, action: $('#evAction').value,
     usage: $('#evUsage').value,
+    cloud: $('#evCloud').value,
+    provider: $('#evProvider').value,
+    asn: $('#evASN').value.trim(),
     show_whitelist: $('#evShowWL').checked ? '1' : '0',
   });
   const evs = await api('/api/events?' + q);
@@ -438,9 +457,7 @@ $('#evList').addEventListener('click', async (e) => {
   const token = btn.dataset.token || '';
   const tenant = btn.dataset.tenant || '';
   if (!token) return;
-  const note = prompt(`标记 token 为已处理(备注可选):\n\n${token}`, '');
-  if (note === null) return; // 用户取消
-  const r = await apiPost('/api/resolved/add', { token, tenant, note });
+  const r = await apiPost('/api/resolved/add', { token, tenant, note: '' });
   if (r && r.ok) {
     loadEvents(false);
   } else {
@@ -1260,6 +1277,31 @@ async function loadSuspects() {
   const rows = await api('/api/suspects?' + q);
   window._suspectsData = rows || [];
   renderSuspects();
+  await loadSuspectResolved();
+}
+
+async function loadSuspectResolved() {
+  const q = new URLSearchParams();
+  if (state.tenant) q.set('tenant', state.tenant);
+  const rows = await api('/api/resolved' + (q.toString() ? '?' + q : ''));
+  const tbody = $('#suspectResolvedTbody');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  if (!rows || !rows.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">暂无已处理用户</td></tr>';
+    return;
+  }
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="mono copyable" data-copy="${escapeHTML(r.token)}" title="点击复制">${escapeHTML(r.token)}</td>
+      <td>${escapeHTML(r.tenant || '-')}</td>
+      <td class="mono">${escapeHTML(fmtTime(new Date(r.resolved_ts)))}</td>
+      <td><button class="danger suspect-res-restore" data-token="${escapeHTML(r.token)}">恢复</button></td>
+    `;
+    tbody.appendChild(tr);
+  }
+  bindCopyHandlers(tbody);
 }
 
 function renderSuspects() {
@@ -1272,13 +1314,25 @@ function renderSuspects() {
     rows = rows.filter(r =>
       (r.token || '').toLowerCase().includes(search) ||
       (r.email || '').toLowerCase().includes(search) ||
-      (r.last_ip || '').toLowerCase().includes(search)
+      (r.last_ip || '').toLowerCase().includes(search) ||
+      (r.cloud_providers || []).some(x => String(x).toLowerCase().includes(search)) ||
+      (r.cloud_asns || []).some(x => String(x).toLowerCase().includes(search))
     );
   }
+
+  const cloudFilter = $('#suspectCloud').value;
+  const providerFilter = ($('#suspectProvider').value || '').toLowerCase();
+  const asnFilter = ($('#suspectASN').value || '').trim().toUpperCase();
+  if (cloudFilter === 'yes' || cloudFilter === 'only') rows = rows.filter(r => Number(r.cloud_pull_count || 0) > 0);
+  if (cloudFilter === 'no') rows = rows.filter(r => Number(r.cloud_pull_count || 0) === 0);
+  if (providerFilter) rows = rows.filter(r => (r.cloud_providers || []).some(x => String(x).toLowerCase() === providerFilter));
+  if (asnFilter) rows = rows.filter(r => (r.cloud_asns || []).some(x => String(x).split('|')[0].toUpperCase() === asnFilter));
 
   // 排序
   const sort = $('#suspectSort').value;
   rows = [...rows].sort((a, b) => {
+    if (!!a.retriggered !== !!b.retriggered) return b.retriggered ? 1 : -1;
+    if (cloudFilter === 'only') return (b.cloud_pull_count || 0) - (a.cloud_pull_count || 0) || b.distinct_ips - a.distinct_ips;
     if (sort === 'pull') return b.pull_count - a.pull_count;
     if (sort === 'uas') return b.distinct_uas - a.distinct_uas || b.distinct_ips - a.distinct_ips;
     if (sort === 'usage') {
@@ -1312,6 +1366,8 @@ function renderSuspectCard(r) {
   // 使用率 pill:<5% 红、<20% 黄、其余靛蓝
   const usageCls = usageRatio < 0 ? 'empty' : (usageRatio < 5 ? 'red' : (usageRatio < 20 ? 'yellow' : 'tag'));
   const usageTxt = usageRatio < 0 ? '使用率 -' : '使用率 ' + usageRatio.toFixed(1) + '%';
+  const cloudProviders = (r.cloud_providers || []).map(cloudProviderLabel);
+  const cloudASNs = (r.cloud_asns || []).map(String).filter(Boolean);
 
   card.innerHTML = `
     <div class="ev-card-head sus-head">
@@ -1321,12 +1377,14 @@ function renderSuspectCard(r) {
       </span>
       <span class="ev-tenant mono">${escapeHTML(r.tenant)}</span>
       <span class="ev-spacer"></span>
+      ${r.retriggered ? '<span class="pill red">⚠ 已处理后再次触发</span>' : ''}
+      ${r.cloud_pull_count > 0 ? `<span class="pill red" title="云厂商网络拉取次数">云拉取 ${r.cloud_pull_count}</span>` : ''}
       <span class="pill ${usageCls}">${usageTxt}</span>
     </div>
     <div class="ev-row-full">
       <span class="ev-label">订阅</span>
       ${tokenFull
-        ? `<span class="mono copyable ev-token ev-token-expand" data-copy="${escapeHTML(tokenFull)}" data-full="${escapeHTML(tokenFull)}" data-short="${escapeHTML(tokenShort(tokenFull))}" title="点击展开 / 再点复制">${escapeHTML(tokenShort(tokenFull))}</span>`
+        ? `<span class="mono ev-token">${escapeHTML(tokenShort(tokenFull))}</span><button type="button" class="ip-copy-btn copyable" data-copy="${escapeHTML(tokenFull)}" title="复制原始订阅 Token">复制订阅</button>`
         : '<span class="muted">(无)</span>'}
     </div>
     <div class="ev-row-full">
@@ -1339,6 +1397,8 @@ function renderSuspectCard(r) {
       <span class="ev-meta-item"><span class="ev-label">已用</span><span class="mono">${fmtBytes(r.traffic_used)}</span></span>
       <span class="ev-meta-item"><span class="ev-label">总量</span><span class="mono">${fmtBytes(r.traffic_total)}</span></span>
     </div>
+    ${cloudProviders.length ? `<div class="ev-row-full"><span class="ev-label">云厂商</span><span>${cloudProviders.map(x => `<span class="pill red">${escapeHTML(x)}</span>`).join(' ')}</span></div>` : ''}
+    ${cloudASNs.length ? `<div class="ev-row-full"><span class="ev-label">云 ASN</span><span class="mono">${cloudASNs.map(escapeHTML).join('<br>')}</span></div>` : ''}
     <div class="sus-actions">
       ${tokenFull ? `<button class="sus-resolve" data-token="${escapeHTML(tokenFull)}" data-tenant="${escapeHTML(r.tenant || '')}">已处理</button>` : ''}
     </div>
@@ -1385,14 +1445,14 @@ async function toggleSuspectDetail(card, r) {
   html += '<div><div style="font-weight:600;font-size:12px;margin-bottom:6px;color:#374151">IP 列表 (' + (detail.ips||[]).length + ')</div>';
   if (detail.ips && detail.ips.length) {
     html += '<table style="width:100%;font-size:11.5px;border-collapse:collapse">';
-    html += '<tr style="color:#6b7280;border-bottom:1px solid #e5e7eb"><th style="text-align:left;padding:2px 6px">IP</th><th style="text-align:left;padding:2px 6px">位置</th><th style="text-align:left;padding:2px 6px">ISP</th><th style="text-align:left;padding:2px 6px">ASN</th><th style="text-align:left;padding:2px 6px">类型</th><th style="text-align:right;padding:2px 6px">次数</th><th style="text-align:right;padding:2px 6px">最近</th></tr>';
+	  html += '<tr style="color:#6b7280;border-bottom:1px solid #e5e7eb"><th style="text-align:left;padding:2px 6px">IP</th><th style="text-align:left;padding:2px 6px">位置</th><th style="text-align:left;padding:2px 6px">ISP</th><th style="text-align:left;padding:2px 6px">ASN</th><th style="text-align:left;padding:2px 6px">云厂商</th><th style="text-align:left;padding:2px 6px">类型</th><th style="text-align:right;padding:2px 6px">次数</th><th style="text-align:right;padding:2px 6px">最近</th></tr>';
     for (const ip of detail.ips) {
       const loc = ip.country || '-';
       const isp = ip.isp || '-';
 	  const asn = ip.asn || '-';
 	  const usage = ip.usage_type ? `${usageLabel(ip.usage_type)}${ip.usage_source === 'inferred' ? ' *' : ''}` : '-';
       const last = new Date(ip.last_seen).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
-	  html += `<tr style="border-bottom:1px solid #f3f4f6"><td class="mono" style="padding:3px 6px">${escapeHTML(ip.ip)}</td><td style="padding:3px 6px">${escapeHTML(loc)}</td><td style="padding:3px 6px">${escapeHTML(isp)}</td><td class="mono" style="padding:3px 6px" title="${escapeHTML(ip.asn_org || '')}">${escapeHTML(asn)}</td><td style="padding:3px 6px">${escapeHTML(usage)}</td><td class="mono" style="text-align:right;padding:3px 6px">${ip.hit_count}</td><td class="mono" style="text-align:right;padding:3px 6px">${last}</td></tr>`;
+	  html += `<tr style="border-bottom:1px solid #f3f4f6"><td class="mono" style="padding:3px 6px;white-space:nowrap"><span>${escapeHTML(ip.ip)}</span><button type="button" class="ip-copy-btn copyable" data-copy="${escapeHTML(ip.ip)}" title="复制此 IP">复制</button></td><td style="padding:3px 6px">${escapeHTML(loc)}</td><td style="padding:3px 6px">${escapeHTML(isp)}</td><td class="mono" style="padding:3px 6px" title="${escapeHTML(ip.asn_org || '')}">${escapeHTML(asn)}</td><td style="padding:3px 6px">${ip.cloud_provider ? escapeHTML(cloudProviderLabel(ip.cloud_provider)) : '-'}</td><td style="padding:3px 6px">${escapeHTML(usage)}</td><td class="mono" style="text-align:right;padding:3px 6px">${ip.hit_count}</td><td class="mono" style="text-align:right;padding:3px 6px">${last}</td></tr>`;
     }
     html += '</table>';
   } else { html += '<div style="color:#9ca3af;font-size:11px">无记录</div>'; }
@@ -1413,11 +1473,15 @@ async function toggleSuspectDetail(card, r) {
 
   box.innerHTML = html;
   box.dataset.loaded = '1';
+  bindCopyHandlers(box);
 }
 
 $('#suspectWindow').addEventListener('change', () => loadSuspects());
 $('#suspectSort').addEventListener('change', () => renderSuspects());
 $('#suspectSearch').addEventListener('input', () => renderSuspects());
+$('#suspectCloud').addEventListener('change', () => renderSuspects());
+$('#suspectProvider').addEventListener('change', () => renderSuspects());
+$('#suspectASN').addEventListener('input', () => renderSuspects());
 
 // 嫌疑卡片"已处理"按钮:事件委托
 $('#suspectsList').addEventListener('click', async (e) => {
@@ -1426,10 +1490,17 @@ $('#suspectsList').addEventListener('click', async (e) => {
   e.stopPropagation();
   const token = btn.dataset.token;
   const tenant = btn.dataset.tenant || '';
-  const note = prompt(`标记 token 为已处理(备注可选):\n\n${token}`, '');
-  if (note === null) return;
-  const r = await apiPost('/api/resolved/add', { token, tenant, note });
+  const r = await apiPost('/api/resolved/add', { token, tenant, note: '' });
   if (r && r.ok) loadSuspects();
+});
+
+$('#suspectResolvedTbody').addEventListener('click', async (e) => {
+  const btn = e.target.closest('.suspect-res-restore');
+  if (!btn) return;
+  if (!confirm('恢复后此 token 将重新出现在请求日志里，确定？')) return;
+  const r = await apiPost('/api/resolved/remove', { token: btn.dataset.token });
+  if (r && r.ok) loadSuspects();
+  else alert('恢复失败:' + (r && r.error ? r.error : '未知错误'));
 });
 
 // ════════════════════════════════════════════════════

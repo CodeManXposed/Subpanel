@@ -36,7 +36,7 @@ import (
 	"github.com/huabanmao168/SubPanel/internal/webui"
 )
 
-var Version = "0.1.35"
+var Version = "0.1.40"
 
 func main() {
 	if len(os.Args) >= 2 {
@@ -161,6 +161,17 @@ func main() {
 			logger.Info("ASN 数据库已加载", "path", p, "records", snap.ASNRecords)
 		}
 	}
+	if n, err := st.BackfillEventNetworkInfo(context.Background(), func(ip string) (string, string, string) {
+		info := geo.Lookup(ip)
+		if info == nil {
+			return "", "", ""
+		}
+		return info.ASN, info.ASNOrg, info.CloudProvider
+	}); err != nil {
+		logger.Warn("历史事件 ASN/云厂商信息回填失败", "err", err)
+	} else if n > 0 {
+		logger.Info("历史事件 ASN/云厂商信息回填完成", "events", n)
+	}
 
 	// 云 IP 匹配器 (底层走 GeoIP xdb,按 ISP 字段反推云厂商)
 	cloudMatcher := cloudip.NewMatcher()
@@ -197,11 +208,11 @@ func main() {
 		logger.Error("网关初始化失败", "err", err)
 		os.Exit(1)
 	}
-	// 注入 GeoIP 查询(给请求日志打 country/usage_type/isp)
-	gw.SetGeoLookup(func(ip string) (string, string, string) {
+	// 注入 GeoIP 查询(给请求日志写入地区、ASN 与云厂商画像)
+	gw.SetGeoLookup(func(ip string) proxy.NetworkInfo {
 		info := geo.Lookup(ip)
 		if info == nil {
-			return "", "", ""
+			return proxy.NetworkInfo{}
 		}
 		country := info.ISOCode
 		if country == "" {
@@ -219,7 +230,14 @@ func main() {
 				country = "TW"
 			}
 		}
-		return country, info.UsageType, info.ISP
+		return proxy.NetworkInfo{
+			Country:       country,
+			UsageType:     info.UsageType,
+			ISP:           info.ISP,
+			ASN:           info.ASN,
+			ASNOrg:        info.ASNOrg,
+			CloudProvider: info.CloudProvider,
+		}
 	})
 	gw.SetCloudLookup(cloudMatcher.Match)
 

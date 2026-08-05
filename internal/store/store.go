@@ -34,7 +34,10 @@ CREATE TABLE IF NOT EXISTS events (
     resp_size   INTEGER,
     country     TEXT,
     usage_type  TEXT,
-    isp         TEXT
+    isp         TEXT,
+    asn         TEXT,
+    asn_org     TEXT,
+    cloud_provider TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_events_ts          ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_token       ON events(token_hash, ts);
@@ -129,21 +132,25 @@ CREATE INDEX IF NOT EXISTS idx_resolved_tenant_ts ON resolved_tokens(tenant, res
 
 // Event 一行请求记录。
 type Event struct {
-	TS         time.Time
-	Tenant     string
-	ClientIP   string
-	UA         string
-	TokenHash  string
-	Flag       string
-	Path       string
-	Status     int
-	Action     string
-	RuleTags   []string
-	UpstreamMS int64
-	RespSize   int64
-	Country    string // ISO2 (CN/US/...)
-	UsageType  string // IDC/CDN/DYN/MOB/COM
-	ISP        string // 电信/阿里/Cloudflare/...
+	TS            time.Time
+	Tenant        string
+	ClientIP      string
+	UA            string
+	TokenHash     string
+	Flag          string
+	Path          string
+	Status        int
+	Action        string
+	RuleTags      []string
+	UpstreamMS    int64
+	RespSize      int64
+	Country       string // ISO2 (CN/US/...)
+	UsageType     string // IDC/CDN/DYN/MOB/COM
+	ISP           string // 电信/阿里/Cloudflare/...
+	ASN           string // AS4134
+	ASNOrg        string // ASN 注册组织
+	CloudProvider string // aws/aliyun/cloudflare/...;空表示非已知云厂商
+	ReTriggered   bool   // 曾标记已处理后又出现的新请求
 }
 
 // Incident 命中规则的事件。Severity/Action 字段已废弃,DB 列保留向后兼容,
@@ -202,6 +209,9 @@ func Open(path string, flushEvery time.Duration, flushSize int) (*Store, error) 
 		"ALTER TABLE events ADD COLUMN country TEXT",
 		"ALTER TABLE events ADD COLUMN usage_type TEXT",
 		"ALTER TABLE events ADD COLUMN isp TEXT",
+		"ALTER TABLE events ADD COLUMN asn TEXT",
+		"ALTER TABLE events ADD COLUMN asn_org TEXT",
+		"ALTER TABLE events ADD COLUMN cloud_provider TEXT",
 	} {
 		_, _ = db.Exec(alter) // duplicate column 错误忽略
 	}
@@ -209,6 +219,8 @@ func Open(path string, flushEvery time.Duration, flushSize int) (*Store, error) 
 	for _, idx := range []string{
 		"CREATE INDEX IF NOT EXISTS idx_events_country_ts ON events(country, ts)",
 		"CREATE INDEX IF NOT EXISTS idx_events_usage_ts   ON events(usage_type, ts)",
+		"CREATE INDEX IF NOT EXISTS idx_events_cloud_ts   ON events(cloud_provider, ts)",
+		"CREATE INDEX IF NOT EXISTS idx_events_asn_ts     ON events(asn, ts)",
 	} {
 		if _, err := db.Exec(idx); err != nil {
 			_ = db.Close()
@@ -339,8 +351,8 @@ func (s *Store) insertEvents(es []Event) error {
 		return err
 	}
 	stmt, err := tx.Prepare(`INSERT INTO events
-        (ts,tenant,client_ip,ua,token_hash,flag,path,status,action,rule_tags,upstream_ms,resp_size,country,usage_type,isp)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		(ts,tenant,client_ip,ua,token_hash,flag,path,status,action,rule_tags,upstream_ms,resp_size,country,usage_type,isp,asn,asn_org,cloud_provider)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		_ = tx.Rollback()
 		return err
@@ -351,7 +363,7 @@ func (s *Store) insertEvents(es []Event) error {
 		if _, err := stmt.Exec(
 			e.TS.UnixMilli(), e.Tenant, e.ClientIP, e.UA, e.TokenHash, e.Flag,
 			e.Path, e.Status, e.Action, string(tags), e.UpstreamMS, e.RespSize,
-			e.Country, e.UsageType, e.ISP,
+			e.Country, e.UsageType, e.ISP, e.ASN, e.ASNOrg, e.CloudProvider,
 		); err != nil {
 			_ = tx.Rollback()
 			return err
@@ -457,6 +469,9 @@ type EventFilter struct {
 	TokenHash string
 	Action    string
 	Usage     string // usage_type 精确匹配(IDC/CDN/DYN/MOB/...)
+	Cloud     string // "yes"=云厂商,"no"=非云厂商
+	Provider  string // cloud_provider 精确匹配
+	ASN       string // ASN 精确匹配,如 AS16509
 	Since     time.Time
 	Until     time.Time
 	Limit     int
@@ -469,7 +484,10 @@ type EventFilter struct {
 
 func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error) {
 	q := `SELECT ts,tenant,client_ip,ua,token_hash,flag,path,status,action,rule_tags,upstream_ms,resp_size,
-			COALESCE(country,''),COALESCE(usage_type,''),COALESCE(isp,'')
+			COALESCE(country,''),COALESCE(usage_type,''),COALESCE(isp,''),COALESCE(asn,''),COALESCE(asn_org,''),COALESCE(cloud_provider,''),
+			CASE WHEN EXISTS (SELECT 1 FROM resolved_tokens rt
+				WHERE rt.token=events.token_hash AND (rt.tenant='' OR rt.tenant=events.tenant)
+				AND events.ts>rt.resolved_ts) THEN 1 ELSE 0 END
 			FROM events WHERE 1=1`
 	args := []any{}
 	if f.Tenant != "" {
@@ -492,6 +510,19 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error)
 		q += " AND usage_type=?"
 		args = append(args, f.Usage)
 	}
+	if f.Cloud == "yes" {
+		q += " AND COALESCE(cloud_provider,'')<>''"
+	} else if f.Cloud == "no" {
+		q += " AND COALESCE(cloud_provider,'')=''"
+	}
+	if f.Provider != "" {
+		q += " AND LOWER(cloud_provider)=LOWER(?)"
+		args = append(args, f.Provider)
+	}
+	if f.ASN != "" {
+		q += " AND UPPER(asn)=UPPER(?)"
+		args = append(args, f.ASN)
+	}
 	if !f.Since.IsZero() {
 		q += " AND ts>=?"
 		args = append(args, f.Since.UnixMilli())
@@ -500,14 +531,12 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error)
 		q += " AND ts<=?"
 		args = append(args, f.Until.UnixMilli())
 	}
-	// 默认排除已处理 token;单 token 精确查询时不过滤(用户显式要看)。
+	// 默认隐藏“已处理时间点之前”的记录；同 token 后续再次出现会重新展示并标记。
+	// 单 token 精确查询时不过滤，方便查看完整时间线。
 	if !f.IncludeResolved && f.TokenHash == "" {
-		if f.Tenant != "" {
-			q += " AND token_hash NOT IN (SELECT token FROM resolved_tokens WHERE tenant=? OR tenant='')"
-			args = append(args, f.Tenant)
-		} else {
-			q += " AND token_hash NOT IN (SELECT token FROM resolved_tokens)"
-		}
+		q += ` AND NOT EXISTS (SELECT 1 FROM resolved_tokens rt
+			WHERE rt.token=events.token_hash AND (rt.tenant='' OR rt.tenant=events.tenant)
+			AND events.ts<=rt.resolved_ts)`
 	}
 	q += " ORDER BY ts DESC"
 	if f.Limit <= 0 || f.Limit > 1000 {
@@ -527,9 +556,10 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error)
 		var ts int64
 		var tags sql.NullString
 		var ua, tokenHash, flag, path, action sql.NullString
+		var reTriggered int
 		if err := rows.Scan(&ts, &e.Tenant, &e.ClientIP, &ua, &tokenHash, &flag,
 			&path, &e.Status, &action, &tags, &e.UpstreamMS, &e.RespSize,
-			&e.Country, &e.UsageType, &e.ISP); err != nil {
+			&e.Country, &e.UsageType, &e.ISP, &e.ASN, &e.ASNOrg, &e.CloudProvider, &reTriggered); err != nil {
 			return nil, err
 		}
 		e.TS = time.UnixMilli(ts)
@@ -538,12 +568,66 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error)
 		e.Flag = flag.String
 		e.Path = path.String
 		e.Action = action.String
+		e.ReTriggered = reTriggered != 0
 		if tags.Valid {
 			_ = json.Unmarshal([]byte(tags.String), &e.RuleTags)
 		}
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// BackfillEventNetworkInfo 为升级前的事件补齐 ASN 与云厂商信息。
+// lookup 只按 distinct IP 调用一次，避免对每条历史事件重复查询数据库。
+func (s *Store) BackfillEventNetworkInfo(ctx context.Context, lookup func(ip string) (asn, asnOrg, provider string)) (int, error) {
+	if lookup == nil {
+		return 0, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT client_ip FROM events
+		WHERE client_ip<>'' AND (COALESCE(asn,'')='' OR COALESCE(cloud_provider,'')='')`)
+	if err != nil {
+		return 0, err
+	}
+	var ips []string
+	for rows.Next() {
+		var ip string
+		if err := rows.Scan(&ip); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		ips = append(ips, ip)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	stmt, err := tx.PrepareContext(ctx, `UPDATE events
+		SET asn=?, asn_org=?, cloud_provider=? WHERE client_ip=?`)
+	if err != nil {
+		_ = tx.Rollback()
+		return 0, err
+	}
+	defer stmt.Close()
+	updated := 0
+	for _, ip := range ips {
+		asn, asnOrg, provider := lookup(ip)
+		res, err := stmt.ExecContext(ctx, asn, asnOrg, provider, ip)
+		if err != nil {
+			_ = tx.Rollback()
+			return 0, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			updated += int(n)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return updated, nil
 }
 
 type IncidentFilter struct {
@@ -730,6 +814,8 @@ type Stats struct {
 type KeyCount struct {
 	Key   string `json:"key"`
 	Count int64  `json:"count"`
+	// Tenant 仅用于 TopTokens，避免不同站点相同 token 被合并。
+	Tenant string `json:"tenant,omitempty"`
 	// 仅用于 Top IPs 富化:在 Summary() 中由 webui 层填,store 本身留空。
 	Region string `json:"region,omitempty"`
 	ISP    string `json:"isp,omitempty"`
@@ -800,14 +886,14 @@ func (s *Store) Summary(ctx context.Context, tenant string, since time.Time) (*S
 	rows.Close()
 	// top tokens
 	rows, err = s.db.QueryContext(ctx,
-		"SELECT token_hash,COUNT(*) c FROM events WHERE ts>=? AND token_hash<>''"+tenantClause+
-			" GROUP BY token_hash ORDER BY c DESC LIMIT 10", args...)
+		"SELECT tenant,token_hash,COUNT(*) c FROM events WHERE ts>=? AND token_hash<>''"+tenantClause+
+			" GROUP BY tenant,token_hash ORDER BY c DESC LIMIT 10", args...)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var k KeyCount
-		if err := rows.Scan(&k.Key, &k.Count); err != nil {
+		if err := rows.Scan(&k.Tenant, &k.Key, &k.Count); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -1355,9 +1441,13 @@ func (s *Store) ListUserReports(tenant string) ([]UserReport, error) {
 // SuspectRow 是嫌疑分析结果:events 行为聚合 + 可选 user_report 画像。
 type SuspectRow struct {
 	UserReport
-	PullCount   int `json:"pull_count"`
-	DistinctIPs int `json:"distinct_ips"`
-	DistinctUAs int `json:"distinct_uas"`
+	PullCount      int      `json:"pull_count"`
+	DistinctIPs    int      `json:"distinct_ips"`
+	DistinctUAs    int      `json:"distinct_uas"`
+	CloudPullCount int      `json:"cloud_pull_count"`
+	CloudProviders []string `json:"cloud_providers"`
+	CloudASNs      []string `json:"cloud_asns"`
+	ReTriggered    bool     `json:"retriggered"`
 }
 
 func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, error) {
@@ -1368,26 +1458,21 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 		return nil, err
 	}
 
-	// 排除已处理 token
+	// 已处理记录用于区分“旧记录已归档”和“处理后再次触发”。
 	resolvedSet := make(map[string]bool)
-	resolvedRows, _ := s.db.Query(`SELECT token FROM resolved_tokens`)
+	resolvedRows, _ := s.db.Query(`SELECT token, COALESCE(tenant,'') FROM resolved_tokens`)
 	if resolvedRows != nil {
 		defer resolvedRows.Close()
 		for resolvedRows.Next() {
-			var t string
-			if resolvedRows.Scan(&t) == nil {
-				resolvedSet[t] = true
+			var token, t string
+			if resolvedRows.Scan(&token, &t) == nil {
+				resolvedSet[t+"\x00"+token] = true
 			}
 		}
 	}
-
-	filtered := reports[:0]
-	for _, r := range reports {
-		if !resolvedSet[r.Token] {
-			filtered = append(filtered, r)
-		}
+	isResolved := func(tenant, token string) bool {
+		return resolvedSet[tenant+"\x00"+token] || resolvedSet["\x00"+token]
 	}
-	reports = filtered
 
 	sinceMs := since.UnixMilli()
 
@@ -1396,45 +1481,61 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 	tenantCond := ""
 	args := []any{sinceMs}
 	if tenant != "" {
-		tenantCond = " AND tenant=?"
+		tenantCond = " AND e.tenant=?"
 		args = append(args, tenant)
 	}
 	rows, err := s.db.Query(`
-		SELECT token_hash, tenant, COUNT(*), COUNT(DISTINCT client_ip), COUNT(DISTINCT COALESCE(ua,'')), MAX(ts)
-		FROM events WHERE ts>=? AND token_hash<>''`+tenantCond+`
-		GROUP BY token_hash, tenant`, args...)
+		SELECT e.token_hash, e.tenant, COUNT(*), COUNT(DISTINCT e.client_ip), COUNT(DISTINCT COALESCE(e.ua,'')), MAX(e.ts),
+		       SUM(CASE WHEN COALESCE(e.cloud_provider,'')<>'' THEN 1 ELSE 0 END),
+		       COALESCE(GROUP_CONCAT(DISTINCT NULLIF(e.cloud_provider,'')),''),
+		       COALESCE(GROUP_CONCAT(DISTINCT CASE WHEN COALESCE(e.cloud_provider,'')<>''
+		              THEN NULLIF(e.asn,'') END),'')
+		FROM events e WHERE e.ts>=? AND e.token_hash<>''`+tenantCond+`
+		  AND NOT EXISTS (SELECT 1 FROM resolved_tokens rt
+		      WHERE rt.token=e.token_hash AND (rt.tenant='' OR rt.tenant=e.tenant) AND e.ts<=rt.resolved_ts)
+		GROUP BY e.token_hash, e.tenant`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
 	type evStats struct {
-		pullCount   int
-		distinctIPs int
-		distinctUAs int
-		lastSeen    int64
-		lastIP      string
-		lastUA      string
-		tenant      string
+		pullCount      int
+		distinctIPs    int
+		distinctUAs    int
+		lastSeen       int64
+		lastIP         string
+		lastUA         string
+		tenant         string
+		cloudPullCount int
+		cloudProviders []string
+		cloudASNs      []string
 	}
 	statsMap := make(map[string]evStats)
 	for rows.Next() {
 		var token string
 		var st evStats
-		if err := rows.Scan(&token, &st.tenant, &st.pullCount, &st.distinctIPs, &st.distinctUAs, &st.lastSeen); err != nil {
+		var providers, asns string
+		if err := rows.Scan(&token, &st.tenant, &st.pullCount, &st.distinctIPs, &st.distinctUAs, &st.lastSeen,
+			&st.cloudPullCount, &providers, &asns); err != nil {
 			continue
 		}
-		if resolvedSet[token] {
-			continue
+		if providers != "" {
+			st.cloudProviders = strings.Split(providers, ",")
+		}
+		if asns != "" {
+			st.cloudASNs = strings.Split(asns, ",")
 		}
 		statsMap[st.tenant+"\x00"+token] = st
 	}
 	latestRows, err := s.db.Query(`
 		SELECT token_hash, tenant, client_ip, COALESCE(ua,'')
 		FROM (
-			SELECT token_hash, tenant, client_ip, ua,
-			       ROW_NUMBER() OVER (PARTITION BY token_hash, tenant ORDER BY ts DESC, id DESC) AS rn
-			FROM events WHERE ts>=? AND token_hash<>''`+tenantCond+`
+			SELECT e.token_hash, e.tenant, e.client_ip, e.ua,
+			       ROW_NUMBER() OVER (PARTITION BY e.token_hash, e.tenant ORDER BY e.ts DESC, e.id DESC) AS rn
+			FROM events e WHERE e.ts>=? AND e.token_hash<>''`+tenantCond+`
+			  AND NOT EXISTS (SELECT 1 FROM resolved_tokens rt
+			      WHERE rt.token=e.token_hash AND (rt.tenant='' OR rt.tenant=e.tenant) AND e.ts<=rt.resolved_ts)
 		) WHERE rn=1`, args...)
 	if err != nil {
 		return nil, err
@@ -1459,7 +1560,10 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 	seen := make(map[string]bool, len(reports))
 	for _, r := range reports {
 		key := r.Tenant + "\x00" + r.Token
-		st := statsMap[key]
+		st, hasNewEvents := statsMap[key]
+		if isResolved(r.Tenant, r.Token) && !hasNewEvents {
+			continue
+		}
 		seen[key] = true
 		if r.LastIP == "" {
 			r.LastIP = st.lastIP
@@ -1472,10 +1576,14 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 		distinctUAs := st.distinctUAs
 
 		out = append(out, SuspectRow{
-			UserReport:  r,
-			PullCount:   pullCount,
-			DistinctIPs: distinctIPs,
-			DistinctUAs: distinctUAs,
+			UserReport:     r,
+			PullCount:      pullCount,
+			DistinctIPs:    distinctIPs,
+			DistinctUAs:    distinctUAs,
+			CloudPullCount: st.cloudPullCount,
+			CloudProviders: st.cloudProviders,
+			CloudASNs:      st.cloudASNs,
+			ReTriggered:    isResolved(r.Tenant, r.Token),
 		})
 	}
 	for key, st := range statsMap {
@@ -1494,9 +1602,13 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 				LastUA:   st.lastUA,
 				LastSeen: st.lastSeen / 1000,
 			},
-			PullCount:   st.pullCount,
-			DistinctIPs: st.distinctIPs,
-			DistinctUAs: st.distinctUAs,
+			PullCount:      st.pullCount,
+			DistinctIPs:    st.distinctIPs,
+			DistinctUAs:    st.distinctUAs,
+			CloudPullCount: st.cloudPullCount,
+			CloudProviders: st.cloudProviders,
+			CloudASNs:      st.cloudASNs,
+			ReTriggered:    isResolved(parts[0], parts[1]),
 		})
 	}
 	if len(out) == 0 {
@@ -1528,15 +1640,16 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 	// 按独立 IP 降序,同分按 pull_count 降序(共享/倒卖最直观信号)
 	for i := range out {
 		for j := i + 1; j < len(out); j++ {
-			if out[j].DistinctIPs > out[i].DistinctIPs ||
-				(out[j].DistinctIPs == out[i].DistinctIPs && out[j].PullCount > out[i].PullCount) {
+			if (out[j].ReTriggered && !out[i].ReTriggered) ||
+				(out[j].ReTriggered == out[i].ReTriggered && (out[j].DistinctIPs > out[i].DistinctIPs ||
+					(out[j].DistinctIPs == out[i].DistinctIPs && out[j].PullCount > out[i].PullCount))) {
 				out[i], out[j] = out[j], out[i]
 			}
 		}
 	}
-	// 最多返回 top 100
-	if len(out) > 100 {
-		out = out[:100]
+	// 最多返回 top 1000，保证云厂商/ASN 客户端筛选不会只看到前 100 条。
+	if len(out) > 1000 {
+		out = out[:1000]
 	}
 	return out, nil
 }
@@ -1548,15 +1661,16 @@ type SuspectDetail struct {
 }
 
 type IPDetail struct {
-	IP          string `json:"ip"`
-	Country     string `json:"country"`
-	ISP         string `json:"isp"`
-	ASN         string `json:"asn"`
-	ASNOrg      string `json:"asn_org"`
-	UsageType   string `json:"usage_type"`
-	UsageSource string `json:"usage_source"`
-	HitCount    int    `json:"hit_count"`
-	LastSeen    int64  `json:"last_seen"` // unix ms
+	IP            string `json:"ip"`
+	Country       string `json:"country"`
+	ISP           string `json:"isp"`
+	ASN           string `json:"asn"`
+	ASNOrg        string `json:"asn_org"`
+	CloudProvider string `json:"cloud_provider"`
+	UsageType     string `json:"usage_type"`
+	UsageSource   string `json:"usage_source"`
+	HitCount      int    `json:"hit_count"`
+	LastSeen      int64  `json:"last_seen"` // unix ms
 }
 
 type UADetail struct {
