@@ -192,6 +192,28 @@ func (s *Server) apiSuspectDetail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, detail)
 }
 
+// POST /api/token-associations/add — 手动关联 UUID 重置前后的 token。
+func (s *Server) apiTokenAssociationAdd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var body struct {
+		Tenant       string `json:"tenant"`
+		Token        string `json:"token"`
+		RelatedToken string `json:"related_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, 400, map[string]any{"error": "bad json"})
+		return
+	}
+	if err := s.st.AssociateTokens(r.Context(), body.Tenant, body.Token, body.RelatedToken); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
 // POST /api/report-info — 保存上报密钥
 func (s *Server) apiReportInfoSave(w http.ResponseWriter, r *http.Request) {
 	var body struct {

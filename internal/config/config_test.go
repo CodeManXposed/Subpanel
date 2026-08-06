@@ -62,6 +62,8 @@ storage:
   sqlite_path: "/tmp/x.db"
   retention:
     events: 7d
+    incidents: 180d
+    aws_ip_changes: 180d
 tenants:
   - name: t
     host: h.example.com
@@ -79,6 +81,9 @@ actions:
 	}
 	if c.Storage.Retention.Events.Std() != 7*24*time.Hour {
 		t.Errorf("retention: %v", c.Storage.Retention.Events.Std())
+	}
+	if c.Storage.Retention.Incidents.Std() != 180*24*time.Hour || c.Storage.Retention.AWSIPChanges.Std() != 180*24*time.Hour {
+		t.Errorf("180d retention not parsed: %+v", c.Storage.Retention)
 	}
 }
 

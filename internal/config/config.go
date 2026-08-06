@@ -44,8 +44,9 @@ type Storage struct {
 }
 
 type Retention struct {
-	Events    Duration `yaml:"events"`
-	Incidents Duration `yaml:"incidents"`
+	Events       Duration `yaml:"events"`
+	Incidents    Duration `yaml:"incidents"`
+	AWSIPChanges Duration `yaml:"aws_ip_changes"`
 }
 
 type RealIP struct {
@@ -90,6 +91,9 @@ type When struct {
 	TokenDistinctIPs *Cond `yaml:"token_distinct_ips"`
 	IPDistinctTokens *Cond `yaml:"ip_distinct_tokens"`
 	FromCloudIP      bool  `yaml:"from_cloud_ip"` // 命中云厂商 IP 库
+	// CloudTokenDistinctUAs: 同一 token 在当前云厂商 IP 上的不同 UA 数。
+	// 这是组合条件，只有“UA 达标”和“当前 IP 为云厂商”同时成立才触发。
+	CloudTokenDistinctUAs *Cond `yaml:"cloud_token_distinct_uas"`
 
 	// GeoIP 字段(需配 geoip.xdb_path 才生效)
 	// 同一字段 in 和 not_in 同时配时,not_in 优先(用于"非 CN 拒"这种反向白名单语义)
@@ -227,6 +231,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Storage.Retention.Incidents == 0 {
 		c.Storage.Retention.Incidents = Duration(90 * 24 * time.Hour)
+	}
+	if c.Storage.Retention.AWSIPChanges == 0 {
+		c.Storage.Retention.AWSIPChanges = Duration(90 * 24 * time.Hour)
 	}
 	if c.Admin.SessionTTL == 0 {
 		c.Admin.SessionTTL = Duration(12 * time.Hour)

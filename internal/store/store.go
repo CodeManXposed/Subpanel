@@ -98,6 +98,16 @@ CREATE TABLE IF NOT EXISTS ip_whitelist (
     created_ts INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS ip_whitelist_domains (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    domain           TEXT NOT NULL UNIQUE,
+    note             TEXT,
+    resolved_ips     TEXT NOT NULL DEFAULT '[]',
+    last_resolved_ts INTEGER NOT NULL DEFAULT 0,
+    last_error       TEXT NOT NULL DEFAULT '',
+    created_ts       INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS tenants (
     name           TEXT PRIMARY KEY,
     host           TEXT NOT NULL,
@@ -128,6 +138,85 @@ CREATE TABLE IF NOT EXISTS resolved_tokens (
     resolved_ts INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_resolved_tenant_ts ON resolved_tokens(tenant, resolved_ts);
+
+CREATE TABLE IF NOT EXISTS focus_tokens (
+    token      TEXT PRIMARY KEY,
+    tenant     TEXT,
+    note       TEXT,
+    focused_ts INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_focus_tenant_ts ON focus_tokens(tenant, focused_ts);
+
+CREATE TABLE IF NOT EXISTS token_associations (
+    tenant        TEXT NOT NULL,
+    email         TEXT NOT NULL,
+    token         TEXT NOT NULL,
+    first_seen_ts INTEGER NOT NULL,
+    last_seen_ts  INTEGER NOT NULL,
+    PRIMARY KEY(tenant, token)
+);
+CREATE INDEX IF NOT EXISTS idx_token_assoc_account
+    ON token_associations(tenant, email, last_seen_ts DESC);
+
+CREATE TABLE IF NOT EXISTS aws_ip_changes (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    occurred_ts      INTEGER NOT NULL,
+    dns_name         TEXT,
+    tenant           TEXT,
+    old_ip           TEXT,
+    new_ip           TEXT,
+    lookback_minutes INTEGER NOT NULL DEFAULT 20,
+    note             TEXT,
+    created_ts       INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_aws_ip_changes_ts ON aws_ip_changes(occurred_ts DESC);
+
+CREATE TABLE IF NOT EXISTS aws_ip_change_subscribers (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    change_id      INTEGER NOT NULL,
+    tenant         TEXT NOT NULL,
+    token_hash     TEXT NOT NULL,
+    client_ip      TEXT,
+    ua             TEXT,
+    pull_count     INTEGER NOT NULL,
+    first_seen_ts  INTEGER NOT NULL,
+    last_seen_ts   INTEGER NOT NULL,
+    cloud_provider TEXT,
+    asn            TEXT,
+    asn_org        TEXT,
+    FOREIGN KEY(change_id) REFERENCES aws_ip_changes(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_aws_change_sub_change_tenant
+    ON aws_ip_change_subscribers(change_id, tenant, pull_count DESC);
+
+CREATE TABLE IF NOT EXISTS dns_watchers (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    dns_name         TEXT NOT NULL,
+    tenant           TEXT NOT NULL DEFAULT '',
+    lookback_minutes INTEGER NOT NULL DEFAULT 20,
+    enabled          INTEGER NOT NULL DEFAULT 1,
+    last_ips         TEXT NOT NULL DEFAULT '',
+    last_checked_ts  INTEGER NOT NULL DEFAULT 0,
+    last_changed_ts  INTEGER NOT NULL DEFAULT 0,
+    last_error       TEXT NOT NULL DEFAULT '',
+    note             TEXT NOT NULL DEFAULT '',
+    created_ts       INTEGER NOT NULL,
+    updated_ts       INTEGER NOT NULL,
+    UNIQUE(dns_name, tenant)
+);
+CREATE INDEX IF NOT EXISTS idx_dns_watchers_enabled ON dns_watchers(enabled);
+
+CREATE TABLE IF NOT EXISTS dns_ip_history (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    watcher_id  INTEGER NOT NULL,
+    ip          TEXT NOT NULL,
+    started_ts  INTEGER NOT NULL,
+    ended_ts    INTEGER NOT NULL,
+    alive_sec   INTEGER NOT NULL,
+    FOREIGN KEY(watcher_id) REFERENCES dns_watchers(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_dns_ip_history_watcher
+    ON dns_ip_history(watcher_id, ended_ts DESC, id DESC);
 `
 
 // Event 一行请求记录。
@@ -151,6 +240,7 @@ type Event struct {
 	ASNOrg        string // ASN 注册组织
 	CloudProvider string // aws/aliyun/cloudflare/...;空表示非已知云厂商
 	ReTriggered   bool   // 曾标记已处理后又出现的新请求
+	Focused       bool   // 该请求发生时 token 已进入重点关注名单
 }
 
 // Incident 命中规则的事件。Severity/Action 字段已废弃,DB 列保留向后兼容,
@@ -231,6 +321,21 @@ func Open(path string, flushEvery time.Duration, flushSize int) (*Store, error) 
 	_, _ = db.Exec("DROP TABLE IF EXISTS cloud_cidrs")
 	// 补 tenants.report_id 列(老库升级)
 	_, _ = db.Exec("ALTER TABLE tenants ADD COLUMN report_id TEXT NOT NULL DEFAULT ''")
+	// DNS 追踪 IP 存活时间(老库升级)
+	_, _ = db.Exec("ALTER TABLE dns_watchers ADD COLUMN last_changed_ts INTEGER NOT NULL DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE dns_watchers ADD COLUMN note TEXT NOT NULL DEFAULT ''")
+	// 兼容备注同步功能上线前已经填写的追踪备注，启动时回填对应历史记录。
+	_, _ = db.Exec(`UPDATE aws_ip_changes SET note=(
+		SELECT w.note FROM dns_watchers w
+		WHERE w.dns_name=aws_ip_changes.dns_name
+		  AND w.tenant=COALESCE(aws_ip_changes.tenant,'') LIMIT 1)
+		WHERE EXISTS (SELECT 1 FROM dns_watchers w
+		WHERE w.dns_name=aws_ip_changes.dns_name
+		  AND w.tenant=COALESCE(aws_ip_changes.tenant,'') AND w.note<>'')`)
+	_, _ = db.Exec(`UPDATE dns_watchers SET last_changed_ts=COALESCE(
+		(SELECT MAX(c.occurred_ts) FROM aws_ip_changes c
+		 WHERE c.dns_name=dns_watchers.dns_name AND COALESCE(c.tenant,'')=dns_watchers.tenant),
+		 created_ts) WHERE last_changed_ts=0`)
 	// user_reports 表(v2board 上报)
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS user_reports (
 		token             TEXT NOT NULL,
@@ -253,6 +358,11 @@ func Open(path string, flushEvery time.Duration, flushSize int) (*Store, error) 
 	// 新增列(兼容旧库)
 	_, _ = db.Exec(`ALTER TABLE user_reports ADD COLUMN connect_ips TEXT DEFAULT ''`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_user_reports_tenant ON user_reports(tenant, last_seen)`)
+	// 从已有上报记录回填 token 账户关联。邮箱为空时不自动关联。
+	_, _ = db.Exec(`INSERT INTO token_associations (tenant,email,token,first_seen_ts,last_seen_ts)
+		SELECT tenant,LOWER(TRIM(email)),token,first_seen*1000,last_seen*1000 FROM user_reports
+		WHERE TRIM(COALESCE(email,''))<>''
+		ON CONFLICT(tenant,token) DO UPDATE SET email=excluded.email,last_seen_ts=excluded.last_seen_ts`)
 	s := &Store{
 		db:         db,
 		eventCh:    make(chan Event, 1024),
@@ -486,8 +596,19 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error)
 	q := `SELECT ts,tenant,client_ip,ua,token_hash,flag,path,status,action,rule_tags,upstream_ms,resp_size,
 			COALESCE(country,''),COALESCE(usage_type,''),COALESCE(isp,''),COALESCE(asn,''),COALESCE(asn_org,''),COALESCE(cloud_provider,''),
 			CASE WHEN EXISTS (SELECT 1 FROM resolved_tokens rt
-				WHERE rt.token=events.token_hash AND (rt.tenant='' OR rt.tenant=events.tenant)
-				AND events.ts>rt.resolved_ts) THEN 1 ELSE 0 END
+				WHERE (rt.token=events.token_hash OR events.token_hash IN
+					(SELECT a2.token FROM token_associations a1 JOIN token_associations a2
+					 ON a2.tenant=a1.tenant AND a2.email=a1.email
+					 WHERE a1.token=rt.token AND a1.tenant=events.tenant))
+				AND (rt.tenant='' OR rt.tenant=events.tenant)
+				AND events.ts>rt.resolved_ts) THEN 1 ELSE 0 END,
+			CASE WHEN EXISTS (SELECT 1 FROM focus_tokens ft
+				WHERE (ft.token=events.token_hash OR events.token_hash IN
+					(SELECT a2.token FROM token_associations a1 JOIN token_associations a2
+					 ON a2.tenant=a1.tenant AND a2.email=a1.email
+					 WHERE a1.token=ft.token AND a1.tenant=events.tenant))
+				AND (ft.tenant='' OR ft.tenant=events.tenant)
+				AND events.ts>=ft.focused_ts) THEN 1 ELSE 0 END
 			FROM events WHERE 1=1`
 	args := []any{}
 	if f.Tenant != "" {
@@ -535,7 +656,11 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error)
 	// 单 token 精确查询时不过滤，方便查看完整时间线。
 	if !f.IncludeResolved && f.TokenHash == "" {
 		q += ` AND NOT EXISTS (SELECT 1 FROM resolved_tokens rt
-			WHERE rt.token=events.token_hash AND (rt.tenant='' OR rt.tenant=events.tenant)
+			WHERE (rt.token=events.token_hash OR events.token_hash IN
+				(SELECT a2.token FROM token_associations a1 JOIN token_associations a2
+				 ON a2.tenant=a1.tenant AND a2.email=a1.email
+				 WHERE a1.token=rt.token AND a1.tenant=events.tenant))
+			AND (rt.tenant='' OR rt.tenant=events.tenant)
 			AND events.ts<=rt.resolved_ts)`
 	}
 	q += " ORDER BY ts DESC"
@@ -556,10 +681,10 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error)
 		var ts int64
 		var tags sql.NullString
 		var ua, tokenHash, flag, path, action sql.NullString
-		var reTriggered int
+		var reTriggered, focused int
 		if err := rows.Scan(&ts, &e.Tenant, &e.ClientIP, &ua, &tokenHash, &flag,
 			&path, &e.Status, &action, &tags, &e.UpstreamMS, &e.RespSize,
-			&e.Country, &e.UsageType, &e.ISP, &e.ASN, &e.ASNOrg, &e.CloudProvider, &reTriggered); err != nil {
+			&e.Country, &e.UsageType, &e.ISP, &e.ASN, &e.ASNOrg, &e.CloudProvider, &reTriggered, &focused); err != nil {
 			return nil, err
 		}
 		e.TS = time.UnixMilli(ts)
@@ -569,6 +694,7 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error)
 		e.Path = path.String
 		e.Action = action.String
 		e.ReTriggered = reTriggered != 0
+		e.Focused = focused != 0
 		if tags.Valid {
 			_ = json.Unmarshal([]byte(tags.String), &e.RuleTags)
 		}
@@ -920,7 +1046,7 @@ func (s *Store) Summary(ctx context.Context, tenant string, since time.Time) (*S
 }
 
 // Retention 清理
-func (s *Store) Vacuum(ctx context.Context, eventsRetention, incidentsRetention time.Duration) error {
+func (s *Store) Vacuum(ctx context.Context, eventsRetention, incidentsRetention, awsIPChangesRetention time.Duration) error {
 	now := time.Now()
 	if _, err := s.db.ExecContext(ctx,
 		"DELETE FROM events WHERE ts<?", now.Add(-eventsRetention).UnixMilli()); err != nil {
@@ -928,6 +1054,10 @@ func (s *Store) Vacuum(ctx context.Context, eventsRetention, incidentsRetention 
 	}
 	if _, err := s.db.ExecContext(ctx,
 		"DELETE FROM incidents WHERE ts<?", now.Add(-incidentsRetention).UnixMilli()); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"DELETE FROM aws_ip_changes WHERE occurred_ts<?", now.Add(-awsIPChangesRetention).UnixMilli()); err != nil {
 		return err
 	}
 	// 只删过期超过 7 天的 bans,保留近期作为审计
@@ -953,11 +1083,98 @@ func (s *Store) AddResolvedToken(ctx context.Context, token, tenant, note string
 	if token == "" {
 		return fmt.Errorf("token is empty")
 	}
-	_, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err = tx.ExecContext(ctx,
 		`INSERT INTO resolved_tokens (token, tenant, note, resolved_ts) VALUES (?,?,?,?)
 		 ON CONFLICT(token) DO UPDATE SET tenant=excluded.tenant, note=excluded.note, resolved_ts=excluded.resolved_ts`,
-		token, tenant, note, time.Now().UnixMilli())
+		token, tenant, note, time.Now().UnixMilli()); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM focus_tokens WHERE token=?`, token); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ----- focus_tokens(重点关注 token) -----
+
+type FocusToken struct {
+	Token          string `json:"token"`
+	Tenant         string `json:"tenant"`
+	Note           string `json:"note"`
+	FocusedTS      int64  `json:"focused_ts"`
+	ActivityCount  int    `json:"activity_count"`
+	LastActivityTS int64  `json:"last_activity_ts"`
+	LastIP         string `json:"last_ip"`
+	LastUA         string `json:"last_ua"`
+}
+
+func (s *Store) AddFocusToken(ctx context.Context, token, tenant, note string) error {
+	if token == "" {
+		return fmt.Errorf("token is empty")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := time.Now().UnixMilli()
+	if _, err = tx.ExecContext(ctx, `INSERT INTO focus_tokens (token,tenant,note,focused_ts) VALUES (?,?,?,?)
+		ON CONFLICT(token) DO UPDATE SET tenant=excluded.tenant,note=excluded.note,focused_ts=excluded.focused_ts`,
+		token, tenant, note, now); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM resolved_tokens WHERE token=?`, token); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) RemoveFocusToken(ctx context.Context, token string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM focus_tokens WHERE token=?`, token)
 	return err
+}
+
+func (s *Store) ListFocusTokens(ctx context.Context, tenant string) ([]FocusToken, error) {
+	q := `SELECT f.token,COALESCE(f.tenant,''),COALESCE(f.note,''),f.focused_ts,
+		COUNT(e.id),COALESCE(MAX(e.ts),0),
+		COALESCE((SELECT e2.client_ip FROM events e2 WHERE (e2.token_hash=f.token OR e2.token_hash IN
+			(SELECT a2.token FROM token_associations a1 JOIN token_associations a2
+			 ON a2.tenant=a1.tenant AND a2.email=a1.email WHERE a1.tenant=f.tenant AND a1.token=f.token))
+			AND (f.tenant='' OR e2.tenant=f.tenant) AND e2.ts>=f.focused_ts ORDER BY e2.ts DESC,e2.id DESC LIMIT 1),''),
+		COALESCE((SELECT e2.ua FROM events e2 WHERE (e2.token_hash=f.token OR e2.token_hash IN
+			(SELECT a2.token FROM token_associations a1 JOIN token_associations a2
+			 ON a2.tenant=a1.tenant AND a2.email=a1.email WHERE a1.tenant=f.tenant AND a1.token=f.token))
+			AND (f.tenant='' OR e2.tenant=f.tenant) AND e2.ts>=f.focused_ts ORDER BY e2.ts DESC,e2.id DESC LIMIT 1),'')
+		FROM focus_tokens f LEFT JOIN events e ON (e.token_hash=f.token OR e.token_hash IN
+			(SELECT a2.token FROM token_associations a1 JOIN token_associations a2
+			 ON a2.tenant=a1.tenant AND a2.email=a1.email WHERE a1.tenant=f.tenant AND a1.token=f.token))
+			AND (f.tenant='' OR e.tenant=f.tenant) AND e.ts>=f.focused_ts`
+	var args []any
+	if tenant != "" {
+		q += ` WHERE f.tenant=? OR f.tenant=''`
+		args = append(args, tenant)
+	}
+	q += ` GROUP BY f.token ORDER BY f.focused_ts DESC LIMIT 500`
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []FocusToken
+	for rows.Next() {
+		var f FocusToken
+		if err := rows.Scan(&f.Token, &f.Tenant, &f.Note, &f.FocusedTS, &f.ActivityCount,
+			&f.LastActivityTS, &f.LastIP, &f.LastUA); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
 }
 
 // RemoveResolvedToken 取消已处理标记。
@@ -989,6 +1206,370 @@ func (s *Store) ListResolvedTokens(ctx context.Context, tenant string) ([]Resolv
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// ----- AWS 入口 IP 更换追踪 -----
+
+// AWSIPChange 是一次入口 IP 被墙/更换记录及其快照统计。
+type AWSIPChange struct {
+	ID              int64  `json:"id"`
+	OccurredTS      int64  `json:"occurred_ts"`
+	DNSName         string `json:"dns_name"`
+	Tenant          string `json:"tenant"`
+	OldIP           string `json:"old_ip"`
+	NewIP           string `json:"new_ip"`
+	LookbackMinutes int    `json:"lookback_minutes"`
+	Note            string `json:"note"`
+	CreatedTS       int64  `json:"created_ts"`
+	SiteCount       int    `json:"site_count"`
+	SubscriberCount int    `json:"subscriber_count"`
+	PullCount       int    `json:"pull_count"`
+}
+
+// AWSIPChangeSubscriber 是更换动作发生前时间窗内冻结的一行订阅画像。
+type AWSIPChangeSubscriber struct {
+	Tenant        string `json:"tenant"`
+	TokenHash     string `json:"token"`
+	ClientIP      string `json:"client_ip"`
+	UA            string `json:"ua"`
+	PullCount     int    `json:"pull_count"`
+	FirstSeenTS   int64  `json:"first_seen_ts"`
+	LastSeenTS    int64  `json:"last_seen_ts"`
+	CloudProvider string `json:"cloud_provider"`
+	ASN           string `json:"asn"`
+	ASNOrg        string `json:"asn_org"`
+}
+
+// AddAWSIPChange 新增换 IP 记录，并在同一事务中冻结动作前 15/20 分钟的订阅者。
+func (s *Store) AddAWSIPChange(ctx context.Context, change AWSIPChange) (*AWSIPChange, error) {
+	if change.LookbackMinutes != 15 && change.LookbackMinutes != 20 {
+		return nil, fmt.Errorf("lookback_minutes must be 15 or 20")
+	}
+	if change.OccurredTS <= 0 {
+		change.OccurredTS = time.Now().UnixMilli()
+	}
+	change.CreatedTS = time.Now().UnixMilli()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `INSERT INTO aws_ip_changes
+		(occurred_ts,dns_name,tenant,old_ip,new_ip,lookback_minutes,note,created_ts) VALUES (?,?,?,?,?,?,?,?)`,
+		change.OccurredTS, change.DNSName, change.Tenant, change.OldIP, change.NewIP,
+		change.LookbackMinutes, change.Note, change.CreatedTS)
+	if err != nil {
+		return nil, err
+	}
+	change.ID, err = res.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+	windowStart := change.OccurredTS - int64(change.LookbackMinutes)*int64(time.Minute/time.Millisecond)
+	snapshotSQL := `INSERT INTO aws_ip_change_subscribers
+		(change_id,tenant,token_hash,client_ip,ua,pull_count,first_seen_ts,last_seen_ts,cloud_provider,asn,asn_org)
+		SELECT ?, tenant, token_hash, COALESCE(client_ip,''), COALESCE(ua,''), COUNT(*), MIN(ts), MAX(ts),
+		       COALESCE(MAX(NULLIF(cloud_provider,'')),''), COALESCE(MAX(NULLIF(asn,'')),''), COALESCE(MAX(NULLIF(asn_org,'')),'')
+		FROM events
+		WHERE ts>=? AND ts<=? AND token_hash<>''`
+	snapshotArgs := []any{change.ID, windowStart, change.OccurredTS}
+	if change.Tenant != "" {
+		snapshotSQL += " AND tenant=?"
+		snapshotArgs = append(snapshotArgs, change.Tenant)
+	}
+	snapshotSQL += " GROUP BY tenant,token_hash,client_ip,COALESCE(ua,'')"
+	_, err = tx.ExecContext(ctx, snapshotSQL, snapshotArgs...)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return s.GetAWSIPChange(ctx, change.ID)
+}
+
+// GetAWSIPChange 返回单条记录及其快照统计。
+func (s *Store) GetAWSIPChange(ctx context.Context, id int64) (*AWSIPChange, error) {
+	var c AWSIPChange
+	err := s.db.QueryRowContext(ctx, `SELECT c.id,c.occurred_ts,COALESCE(c.dns_name,''),COALESCE(c.tenant,''),COALESCE(c.old_ip,''),COALESCE(c.new_ip,''),
+		c.lookback_minutes,COALESCE(c.note,''),c.created_ts,
+		COUNT(DISTINCT s.tenant),
+		COUNT(DISTINCT s.tenant || char(0) || s.token_hash),
+		COALESCE(SUM(s.pull_count),0)
+		FROM aws_ip_changes c LEFT JOIN aws_ip_change_subscribers s ON s.change_id=c.id
+		WHERE c.id=? GROUP BY c.id`, id).Scan(&c.ID, &c.OccurredTS, &c.DNSName, &c.Tenant, &c.OldIP, &c.NewIP,
+		&c.LookbackMinutes, &c.Note, &c.CreatedTS, &c.SiteCount, &c.SubscriberCount, &c.PullCount)
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// ListAWSIPChanges 按动作时间倒序列出历史记录。
+func (s *Store) ListAWSIPChanges(ctx context.Context, limit int) ([]AWSIPChange, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT c.id,c.occurred_ts,COALESCE(c.dns_name,''),COALESCE(c.tenant,''),COALESCE(c.old_ip,''),COALESCE(c.new_ip,''),
+		c.lookback_minutes,COALESCE(c.note,''),c.created_ts,
+		COUNT(DISTINCT s.tenant),
+		COUNT(DISTINCT s.tenant || char(0) || s.token_hash),
+		COALESCE(SUM(s.pull_count),0)
+		FROM aws_ip_changes c LEFT JOIN aws_ip_change_subscribers s ON s.change_id=c.id
+		GROUP BY c.id ORDER BY c.occurred_ts DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AWSIPChange
+	for rows.Next() {
+		var c AWSIPChange
+		if err := rows.Scan(&c.ID, &c.OccurredTS, &c.DNSName, &c.Tenant, &c.OldIP, &c.NewIP, &c.LookbackMinutes,
+			&c.Note, &c.CreatedTS, &c.SiteCount, &c.SubscriberCount, &c.PullCount); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// ListAWSIPChangeSubscribers 返回某次快照，按站点和拉取次数排序。
+func (s *Store) ListAWSIPChangeSubscribers(ctx context.Context, changeID int64) ([]AWSIPChangeSubscriber, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT tenant,token_hash,COALESCE(client_ip,''),COALESCE(ua,''),pull_count,
+		first_seen_ts,last_seen_ts,COALESCE(cloud_provider,''),COALESCE(asn,''),COALESCE(asn_org,'')
+		FROM aws_ip_change_subscribers WHERE change_id=?
+		ORDER BY tenant,pull_count DESC,last_seen_ts DESC`, changeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AWSIPChangeSubscriber
+	for rows.Next() {
+		var row AWSIPChangeSubscriber
+		if err := rows.Scan(&row.Tenant, &row.TokenHash, &row.ClientIP, &row.UA, &row.PullCount,
+			&row.FirstSeenTS, &row.LastSeenTS, &row.CloudProvider, &row.ASN, &row.ASNOrg); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteAWSIPChange(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM aws_ip_changes WHERE id=?`, id)
+	return err
+}
+
+// DNSWatcher 持久化一个入口 DNS 监控；Tenant 为空表示所有站点。
+type DNSWatcher struct {
+	ID              int64          `json:"id"`
+	DNSName         string         `json:"dns_name"`
+	Tenant          string         `json:"tenant"`
+	LookbackMinutes int            `json:"lookback_minutes"`
+	Enabled         bool           `json:"enabled"`
+	LastIPs         string         `json:"last_ips"`
+	LastCheckedTS   int64          `json:"last_checked_ts"`
+	LastChangedTS   int64          `json:"last_changed_ts"`
+	AliveSeconds    int64          `json:"alive_seconds"`
+	LastError       string         `json:"last_error"`
+	Note            string         `json:"note"`
+	CreatedTS       int64          `json:"created_ts"`
+	UpdatedTS       int64          `json:"updated_ts"`
+	IPHistory       []DNSIPHistory `json:"ip_history"`
+}
+
+// DNSIPHistory 是已结束的一段 IP 存活记录。
+type DNSIPHistory struct {
+	ID        int64  `json:"id"`
+	WatcherID int64  `json:"watcher_id"`
+	IP        string `json:"ip"`
+	StartedTS int64  `json:"started_ts"`
+	EndedTS   int64  `json:"ended_ts"`
+	AliveSec  int64  `json:"alive_seconds"`
+}
+
+func (s *Store) AddDNSWatcher(ctx context.Context, w DNSWatcher) (*DNSWatcher, error) {
+	if w.DNSName == "" {
+		return nil, fmt.Errorf("dns_name is required")
+	}
+	if w.LookbackMinutes != 15 && w.LookbackMinutes != 20 {
+		return nil, fmt.Errorf("lookback_minutes must be 15 or 20")
+	}
+	now := time.Now().UnixMilli()
+	enabled := 0
+	if w.Enabled {
+		enabled = 1
+	}
+	if w.LastChangedTS <= 0 {
+		w.LastChangedTS = now
+	}
+	res, err := s.db.ExecContext(ctx, `INSERT INTO dns_watchers
+		(dns_name,tenant,lookback_minutes,enabled,last_ips,last_checked_ts,last_changed_ts,last_error,note,created_ts,updated_ts)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)`, w.DNSName, w.Tenant, w.LookbackMinutes, enabled,
+		w.LastIPs, w.LastCheckedTS, w.LastChangedTS, w.LastError, w.Note, now, now)
+	if err != nil {
+		return nil, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+	return s.GetDNSWatcher(ctx, id)
+}
+
+func (s *Store) GetDNSWatcher(ctx context.Context, id int64) (*DNSWatcher, error) {
+	var w DNSWatcher
+	var enabled int
+	err := s.db.QueryRowContext(ctx, `SELECT id,dns_name,tenant,lookback_minutes,enabled,last_ips,
+		last_checked_ts,last_changed_ts,last_error,note,created_ts,updated_ts FROM dns_watchers WHERE id=?`, id).Scan(
+		&w.ID, &w.DNSName, &w.Tenant, &w.LookbackMinutes, &enabled, &w.LastIPs,
+		&w.LastCheckedTS, &w.LastChangedTS, &w.LastError, &w.Note, &w.CreatedTS, &w.UpdatedTS)
+	if err != nil {
+		return nil, err
+	}
+	w.Enabled = enabled != 0
+	return &w, nil
+}
+
+func (s *Store) ListDNSWatchers(ctx context.Context, enabledOnly bool) ([]DNSWatcher, error) {
+	q := `SELECT id,dns_name,tenant,lookback_minutes,enabled,last_ips,last_checked_ts,last_changed_ts,last_error,note,created_ts,updated_ts
+		FROM dns_watchers`
+	if enabledOnly {
+		q += " WHERE enabled=1"
+	}
+	q += " ORDER BY id DESC"
+	rows, err := s.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DNSWatcher
+	for rows.Next() {
+		var w DNSWatcher
+		var enabled int
+		if err := rows.Scan(&w.ID, &w.DNSName, &w.Tenant, &w.LookbackMinutes, &enabled,
+			&w.LastIPs, &w.LastCheckedTS, &w.LastChangedTS, &w.LastError, &w.Note, &w.CreatedTS, &w.UpdatedTS); err != nil {
+			return nil, err
+		}
+		w.Enabled = enabled != 0
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
+// UpdateDNSWatcherState 由轮询器写入本次解析状态。
+func (s *Store) UpdateDNSWatcherState(ctx context.Context, id int64, ips, lastError string, checkedTS int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE dns_watchers
+		SET last_ips=?,last_error=?,last_checked_ts=?,updated_ts=? WHERE id=?`,
+		ips, lastError, checkedTS, time.Now().UnixMilli(), id)
+	return err
+}
+
+// SetDNSWatcherBaseline 设置首次解析基线，从此时开始计算当前 IP 存活时间。
+func (s *Store) SetDNSWatcherBaseline(ctx context.Context, id int64, ips string, checkedTS int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE dns_watchers SET last_ips=?,last_error='',last_checked_ts=?,
+		last_changed_ts=?,updated_ts=? WHERE id=?`, ips, checkedTS, checkedTS, time.Now().UnixMilli(), id)
+	return err
+}
+
+// RecordDNSIPTransition 结算上一个 IP 的存活时间、更新当前 IP，并只保留最近 5 条。
+func (s *Store) RecordDNSIPTransition(ctx context.Context, watcher DNSWatcher, newIPs string, changedTS int64) error {
+	startedTS := watcher.LastChangedTS
+	if startedTS <= 0 {
+		startedTS = watcher.CreatedTS
+	}
+	if startedTS <= 0 || startedTS > changedTS {
+		startedTS = changedTS
+	}
+	aliveSec := (changedTS - startedTS) / 1000
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if watcher.LastIPs != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO dns_ip_history
+			(watcher_id,ip,started_ts,ended_ts,alive_sec) VALUES (?,?,?,?,?)`,
+			watcher.ID, watcher.LastIPs, startedTS, changedTS, aliveSec); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM dns_ip_history WHERE watcher_id=? AND id NOT IN
+		(SELECT id FROM dns_ip_history WHERE watcher_id=? ORDER BY ended_ts DESC,id DESC LIMIT 5)`,
+		watcher.ID, watcher.ID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE dns_watchers SET last_ips=?,last_error='',last_checked_ts=?,
+		last_changed_ts=?,updated_ts=? WHERE id=?`, newIPs, changedTS, changedTS, time.Now().UnixMilli(), watcher.ID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ListDNSIPHistory(ctx context.Context, watcherID int64, limit int) ([]DNSIPHistory, error) {
+	if limit <= 0 || limit > 5 {
+		limit = 5
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id,watcher_id,ip,started_ts,ended_ts,alive_sec
+		FROM dns_ip_history WHERE watcher_id=? ORDER BY ended_ts DESC,id DESC LIMIT ?`, watcherID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DNSIPHistory
+	for rows.Next() {
+		var h DNSIPHistory
+		if err := rows.Scan(&h.ID, &h.WatcherID, &h.IP, &h.StartedTS, &h.EndedTS, &h.AliveSec); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) SetDNSWatcherEnabled(ctx context.Context, id int64, enabled bool) error {
+	v := 0
+	if enabled {
+		v = 1
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE dns_watchers SET enabled=?,updated_ts=? WHERE id=?`,
+		v, time.Now().UnixMilli(), id)
+	return err
+}
+
+func (s *Store) UpdateDNSWatcherNote(ctx context.Context, id int64, note string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var dnsName, tenant string
+	if err := tx.QueryRowContext(ctx, `SELECT dns_name,tenant FROM dns_watchers WHERE id=?`, id).Scan(&dnsName, &tenant); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE dns_watchers SET note=?,updated_ts=? WHERE id=?`,
+		note, time.Now().UnixMilli(), id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err == nil && rows == 0 {
+		return sql.ErrNoRows
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE aws_ip_changes SET note=?
+		WHERE dns_name=? AND COALESCE(tenant,'')=?`, note, dnsName, tenant); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) DeleteDNSWatcher(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM dns_watchers WHERE id=?`, id)
+	return err
 }
 
 // PurgeEvents 清空请求事件 + 异常事件。tenant 为空=全部租户;否则只清该租户。
@@ -1174,6 +1755,59 @@ func (s *Store) ListIPWhitelist() ([]IPWhitelistEntry, error) {
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+type DomainWhitelistEntry struct {
+	ID             int64     `json:"ID"`
+	Domain         string    `json:"Domain"`
+	Note           string    `json:"Note"`
+	ResolvedIPs    []string  `json:"ResolvedIPs"`
+	LastResolvedTS int64     `json:"LastResolvedTS"`
+	LastError      string    `json:"LastError"`
+	CreatedTS      time.Time `json:"CreatedTS"`
+}
+
+func (s *Store) AddDomainWhitelist(domain, note string) error {
+	_, err := s.db.Exec(`INSERT INTO ip_whitelist_domains (domain,note,created_ts) VALUES (?,?,?)
+		ON CONFLICT(domain) DO UPDATE SET note=excluded.note`, domain, note, time.Now().UnixMilli())
+	return err
+}
+
+func (s *Store) DeleteDomainWhitelist(id int64) error {
+	_, err := s.db.Exec(`DELETE FROM ip_whitelist_domains WHERE id=?`, id)
+	return err
+}
+
+func (s *Store) ListDomainWhitelist() ([]DomainWhitelistEntry, error) {
+	rows, err := s.db.Query(`SELECT id,domain,COALESCE(note,''),resolved_ips,last_resolved_ts,
+		COALESCE(last_error,''),created_ts FROM ip_whitelist_domains ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DomainWhitelistEntry
+	for rows.Next() {
+		var e DomainWhitelistEntry
+		var raw string
+		var created int64
+		if err := rows.Scan(&e.ID, &e.Domain, &e.Note, &raw, &e.LastResolvedTS, &e.LastError, &created); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal([]byte(raw), &e.ResolvedIPs)
+		e.CreatedTS = time.UnixMilli(created)
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) SetDomainWhitelistResolution(id int64, ips []string, resolveErr string) error {
+	raw, err := json.Marshal(ips)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`UPDATE ip_whitelist_domains SET resolved_ips=?,last_resolved_ts=?,last_error=? WHERE id=?`,
+		string(raw), time.Now().UnixMilli(), resolveErr, id)
+	return err
 }
 
 // ----- tenants -----
@@ -1392,7 +2026,12 @@ type UserReport struct {
 
 func (s *Store) UpsertUserReport(r UserReport) error {
 	now := time.Now().Unix()
-	_, err := s.db.Exec(`
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err = tx.Exec(`
 		INSERT INTO user_reports (token, tenant, uuid, email, traffic_used, traffic_total,
 			wallet_balance, commission_balance, user_created_at, last_ip, last_ua, site_domain,
 			report_count, first_seen, last_seen)
@@ -1406,8 +2045,45 @@ func (s *Store) UpsertUserReport(r UserReport) error {
 			report_count=report_count+1, last_seen=excluded.last_seen`,
 		r.Token, r.Tenant, r.UUID, r.Email, r.TrafficUsed, r.TrafficTotal,
 		r.WalletBalance, r.CommissionBalance, r.UserCreatedAt, r.LastIP, r.LastUA, r.SiteDomain,
-		now, now)
-	return err
+		now, now); err != nil {
+		return err
+	}
+	email := strings.ToLower(strings.TrimSpace(r.Email))
+	if email == "" {
+		return tx.Commit()
+	}
+	nowMS := time.Now().UnixMilli()
+	if _, err = tx.Exec(`INSERT INTO token_associations (tenant,email,token,first_seen_ts,last_seen_ts)
+		VALUES (?,?,?,?,?) ON CONFLICT(tenant,token) DO UPDATE SET
+		email=excluded.email,last_seen_ts=excluded.last_seen_ts`, r.Tenant, email, r.Token, nowMS, nowMS); err != nil {
+		return err
+	}
+	// UUID/token 重置后，把同账户旧 token 的处置状态迁移到最新 token。
+	if _, err = tx.Exec(`INSERT INTO focus_tokens (token,tenant,note,focused_ts)
+		SELECT ?,tenant,note,focused_ts FROM focus_tokens WHERE token IN
+			(SELECT token FROM token_associations WHERE tenant=? AND email=?)
+		ORDER BY focused_ts LIMIT 1
+		ON CONFLICT(token) DO UPDATE SET tenant=excluded.tenant,note=excluded.note,focused_ts=excluded.focused_ts`,
+		r.Token, r.Tenant, email); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DELETE FROM focus_tokens WHERE token<>? AND token IN
+		(SELECT token FROM token_associations WHERE tenant=? AND email=?)`, r.Token, r.Tenant, email); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO resolved_tokens (token,tenant,note,resolved_ts)
+		SELECT ?,tenant,note,resolved_ts FROM resolved_tokens WHERE token IN
+			(SELECT token FROM token_associations WHERE tenant=? AND email=?)
+		ORDER BY resolved_ts LIMIT 1
+		ON CONFLICT(token) DO UPDATE SET tenant=excluded.tenant,note=excluded.note,resolved_ts=excluded.resolved_ts`,
+		r.Token, r.Tenant, email); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DELETE FROM resolved_tokens WHERE token<>? AND token IN
+		(SELECT token FROM token_associations WHERE tenant=? AND email=?)`, r.Token, r.Tenant, email); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ListUserReports(tenant string) ([]UserReport, error) {
@@ -1458,8 +2134,21 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 		return nil, err
 	}
 
+	// token -> 同站点账户键。用于让 UUID 重置前后的 token 共用处置状态。
+	accountByToken := make(map[string]string)
+	assocRows, _ := s.db.Query(`SELECT tenant,token,email FROM token_associations`)
+	if assocRows != nil {
+		defer assocRows.Close()
+		for assocRows.Next() {
+			var t, token, email string
+			if assocRows.Scan(&t, &token, &email) == nil {
+				accountByToken[t+"\x00"+token] = t + "\x00" + email
+			}
+		}
+	}
 	// 已处理记录用于区分“旧记录已归档”和“处理后再次触发”。
 	resolvedSet := make(map[string]bool)
+	resolvedAccounts := make(map[string]bool)
 	resolvedRows, _ := s.db.Query(`SELECT token, COALESCE(tenant,'') FROM resolved_tokens`)
 	if resolvedRows != nil {
 		defer resolvedRows.Close()
@@ -1467,11 +2156,34 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 			var token, t string
 			if resolvedRows.Scan(&token, &t) == nil {
 				resolvedSet[t+"\x00"+token] = true
+				if account := accountByToken[t+"\x00"+token]; account != "" {
+					resolvedAccounts[account] = true
+				}
 			}
 		}
 	}
 	isResolved := func(tenant, token string) bool {
-		return resolvedSet[tenant+"\x00"+token] || resolvedSet["\x00"+token]
+		return resolvedSet[tenant+"\x00"+token] || resolvedSet["\x00"+token] ||
+			resolvedAccounts[accountByToken[tenant+"\x00"+token]]
+	}
+	focusSet := make(map[string]bool)
+	focusAccounts := make(map[string]bool)
+	focusRows, _ := s.db.Query(`SELECT token, COALESCE(tenant,'') FROM focus_tokens`)
+	if focusRows != nil {
+		defer focusRows.Close()
+		for focusRows.Next() {
+			var token, t string
+			if focusRows.Scan(&token, &t) == nil {
+				focusSet[t+"\x00"+token] = true
+				if account := accountByToken[t+"\x00"+token]; account != "" {
+					focusAccounts[account] = true
+				}
+			}
+		}
+	}
+	isFocused := func(tenant, token string) bool {
+		return focusSet[tenant+"\x00"+token] || focusSet["\x00"+token] ||
+			focusAccounts[accountByToken[tenant+"\x00"+token]]
 	}
 
 	sinceMs := since.UnixMilli()
@@ -1492,7 +2204,11 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 		              THEN NULLIF(e.asn,'') END),'')
 		FROM events e WHERE e.ts>=? AND e.token_hash<>''`+tenantCond+`
 		  AND NOT EXISTS (SELECT 1 FROM resolved_tokens rt
-		      WHERE rt.token=e.token_hash AND (rt.tenant='' OR rt.tenant=e.tenant) AND e.ts<=rt.resolved_ts)
+		      WHERE (rt.token=e.token_hash OR e.token_hash IN
+		          (SELECT a2.token FROM token_associations a1 JOIN token_associations a2
+		           ON a2.tenant=a1.tenant AND a2.email=a1.email
+		           WHERE a1.token=rt.token AND a1.tenant=e.tenant))
+		      AND (rt.tenant='' OR rt.tenant=e.tenant) AND e.ts<=rt.resolved_ts)
 		GROUP BY e.token_hash, e.tenant`, args...)
 	if err != nil {
 		return nil, err
@@ -1535,7 +2251,11 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 			       ROW_NUMBER() OVER (PARTITION BY e.token_hash, e.tenant ORDER BY e.ts DESC, e.id DESC) AS rn
 			FROM events e WHERE e.ts>=? AND e.token_hash<>''`+tenantCond+`
 			  AND NOT EXISTS (SELECT 1 FROM resolved_tokens rt
-			      WHERE rt.token=e.token_hash AND (rt.tenant='' OR rt.tenant=e.tenant) AND e.ts<=rt.resolved_ts)
+			      WHERE (rt.token=e.token_hash OR e.token_hash IN
+			          (SELECT a2.token FROM token_associations a1 JOIN token_associations a2
+			           ON a2.tenant=a1.tenant AND a2.email=a1.email
+			           WHERE a1.token=rt.token AND a1.tenant=e.tenant))
+			      AND (rt.tenant='' OR rt.tenant=e.tenant) AND e.ts<=rt.resolved_ts)
 		) WHERE rn=1`, args...)
 	if err != nil {
 		return nil, err
@@ -1559,6 +2279,9 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 	out := make([]SuspectRow, 0, len(reports)+len(statsMap))
 	seen := make(map[string]bool, len(reports))
 	for _, r := range reports {
+		if isFocused(r.Tenant, r.Token) {
+			continue
+		}
 		key := r.Tenant + "\x00" + r.Token
 		st, hasNewEvents := statsMap[key]
 		if isResolved(r.Tenant, r.Token) && !hasNewEvents {
@@ -1592,6 +2315,9 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 		}
 		parts := strings.SplitN(key, "\x00", 2)
 		if len(parts) != 2 {
+			continue
+		}
+		if isFocused(parts[0], parts[1]) {
 			continue
 		}
 		out = append(out, SuspectRow{
@@ -1656,8 +2382,135 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 
 // SuspectDetail 单用户的 IP 列表和 UA 列表
 type SuspectDetail struct {
-	IPs []IPDetail `json:"ips"`
-	UAs []UADetail `json:"uas"`
+	IPs    []IPDetail         `json:"ips"`
+	UAs    []UADetail         `json:"uas"`
+	Tokens []TokenAssociation `json:"tokens"`
+}
+
+type TokenAssociation struct {
+	Token       string `json:"token"`
+	FirstSeenTS int64  `json:"first_seen_ts"`
+	LastSeenTS  int64  `json:"last_seen_ts"`
+}
+
+func (s *Store) ListAssociatedTokens(ctx context.Context, tenant, token string) ([]TokenAssociation, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT a2.token,a2.first_seen_ts,a2.last_seen_ts
+		FROM token_associations a1 JOIN token_associations a2
+		ON a2.tenant=a1.tenant AND a2.email=a1.email
+		WHERE a1.tenant=? AND a1.token=? ORDER BY a2.last_seen_ts DESC`, tenant, token)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TokenAssociation
+	for rows.Next() {
+		var a TokenAssociation
+		if err := rows.Scan(&a.Token, &a.FirstSeenTS, &a.LastSeenTS); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// AssociateTokens 手动把两个 token 归入同一站点账户。用于上游未上报邮箱时的 UUID 重置场景。
+func (s *Store) AssociateTokens(ctx context.Context, tenant, currentToken, relatedToken string) error {
+	tenant = strings.TrimSpace(tenant)
+	currentToken = strings.TrimSpace(currentToken)
+	relatedToken = strings.TrimSpace(relatedToken)
+	if tenant == "" || currentToken == "" || relatedToken == "" {
+		return fmt.Errorf("tenant and both tokens are required")
+	}
+	if currentToken == relatedToken {
+		return fmt.Errorf("tokens must be different")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT email FROM token_associations
+		WHERE tenant=? AND token IN (?,?)`, tenant, currentToken, relatedToken)
+	if err != nil {
+		return err
+	}
+	var keys []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		keys = append(keys, key)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	// 两个由上游明确上报、且邮箱不同的账户不允许误合并。
+	var accountKey string
+	for _, key := range keys {
+		if !strings.HasPrefix(key, "manual:") {
+			if accountKey != "" && accountKey != key {
+				return fmt.Errorf("tokens belong to different reported accounts")
+			}
+			accountKey = key
+		}
+	}
+	if accountKey == "" && len(keys) > 0 {
+		accountKey = keys[0]
+	}
+	if accountKey == "" {
+		buf := make([]byte, 16)
+		if _, err := rand.Read(buf); err != nil {
+			return err
+		}
+		accountKey = "manual:" + hex.EncodeToString(buf)
+	}
+	if len(keys) > 0 {
+		marks := strings.TrimRight(strings.Repeat("?,", len(keys)), ",")
+		args := []any{accountKey, tenant}
+		for _, key := range keys {
+			args = append(args, key)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE token_associations SET email=? WHERE tenant=? AND email IN (`+marks+`)`, args...); err != nil {
+			return err
+		}
+	}
+	now := time.Now().UnixMilli()
+	for _, token := range []string{currentToken, relatedToken} {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO token_associations
+			(tenant,email,token,first_seen_ts,last_seen_ts) VALUES (?,?,?,?,?)
+			ON CONFLICT(tenant,token) DO UPDATE SET email=excluded.email`, tenant, accountKey, token, now, now); err != nil {
+			return err
+		}
+	}
+	// 处置状态统一落到当前卡片 token，旧 token 的历史行为仍通过关联关系继承。
+	if _, err := tx.ExecContext(ctx, `INSERT INTO focus_tokens (token,tenant,note,focused_ts)
+		SELECT ?,tenant,note,focused_ts FROM focus_tokens WHERE token IN
+			(SELECT token FROM token_associations WHERE tenant=? AND email=?)
+		ORDER BY focused_ts LIMIT 1
+		ON CONFLICT(token) DO UPDATE SET tenant=excluded.tenant,note=excluded.note,focused_ts=excluded.focused_ts`,
+		currentToken, tenant, accountKey); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM focus_tokens WHERE token<>? AND token IN
+		(SELECT token FROM token_associations WHERE tenant=? AND email=?)`, currentToken, tenant, accountKey); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO resolved_tokens (token,tenant,note,resolved_ts)
+		SELECT ?,tenant,note,resolved_ts FROM resolved_tokens WHERE token IN
+			(SELECT token FROM token_associations WHERE tenant=? AND email=?)
+		ORDER BY resolved_ts LIMIT 1
+		ON CONFLICT(token) DO UPDATE SET tenant=excluded.tenant,note=excluded.note,resolved_ts=excluded.resolved_ts`,
+		currentToken, tenant, accountKey); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM resolved_tokens WHERE token<>? AND token IN
+		(SELECT token FROM token_associations WHERE tenant=? AND email=?)`, currentToken, tenant, accountKey); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 type IPDetail struct {
@@ -1682,17 +2535,34 @@ type UADetail struct {
 func (s *Store) QuerySuspectDetail(token, tenant string, since time.Time) (*SuspectDetail, error) {
 	sinceMs := since.UnixMilli()
 	detail := &SuspectDetail{}
+	associated, err := s.ListAssociatedTokens(context.Background(), tenant, token)
+	if err != nil {
+		return nil, err
+	}
+	detail.Tokens = associated
+	tokens := make([]string, 0, len(associated)+1)
+	for _, a := range associated {
+		tokens = append(tokens, a.Token)
+	}
+	if len(tokens) == 0 {
+		tokens = append(tokens, token)
+	}
+	marks := strings.TrimRight(strings.Repeat("?,", len(tokens)), ",")
 
 	// IP 明细
 	tenantCond := ""
-	args := []any{token, sinceMs}
+	args := make([]any, 0, len(tokens)+2)
+	for _, linkedToken := range tokens {
+		args = append(args, linkedToken)
+	}
+	args = append(args, sinceMs)
 	if tenant != "" {
 		tenantCond = " AND tenant=?"
 		args = append(args, tenant)
 	}
 	ipRows, err := s.db.Query(`
 		SELECT client_ip, COALESCE(country,''), COALESCE(isp,''), COUNT(*), MAX(ts)
-		FROM events WHERE token_hash=? AND ts>=?`+tenantCond+`
+		FROM events WHERE token_hash IN (`+marks+`) AND ts>=?`+tenantCond+`
 		GROUP BY client_ip ORDER BY COUNT(*) DESC`, args...)
 	if err != nil {
 		return nil, err
@@ -1707,7 +2577,11 @@ func (s *Store) QuerySuspectDetail(token, tenant string, since time.Time) (*Susp
 	}
 
 	// UA 明细
-	args2 := []any{token, sinceMs}
+	args2 := make([]any, 0, len(tokens)+2)
+	for _, linkedToken := range tokens {
+		args2 = append(args2, linkedToken)
+	}
+	args2 = append(args2, sinceMs)
 	tenantCond2 := ""
 	if tenant != "" {
 		tenantCond2 = " AND tenant=?"
@@ -1715,7 +2589,7 @@ func (s *Store) QuerySuspectDetail(token, tenant string, since time.Time) (*Susp
 	}
 	uaRows, err := s.db.Query(`
 		SELECT COALESCE(ua,''), COUNT(*), MAX(ts)
-		FROM events WHERE token_hash=? AND ts>=?`+tenantCond2+`
+		FROM events WHERE token_hash IN (`+marks+`) AND ts>=?`+tenantCond2+`
 		GROUP BY ua ORDER BY COUNT(*) DESC`, args2...)
 	if err != nil {
 		return nil, err

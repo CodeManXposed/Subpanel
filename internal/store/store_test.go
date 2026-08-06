@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -188,6 +189,309 @@ func TestSummaryTopTokensIncludeTenantAndStaySeparate(t *testing.T) {
 	}
 	if !seen["sled"] || !seen["rfs"] {
 		t.Fatalf("tenant missing from top tokens: %+v", s.TopTokens)
+	}
+}
+
+func TestAWSIPChangeSnapshotsPriorWindowByTenant(t *testing.T) {
+	st := newTestStore(t)
+	actionAt := time.Now().Truncate(time.Second)
+	events := []Event{
+		{TS: actionAt.Add(-21 * time.Minute), Tenant: "sled", ClientIP: "1.1.1.1", TokenHash: "too-old", Action: "pass"},
+		{TS: actionAt.Add(-19 * time.Minute), Tenant: "sled", ClientIP: "2.2.2.2", UA: "clash", TokenHash: "sled-token", Action: "pass", CloudProvider: "aws", ASN: "AS16509", ASNOrg: "Amazon.com, Inc."},
+		{TS: actionAt.Add(-18 * time.Minute), Tenant: "sled", ClientIP: "2.2.2.2", UA: "clash", TokenHash: "sled-token", Action: "pass", CloudProvider: "aws", ASN: "AS16509", ASNOrg: "Amazon.com, Inc."},
+		{TS: actionAt.Add(-10 * time.Minute), Tenant: "rfs", ClientIP: "3.3.3.3", UA: "sing-box", TokenHash: "rfs-token", Action: "pass"},
+		{TS: actionAt.Add(time.Minute), Tenant: "rfs", ClientIP: "4.4.4.4", TokenHash: "too-new", Action: "pass"},
+	}
+	for _, e := range events {
+		st.SubmitEvent(e)
+	}
+	time.Sleep(400 * time.Millisecond)
+
+	change, err := st.AddAWSIPChange(context.Background(), AWSIPChange{
+		OccurredTS: actionAt.UnixMilli(), DNSName: "entry.example.com", Tenant: "sled",
+		OldIP: "10.0.0.1", NewIP: "10.0.0.2", LookbackMinutes: 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if change.SiteCount != 1 || change.SubscriberCount != 1 || change.PullCount != 2 {
+		t.Fatalf("unexpected snapshot stats: %+v", change)
+	}
+	rows, err := st.ListAWSIPChangeSubscribers(context.Background(), change.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("site-scoped watcher must only capture sled, got %+v", rows)
+	}
+	var sled AWSIPChangeSubscriber
+	for _, row := range rows {
+		if row.Tenant == "sled" {
+			sled = row
+		}
+		if row.TokenHash == "too-old" || row.TokenHash == "too-new" {
+			t.Fatalf("out-of-window event was captured: %+v", row)
+		}
+	}
+	if sled.TokenHash != "sled-token" || sled.PullCount != 2 || sled.CloudProvider != "aws" || sled.ASN != "AS16509" {
+		t.Fatalf("unexpected sled snapshot: %+v", sled)
+	}
+
+	// 后续新日志不能改变已冻结的快照。
+	st.SubmitEvent(Event{TS: actionAt.Add(-5 * time.Minute), Tenant: "sled", ClientIP: "5.5.5.5", TokenHash: "late-write", Action: "pass"})
+	time.Sleep(400 * time.Millisecond)
+	rows, err = st.ListAWSIPChangeSubscribers(context.Background(), change.ID)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("snapshot should remain frozen: rows=%+v err=%v", rows, err)
+	}
+
+	allSites, err := st.AddAWSIPChange(context.Background(), AWSIPChange{
+		OccurredTS: actionAt.UnixMilli(), DNSName: "shared.example.com",
+		OldIP: "10.0.0.3", NewIP: "10.0.0.4", LookbackMinutes: 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allSites.SiteCount != 2 || allSites.SubscriberCount != 3 || allSites.PullCount != 4 {
+		t.Fatalf("empty tenant must capture every site: %+v", allSites)
+	}
+}
+
+func TestDNSWatcherLifecycle(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	base := time.Now().Add(-10 * time.Minute).UnixMilli()
+	w, err := st.AddDNSWatcher(ctx, DNSWatcher{
+		DNSName: "entry.example.com", Tenant: "sled", LookbackMinutes: 20,
+		Enabled: true, LastIPs: "1.2.3.4", LastCheckedTS: base, LastChangedTS: base,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !w.Enabled || w.Tenant != "sled" || w.LastIPs != "1.2.3.4" {
+		t.Fatalf("unexpected watcher: %+v", w)
+	}
+	if _, err := st.AddAWSIPChange(ctx, AWSIPChange{
+		DNSName: "entry.example.com", Tenant: "sled", OldIP: "1.2.3.4", NewIP: "1.2.3.5",
+		LookbackMinutes: 20,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	current := *w
+	for i := 1; i <= 6; i++ {
+		changed := base + int64(i)*60_000
+		newIP := fmt.Sprintf("10.0.0.%d", i)
+		if err := st.RecordDNSIPTransition(ctx, current, newIP, changed); err != nil {
+			t.Fatal(err)
+		}
+		current.LastIPs = newIP
+		current.LastChangedTS = changed
+	}
+	if err := st.SetDNSWatcherEnabled(ctx, w.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateDNSWatcherNote(ctx, w.ID, "新加坡入口"); err != nil {
+		t.Fatal(err)
+	}
+	changes, err := st.ListAWSIPChanges(ctx, 10)
+	if err != nil || len(changes) != 1 || changes[0].Note != "新加坡入口" {
+		t.Fatalf("watcher note must sync historical changes: rows=%+v err=%v", changes, err)
+	}
+	rows, err := st.ListDNSWatchers(ctx, false)
+	if err != nil || len(rows) != 1 || rows[0].Enabled || rows[0].LastIPs != "10.0.0.6" || rows[0].LastChangedTS != base+6*60_000 || rows[0].Note != "新加坡入口" {
+		t.Fatalf("unexpected persisted watcher: rows=%+v err=%v", rows, err)
+	}
+	history, err := st.ListDNSIPHistory(ctx, w.ID, 5)
+	if err != nil || len(history) != 5 {
+		t.Fatalf("history must retain last 5 rows: rows=%+v err=%v", history, err)
+	}
+	if history[0].IP != "10.0.0.5" || history[0].AliveSec != 60 || history[4].IP != "10.0.0.1" {
+		t.Fatalf("unexpected history order/duration: %+v", history)
+	}
+	active, err := st.ListDNSWatchers(ctx, true)
+	if err != nil || len(active) != 0 {
+		t.Fatalf("disabled watcher returned as active: rows=%+v err=%v", active, err)
+	}
+	if err := st.DeleteDNSWatcher(ctx, w.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestVacuumExpiresAWSIPChangeSnapshots(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	old, err := st.AddAWSIPChange(ctx, AWSIPChange{
+		OccurredTS: time.Now().Add(-48 * time.Hour).UnixMilli(), OldIP: "1.1.1.1", NewIP: "2.2.2.2", LookbackMinutes: 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`INSERT INTO aws_ip_change_subscribers
+		(change_id,tenant,token_hash,client_ip,ua,pull_count,first_seen_ts,last_seen_ts,cloud_provider,asn,asn_org)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)`, old.ID, "sled", "old-token", "1.1.1.1", "clash", 1,
+		time.Now().Add(-48*time.Hour).UnixMilli(), time.Now().Add(-48*time.Hour).UnixMilli(), "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	newer, err := st.AddAWSIPChange(ctx, AWSIPChange{
+		OccurredTS: time.Now().UnixMilli(), OldIP: "2.2.2.2", NewIP: "3.3.3.3", LookbackMinutes: 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Vacuum(ctx, 24*time.Hour, 24*time.Hour, 24*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	var oldChanges, oldSubscribers int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM aws_ip_changes WHERE id=?`, old.ID).Scan(&oldChanges); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM aws_ip_change_subscribers WHERE change_id=?`, old.ID).Scan(&oldSubscribers); err != nil {
+		t.Fatal(err)
+	}
+	if oldChanges != 0 || oldSubscribers != 0 {
+		t.Fatalf("expired snapshot not removed: changes=%d subscribers=%d", oldChanges, oldSubscribers)
+	}
+	if _, err := st.GetAWSIPChange(ctx, newer.ID); err != nil {
+		t.Fatalf("current snapshot was removed: %v", err)
+	}
+}
+
+func TestFocusTokenMarksNewBehaviorAndLeavesSuspects(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now()
+	st.SubmitEvent(Event{TS: now.Add(-time.Minute), Tenant: "sled", ClientIP: "1.1.1.1", UA: "clash", TokenHash: "watch-me", Action: "pass"})
+	time.Sleep(200 * time.Millisecond)
+	if err := st.AddFocusToken(ctx, "watch-me", "sled", ""); err != nil {
+		t.Fatal(err)
+	}
+	st.SubmitEvent(Event{TS: time.Now().Add(time.Millisecond), Tenant: "sled", ClientIP: "2.2.2.2", UA: "v2rayN", TokenHash: "watch-me", Action: "pass"})
+	time.Sleep(200 * time.Millisecond)
+
+	events, err := st.QueryEvents(ctx, EventFilter{TokenHash: "watch-me", IncludeResolved: true})
+	if err != nil || len(events) != 2 || !events[0].Focused || events[1].Focused {
+		t.Fatalf("focus behavior flags: events=%+v err=%v", events, err)
+	}
+	focus, err := st.ListFocusTokens(ctx, "sled")
+	if err != nil || len(focus) != 1 || focus[0].ActivityCount != 1 || focus[0].LastIP != "2.2.2.2" {
+		t.Fatalf("focus list: rows=%+v err=%v", focus, err)
+	}
+	suspects, err := st.QuerySuspects("sled", now.Add(-time.Hour))
+	if err != nil || len(suspects) != 0 {
+		t.Fatalf("focused token must leave ordinary suspects: rows=%+v err=%v", suspects, err)
+	}
+	if err := st.AddResolvedToken(ctx, "watch-me", "sled", ""); err != nil {
+		t.Fatal(err)
+	}
+	focus, err = st.ListFocusTokens(ctx, "sled")
+	if err != nil || len(focus) != 0 {
+		t.Fatalf("resolved token must leave focus list: rows=%+v err=%v", focus, err)
+	}
+}
+
+func TestTokenAssociationSurvivesUUIDReset(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	oldToken, newToken := "token-before-reset", "token-after-reset"
+	if err := st.UpsertUserReport(UserReport{Token: oldToken, Tenant: "sled", UUID: "uuid-old", Email: " User@Example.com "}); err != nil {
+		t.Fatal(err)
+	}
+	beforeFocus := time.Now().Add(-time.Second)
+	st.SubmitEvent(Event{TS: beforeFocus, Tenant: "sled", ClientIP: "1.1.1.1", UA: "Clash/1", TokenHash: oldToken, Action: "pass"})
+	time.Sleep(150 * time.Millisecond)
+	if err := st.AddFocusToken(ctx, oldToken, "sled", "watch account"); err != nil {
+		t.Fatal(err)
+	}
+	afterFocus := time.Now().Add(time.Millisecond)
+	st.SubmitEvent(Event{TS: afterFocus, Tenant: "sled", ClientIP: "2.2.2.2", UA: "v2rayN/1", TokenHash: oldToken, Action: "pass"})
+	if err := st.UpsertUserReport(UserReport{Token: newToken, Tenant: "sled", UUID: "uuid-new", Email: "user@example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	st.SubmitEvent(Event{TS: time.Now().Add(2 * time.Millisecond), Tenant: "sled", ClientIP: "3.3.3.3", UA: "Shadowrocket/1", TokenHash: newToken, Action: "pass"})
+	time.Sleep(250 * time.Millisecond)
+
+	linked, err := st.ListAssociatedTokens(ctx, "sled", newToken)
+	if err != nil || len(linked) != 2 || linked[0].Token != newToken || linked[1].Token != oldToken {
+		t.Fatalf("linked tokens: rows=%+v err=%v", linked, err)
+	}
+	focus, err := st.ListFocusTokens(ctx, "sled")
+	if err != nil || len(focus) != 1 || focus[0].Token != newToken || focus[0].ActivityCount != 2 {
+		t.Fatalf("focus must move to latest token and include aliases: rows=%+v err=%v", focus, err)
+	}
+	detail, err := st.QuerySuspectDetail(newToken, "sled", time.Now().Add(-time.Hour))
+	if err != nil || len(detail.Tokens) != 2 || len(detail.IPs) != 3 || len(detail.UAs) != 3 {
+		t.Fatalf("associated behavior detail: detail=%+v err=%v", detail, err)
+	}
+	oldEvents, err := st.QueryEvents(ctx, EventFilter{TokenHash: oldToken, IncludeResolved: true})
+	if err != nil || len(oldEvents) != 2 || !oldEvents[0].Focused || oldEvents[1].Focused {
+		t.Fatalf("old token focus timeline must survive reset: events=%+v err=%v", oldEvents, err)
+	}
+	newEvents, err := st.QueryEvents(ctx, EventFilter{TokenHash: newToken, IncludeResolved: true})
+	if err != nil || len(newEvents) != 1 || !newEvents[0].Focused {
+		t.Fatalf("new token must inherit focus: events=%+v err=%v", newEvents, err)
+	}
+
+	// 已处理状态同样迁移到新 token，且历史旧 token 仍按同一账户归档。
+	if err := st.RemoveFocusToken(ctx, newToken); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddResolvedToken(ctx, oldToken, "sled", "done"); err != nil {
+		t.Fatal(err)
+	}
+	thirdToken := "token-second-reset"
+	if err := st.UpsertUserReport(UserReport{Token: thirdToken, Tenant: "sled", UUID: "uuid-third", Email: "USER@example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := st.ListResolvedTokens(ctx, "sled")
+	if err != nil || len(resolved) != 1 || resolved[0].Token != thirdToken {
+		t.Fatalf("resolved state must move to latest token: rows=%+v err=%v", resolved, err)
+	}
+	visible, err := st.QueryEvents(ctx, EventFilter{Tenant: "sled"})
+	if err != nil || len(visible) != 0 {
+		t.Fatalf("old aliases must stay archived with current resolved token: events=%+v err=%v", visible, err)
+	}
+
+	// 站点隔离且空邮箱不关联，避免误合并。
+	if err := st.UpsertUserReport(UserReport{Token: "other-site", Tenant: "rfs", Email: "user@example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := st.ListAssociatedTokens(ctx, "rfs", "other-site"); err != nil || len(rows) != 1 {
+		t.Fatalf("association must be tenant scoped: rows=%+v err=%v", rows, err)
+	}
+	if err := st.UpsertUserReport(UserReport{Token: "anonymous", Tenant: "sled"}); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := st.ListAssociatedTokens(ctx, "sled", "anonymous"); err != nil || len(rows) != 0 {
+		t.Fatalf("empty email must not auto-associate: rows=%+v err=%v", rows, err)
+	}
+}
+
+func TestManualTokenAssociationWithoutUserReport(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	if err := st.AddFocusToken(ctx, "old-token", "sled", "manual watch"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AssociateTokens(ctx, "sled", "new-token", "old-token"); err != nil {
+		t.Fatal(err)
+	}
+	linked, err := st.ListAssociatedTokens(ctx, "sled", "new-token")
+	if err != nil || len(linked) != 2 {
+		t.Fatalf("manual association: rows=%+v err=%v", linked, err)
+	}
+	focus, err := st.ListFocusTokens(ctx, "sled")
+	if err != nil || len(focus) != 1 || focus[0].Token != "new-token" || focus[0].Note != "manual watch" {
+		t.Fatalf("manual association must move focus: rows=%+v err=%v", focus, err)
+	}
+	if err := st.AssociateTokens(ctx, "sled", "newest-token", "new-token"); err != nil {
+		t.Fatal(err)
+	}
+	linked, err = st.ListAssociatedTokens(ctx, "sled", "newest-token")
+	if err != nil || len(linked) != 3 {
+		t.Fatalf("manual groups must merge transitively: rows=%+v err=%v", linked, err)
+	}
+	if rows, err := st.ListAssociatedTokens(ctx, "other", "old-token"); err != nil || len(rows) != 0 {
+		t.Fatalf("manual association must remain tenant scoped: rows=%+v err=%v", rows, err)
 	}
 }
 

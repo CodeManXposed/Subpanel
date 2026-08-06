@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -105,6 +106,18 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/resolved", s.auth(http.HandlerFunc(s.apiResolvedList)))
 	mux.Handle("/api/resolved/add", s.auth(http.HandlerFunc(s.apiResolvedAdd)))
 	mux.Handle("/api/resolved/remove", s.auth(http.HandlerFunc(s.apiResolvedRemove)))
+	mux.Handle("/api/focus", s.auth(http.HandlerFunc(s.apiFocusList)))
+	mux.Handle("/api/focus/add", s.auth(http.HandlerFunc(s.apiFocusAdd)))
+	mux.Handle("/api/focus/remove", s.auth(http.HandlerFunc(s.apiFocusRemove)))
+	mux.Handle("/api/aws-ip-changes", s.auth(http.HandlerFunc(s.apiAWSIPChanges)))
+	mux.Handle("/api/aws-ip-changes/add", s.auth(http.HandlerFunc(s.apiAWSIPChangeAdd)))
+	mux.Handle("/api/aws-ip-changes/detail", s.auth(http.HandlerFunc(s.apiAWSIPChangeDetail)))
+	mux.Handle("/api/aws-ip-changes/remove", s.auth(http.HandlerFunc(s.apiAWSIPChangeRemove)))
+	mux.Handle("/api/dns-watchers", s.auth(http.HandlerFunc(s.apiDNSWatchers)))
+	mux.Handle("/api/dns-watchers/add", s.auth(http.HandlerFunc(s.apiDNSWatcherAdd)))
+	mux.Handle("/api/dns-watchers/toggle", s.auth(http.HandlerFunc(s.apiDNSWatcherToggle)))
+	mux.Handle("/api/dns-watchers/note", s.auth(http.HandlerFunc(s.apiDNSWatcherNote)))
+	mux.Handle("/api/dns-watchers/remove", s.auth(http.HandlerFunc(s.apiDNSWatcherRemove)))
 	mux.Handle("/api/incidents", s.auth(http.HandlerFunc(s.apiIncidents)))
 	mux.Handle("/api/incidents/agg_ip", s.auth(http.HandlerFunc(s.apiIncidentsAggIP)))
 	mux.Handle("/api/bans", s.auth(http.HandlerFunc(s.apiBans)))
@@ -140,6 +153,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/ip-whitelist/add", s.auth(http.HandlerFunc(s.apiIPWhitelistAdd)))
 	mux.Handle("/api/ip-whitelist/update", s.auth(http.HandlerFunc(s.apiIPWhitelistUpdate)))
 	mux.Handle("/api/ip-whitelist/remove", s.auth(http.HandlerFunc(s.apiIPWhitelistRemove)))
+	mux.Handle("/api/ip-whitelist/domains", s.auth(http.HandlerFunc(s.apiDomainWhitelistList)))
+	mux.Handle("/api/ip-whitelist/domains/add", s.auth(http.HandlerFunc(s.apiDomainWhitelistAdd)))
+	mux.Handle("/api/ip-whitelist/domains/remove", s.auth(http.HandlerFunc(s.apiDomainWhitelistRemove)))
+	mux.Handle("/api/ip-whitelist/domains/refresh", s.auth(http.HandlerFunc(s.apiDomainWhitelistRefresh)))
 
 	// 触发规则运维:清掉某 token 在滑窗里的累计,把误判 token "拉出来"。
 	// 下次再触发规则,继续按正常路径投毒(不是免疫,是 reset)。
@@ -159,6 +176,7 @@ func (s *Server) Handler() http.Handler {
 	// 嫌疑用户分析(需登录)
 	mux.Handle("/api/suspects", s.auth(http.HandlerFunc(s.apiSuspects)))
 	mux.Handle("/api/suspect-detail", s.auth(http.HandlerFunc(s.apiSuspectDetail)))
+	mux.Handle("/api/token-associations/add", s.auth(http.HandlerFunc(s.apiTokenAssociationAdd)))
 	mux.Handle("/api/user-reports", s.auth(http.HandlerFunc(s.apiUserReports)))
 	mux.Handle("/api/report-info", s.auth(http.HandlerFunc(s.apiReportInfo)))
 	mux.Handle("/api/report-info/save", s.auth(http.HandlerFunc(s.apiReportInfoSave)))
@@ -468,6 +486,56 @@ func (s *Server) apiResolvedRemove(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
+func (s *Server) apiFocusList(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.st.ListFocusTokens(r.Context(), r.URL.Query().Get("tenant"))
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	if rows == nil {
+		rows = []store.FocusToken{}
+	}
+	writeJSON(w, 200, rows)
+}
+
+func (s *Server) apiFocusAdd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var body struct {
+		Token, Tenant, Note string
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Token) == "" {
+		writeJSON(w, 400, map[string]any{"error": "token is empty"})
+		return
+	}
+	if err := s.st.AddFocusToken(r.Context(), strings.TrimSpace(body.Token), strings.TrimSpace(body.Tenant), strings.TrimSpace(body.Note)); err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+func (s *Server) apiFocusRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var body struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Token) == "" {
+		writeJSON(w, 400, map[string]any{"error": "token is empty"})
+		return
+	}
+	if err := s.st.RemoveFocusToken(r.Context(), strings.TrimSpace(body.Token)); err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
 func (s *Server) apiIncidents(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
@@ -549,7 +617,7 @@ func (s *Server) apiBanAdd(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
-	if body.Target == "" {
+	if strings.TrimSpace(body.Target) == "" {
 		writeJSON(w, 400, map[string]any{"error": "target is required"})
 		return
 	}
@@ -562,19 +630,61 @@ func (s *Server) apiBanAdd(w http.ResponseWriter, r *http.Request) {
 		}
 		ttl = t
 	}
-	var err error
 	switch body.Kind {
 	case "ip":
-		err = s.bans.AddIP(body.Target, body.Reason, ttl, nil, "manual")
+		parts := strings.FieldsFunc(body.Target, func(r rune) bool {
+			return r == ',' || r == '，' || r == '/' || r == '\n' || r == '\r' || r == ';' || r == '；' || r == '\t'
+		})
+		if len(parts) == 0 {
+			writeJSON(w, 400, map[string]any{"error": "IP is required"})
+			return
+		}
+		if len(parts) > 1000 {
+			writeJSON(w, 400, map[string]any{"error": "一次最多添加 1000 个 IP"})
+			return
+		}
+		seen := make(map[string]bool, len(parts))
+		targets := make([]string, 0, len(parts))
+		var invalid []string
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			parsed := net.ParseIP(part)
+			if parsed == nil {
+				invalid = append(invalid, part)
+				continue
+			}
+			ip := parsed.String()
+			if !seen[ip] {
+				seen[ip] = true
+				targets = append(targets, ip)
+			}
+		}
+		if len(invalid) > 0 {
+			writeJSON(w, 400, map[string]any{"error": "无效 IP: " + strings.Join(invalid, ", ")})
+			return
+		}
+		existing := make(map[string]bool)
+		for _, entry := range s.bans.Snapshot() {
+			existing[entry.Target] = true
+		}
+		added, updated := 0, 0
+		for _, target := range targets {
+			if err := s.bans.AddIP(target, body.Reason, ttl, nil, "manual"); err != nil {
+				writeJSON(w, 500, map[string]any{"error": err.Error(), "added": added, "updated": updated})
+				return
+			}
+			if existing[target] {
+				updated++
+			} else {
+				added++
+			}
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "total": len(targets), "added": added, "updated": updated})
+		return
 	default:
 		writeJSON(w, 400, map[string]any{"error": "kind must be ip(token 黑名单已废弃)"})
 		return
 	}
-	if err != nil {
-		writeJSON(w, 500, map[string]any{"error": err.Error()})
-		return
-	}
-	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 func (s *Server) apiBanRemove(w http.ResponseWriter, r *http.Request) {
@@ -822,6 +932,61 @@ func (s *Server) apiIPWhitelistRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.rules.DeleteIPWhitelist(body.ID); err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+func (s *Server) apiDomainWhitelistList(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.st.ListDomainWhitelist()
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, rows)
+}
+
+func (s *Server) apiDomainWhitelistAdd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{"error": "POST only"})
+		return
+	}
+	var body struct{ Domain, Note string }
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	if err := s.rules.AddDomainWhitelist(r.Context(), body.Domain, body.Note); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+func (s *Server) apiDomainWhitelistRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{"error": "POST only"})
+		return
+	}
+	var body struct{ ID int64 }
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	if err := s.rules.DeleteDomainWhitelist(body.ID); err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+func (s *Server) apiDomainWhitelistRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{"error": "POST only"})
+		return
+	}
+	if err := s.rules.RefreshDomainWhitelist(r.Context()); err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
 	}

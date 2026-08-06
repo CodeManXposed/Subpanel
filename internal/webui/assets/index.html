@@ -45,6 +45,10 @@
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><path d="M20 8v6M23 11h-6"/></svg>
       嫌疑用户
     </a>
+    <a class="navlink" data-tab="aws-ip-changes">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h13"/><path d="m14 4 3 3-3 3"/><path d="M20 17H7"/><path d="m10 14-3 3 3 3"/></svg>
+      AWS 换IP追踪
+    </a>
     <a class="navlink" data-tab="cloud-ip">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="10" r="3"/><path d="M12 2a8 8 0 0 0-8 8c0 5 8 12 8 12s8-7 8-12a8 8 0 0 0-8-8z"/></svg>
       GeoIP 库
@@ -70,7 +74,7 @@
       <div class="avatar" id="userAvatar">A</div>
       <div>
         <div class="user-name">admin</div>
-        <div class="muted" style="font-size:11px">Sub-Panel v0.1.40</div>
+        <div class="muted" style="font-size:11px">Sub-Panel v0.1.56</div>
       </div>
       <button class="logout-btn" id="logoutBtn" title="退出">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
@@ -136,7 +140,7 @@
               </table>
             </div>
           </details>
-          <div class="filter-bar">
+          <div class="filter-bar events-filter-bar">
             <input id="evIP" placeholder="按 IP 过滤">
             <input id="evToken" placeholder="按 Token 过滤">
             <select id="evAction">
@@ -181,9 +185,11 @@
               <option value="akamai">Akamai</option><option value="fastly">Fastly</option>
             </select>
             <input id="evASN" placeholder="ASN，如 AS16509" style="width:145px">
-            <label class="bl-toggle" style="margin:0;padding:6px 10px" title="默认隐藏白名单 IP 的请求"><input type="checkbox" id="evShowWL"><span style="font-size:13px">显示白名单</span></label>
-            <button class="primary" id="evQuery">查询</button>
-            <button class="danger" id="evPurge" title="清空当前机场的请求日志和异常记录">清空日志</button>
+            <div class="events-filter-actions">
+              <label class="events-whitelist-toggle" title="默认隐藏白名单 IP 的请求"><input type="checkbox" id="evShowWL"><span>显示白名单</span></label>
+              <button class="primary" id="evQuery">查询</button>
+              <button class="danger" id="evPurge" title="清空当前机场的请求日志和异常记录">清空日志</button>
+            </div>
           </div>
           <div id="evList" class="ev-list"></div>
         </div>
@@ -220,7 +226,7 @@
               <button class="primary" id="blSaveBtn">保存</button>
             </div>
           </div>
-          <div class="bl-row">
+          <div class="bl-switch-grid">
             <label class="bl-toggle"><input type="checkbox" id="blOversea"><span>禁止海外 IP 拉取</span><em>非 CN(港澳台/未知均拦)</em></label>
             <label class="bl-toggle"><input type="checkbox" id="blCloud"><span>拉黑云厂商 IP</span><em>命中 cloud-ip 库</em></label>
             <label class="bl-toggle"><input type="checkbox" id="blCNIDC"><span>拉黑国内 IDC</span><em>国内 + 数据中心 IP</em></label>
@@ -236,11 +242,11 @@
           <div class="card-header">
             <h3>新增 IP 封禁</h3>
           </div>
-          <div class="filter-bar">
-            <input id="banIPTarget" placeholder="IP 地址,如 1.2.3.4">
-            <input id="banIPReason" placeholder="原因(可选)">
-            <input id="banIPTTL" placeholder="TTL,如 24h,空=永久" style="width:170px">
-            <button class="primary" id="banIPAddBtn">添加</button>
+          <div class="ban-entry-grid">
+            <label class="ban-entry-field ban-entry-target"><span>IP 地址（支持批量）</span><textarea id="banIPTarget" rows="3" placeholder="每行一个，或使用逗号、/ 分隔&#10;例如：1.2.3.4, 5.6.7.8 / 9.10.11.12"></textarea></label>
+            <label class="ban-entry-field"><span>封禁原因</span><input id="banIPReason" placeholder="原因（可选）"></label>
+            <label class="ban-entry-field"><span>有效期</span><input id="banIPTTL" placeholder="如 24h，留空为永久"></label>
+            <button class="primary" id="banIPAddBtn">批量添加</button>
           </div>
         </div>
         <div class="datatable">
@@ -261,6 +267,24 @@
             <button class="primary" id="ipWLAddBtn">添加</button>
           </div>
           <p class="muted">白名单 IP 跳过所有规则检测,直接放行。<strong style="color:var(--text)">优先级最高,凌驾于黑名单。</strong></p>
+        </div>
+        <div class="card" style="margin-top:16px">
+          <div class="card-header">
+            <h3>域名动态白名单</h3>
+            <button id="domainWLRefreshBtn">立即解析</button>
+          </div>
+          <div class="filter-bar">
+            <input id="domainWLTarget" placeholder="域名或域名:端口，如 node.example.com:10030" style="min-width:320px">
+            <input id="domainWLNote" placeholder="备注">
+            <button class="primary" id="domainWLAddBtn">添加域名</button>
+          </div>
+          <p class="muted">服务器每 30 秒重新解析。A/AAAA 地址变化后，旧地址自动移出、新地址自动加入；临时解析失败时保留上一次结果。</p>
+        </div>
+        <div class="datatable">
+          <table>
+            <thead><tr><th>域名</th><th>当前白名单 IP</th><th>备注</th><th>最近解析</th><th></th></tr></thead>
+            <tbody id="domainWLTbody"></tbody>
+          </table>
         </div>
         <div class="datatable">
           <table>
@@ -378,6 +402,59 @@
               <tbody id="suspectResolvedTbody"></tbody>
             </table>
           </div>
+        </div>
+        <div class="card" style="margin-top:16px">
+          <div class="card-header">
+            <h3>重点关注名单</h3>
+            <span class="muted" style="font-size:13px">关注后的新请求会标记为“重点关注对象行为”。</span>
+          </div>
+          <div class="datatable" style="margin-top:8px">
+            <table>
+              <thead><tr>
+                <th>Token</th><th>机场</th><th>关注时间</th><th>关注后行为</th><th>最近 IP / UA</th><th style="width:100px">操作</th>
+              </tr></thead>
+              <tbody id="suspectFocusTbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- AWS 入口 DNS 更换追踪 -->
+      <section id="tab-aws-ip-changes" class="tab">
+        <div class="card">
+          <div class="card-header">
+            <h3>AWS 入口 DNS 自动追踪</h3>
+            <span class="muted" style="font-size:13px">检测到 A 记录变化时，自动冻结变化前 15/20 分钟的订阅者。</span>
+          </div>
+          <div class="filter-bar" style="align-items:flex-end;flex-wrap:wrap">
+            <div style="flex:1;min-width:260px">
+              <label style="display:block;font-size:12px;margin-bottom:4px">入口 DNS</label>
+              <input id="awsWatcherDNS" placeholder="例如 aws-entry.example.com" class="mono" style="width:100%">
+            </div>
+            <div>
+              <label style="display:block;font-size:12px;margin-bottom:4px">单独用于站点</label>
+              <select id="awsWatcherTenant" style="min-width:150px">
+                <option value="">不指定（全部站点）</option>
+              </select>
+            </div>
+            <div>
+              <label style="display:block;font-size:12px;margin-bottom:4px">向前抓取</label>
+              <select id="awsWatcherLookback">
+                <option value="20" selected>20 分钟</option>
+                <option value="15">15 分钟</option>
+              </select>
+            </div>
+            <button class="primary" id="awsWatcherAddBtn">开始追踪</button>
+          </div>
+          <p class="muted" style="margin:10px 0 12px">不选站点时，该 DNS 变化会记录全部站点；快照持久保存，不受日志清理影响。</p>
+          <div id="awsWatcherList" class="ev-list"></div>
+        </div>
+        <div class="card" style="margin-top:16px">
+          <div class="card-header">
+            <h3>历史换 IP 记录</h3>
+            <button id="awsChangeRefreshBtn">刷新</button>
+          </div>
+          <div id="awsChangeList" class="ev-list"></div>
         </div>
       </section>
 
@@ -580,8 +657,15 @@
           <input type="number" min="0" id="ruleFormIdGte" placeholder="0">
           <span class="cond-unit">个 token</span>
         </div>
+        <div class="cond-row-v2">
+          <span class="cond-name">云 IP 单 token 多 UA</span>
+          <input type="number" min="0" id="ruleFormCloudUAWin" placeholder="0">
+          <span class="cond-sep">秒内 ≥</span>
+          <input type="number" min="0" id="ruleFormCloudUAGte" placeholder="0">
+          <span class="cond-unit">个 UA</span>
+        </div>
       </div>
-      <p class="hint" style="margin:8px 0 14px">同一行两个值都 &gt; 0 才生效,任一为 0 该条件关闭。</p>
+      <p class="hint" style="margin:8px 0 14px">同一行两个值都 &gt; 0 才生效。“云 IP 单 token 多 UA”只统计同一 token + 同一云厂商 IP，适合识别伪装多种客户端的测活。</p>
 
       <details class="advanced">
         <summary>高级条件:云 IP / 地理 / ISP</summary>

@@ -438,6 +438,25 @@ table tbody tr:hover { background: #f8fafc; }
 .sus-actions { padding: 6px 14px 2px; text-align: right; }
 .sus-resolve { font-size: 12px; padding: 3px 10px; border: 1px solid #d1d5db; border-radius: 4px; background: #f9fafb; color: #374151; cursor: pointer; transition: background .15s; }
 .sus-resolve:hover { background: #e0e7ff; border-color: #818cf8; color: #3730a3; }
+.suspect-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 0 0;
+}
+.suspect-card-actions > button {
+  width: 88px;
+  height: 34px;
+  min-width: 88px;
+  padding: 0 12px;
+  margin: 0;
+  justify-content: center;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+}
 
 .filter-bar {
   display: flex;
@@ -749,6 +768,33 @@ details.advanced[open] > summary {
 
 
 /* ===== 黑名单全局拦截卡片 ===== */
+.bl-switch-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 2px 0 14px;
+  border-bottom: 1px solid rgba(15,23,42,0.06);
+}
+.bl-switch-grid .bl-toggle {
+  display: grid;
+  grid-template-columns: 18px max-content minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(248,250,252,0.72);
+  flex: none;
+}
+.bl-switch-grid .bl-toggle:hover {
+  border-color: #c7d2fe;
+  background: rgba(238,242,255,0.62);
+}
+.bl-switch-grid .bl-toggle em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .bl-card .bl-row {
   display: flex;
   align-items: center;
@@ -810,6 +856,58 @@ details.advanced[open] > summary {
   font-size: 11.5px;
 }
 
+.ban-entry-grid {
+  display: grid;
+  grid-template-columns: minmax(340px, 1.5fr) minmax(180px, .8fr) minmax(170px, .65fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+.ban-entry-field {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+.ban-entry-field > span {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+.ban-entry-field input,
+.ban-entry-field textarea {
+  width: 100%;
+}
+.ban-entry-field textarea {
+  min-height: 74px;
+  resize: vertical;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  outline: none;
+  font: 12.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.ban-entry-field textarea:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(37,99,235,0.12);
+}
+.ban-entry-grid > button {
+  height: 34px;
+  margin-bottom: 0;
+}
+@media (max-width: 980px) {
+  .bl-switch-grid { grid-template-columns: 1fr; }
+  .ban-entry-grid { grid-template-columns: 1fr 1fr; }
+  .ban-entry-target { grid-column: 1 / -1; }
+}
+@media (max-width: 640px) {
+  .ban-entry-grid { grid-template-columns: 1fr; }
+  .ban-entry-target { grid-column: auto; }
+  .bl-row.bl-kw { align-items: stretch; flex-direction: column; gap: 7px; }
+  .bl-row .bl-label { width: auto; }
+}
+
 /* 请求日志页顶部:异常 IP Top 20 折叠卡片 */
 details.top-ip-fold {
   margin: -4px 0 12px;
@@ -843,6 +941,68 @@ details.top-ip-fold .top-ip-title {
 }
 details.top-ip-fold .top-ip-hint {
   font-size: 12px;
+}
+
+/* 请求日志筛选栏：控件紧凑对齐，操作区作为整体换行。 */
+.events-filter-bar {
+  margin: 10px 0 14px;
+  row-gap: 10px;
+  align-items: center;
+}
+.events-filter-bar > input,
+.events-filter-bar > select,
+.events-filter-actions,
+.events-filter-actions > button,
+.events-whitelist-toggle {
+  height: 34px;
+}
+.events-filter-bar > input {
+  flex: 1 1 155px;
+  max-width: 190px;
+}
+.events-filter-bar > select {
+  flex: 0 1 auto;
+  min-width: 94px;
+}
+.events-filter-actions {
+  margin-left: 0;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.events-whitelist-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+.events-whitelist-toggle:hover {
+  border-color: #cbd5e1;
+  background: var(--surface-hover);
+}
+.events-whitelist-toggle input {
+  width: 15px;
+  height: 15px;
+  min-width: 15px;
+  flex: 0 0 15px;
+  margin: 0;
+  accent-color: var(--primary);
+}
+.events-whitelist-toggle span {
+  font-size: 12.5px;
+  font-weight: 500;
+}
+@media (max-width: 760px) {
+  .events-filter-bar > input { max-width: none; }
+  .events-filter-actions { width: 100%; }
 }
 
 /* 订阅哈希点击展开 */

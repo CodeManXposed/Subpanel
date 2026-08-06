@@ -26,6 +26,7 @@ import (
 	"github.com/huabanmao168/SubPanel/internal/cloudip"
 	"github.com/huabanmao168/SubPanel/internal/config"
 	"github.com/huabanmao168/SubPanel/internal/detector"
+	"github.com/huabanmao168/SubPanel/internal/dnswatch"
 	"github.com/huabanmao168/SubPanel/internal/faker"
 	"github.com/huabanmao168/SubPanel/internal/geoip"
 	"github.com/huabanmao168/SubPanel/internal/proxy"
@@ -36,7 +37,7 @@ import (
 	"github.com/huabanmao168/SubPanel/internal/webui"
 )
 
-var Version = "0.1.40"
+var Version = "0.1.56"
 
 func main() {
 	if len(os.Args) >= 2 {
@@ -192,6 +193,7 @@ func main() {
 	})
 	ctxFetch, cancelFetch := context.WithCancel(context.Background())
 	cloudFetcher.RunPeriodic(ctxFetch, 7*24*time.Hour)
+	dnswatch.New(st, logger, 30*time.Second).Run(ctxFetch)
 
 	// 动态规则(IP 白名单)
 	rulesMgr := rules.NewManager(st)
@@ -199,6 +201,7 @@ func main() {
 		logger.Error("加载动态规则失败", "err", err)
 		os.Exit(1)
 	}
+	rulesMgr.RunDomainWhitelistResolver(ctxFetch, 30*time.Second)
 	det.SetDynamicIPWhitelist(rulesMgr.IPWhitelisted)
 
 	fk := faker.New(cfg.Faker.BlackholeIPs, cfg.Faker.NodeCount)
@@ -323,7 +326,8 @@ func runVacuum(stop <-chan struct{}, st *store.Store, cfg *config.Config, logger
 			return
 		case <-t.C:
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-			err := st.Vacuum(ctx, cfg.Storage.Retention.Events.Std(), cfg.Storage.Retention.Incidents.Std())
+			err := st.Vacuum(ctx, cfg.Storage.Retention.Events.Std(), cfg.Storage.Retention.Incidents.Std(),
+				cfg.Storage.Retention.AWSIPChanges.Std())
 			cancel()
 			if err != nil {
 				logger.Warn("数据清理失败", "err", err)

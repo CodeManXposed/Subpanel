@@ -7,9 +7,14 @@
 package rules
 
 import (
+	"context"
+	"fmt"
 	"net"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/huabanmao168/SubPanel/internal/store"
 )
@@ -48,6 +53,17 @@ func (m *Manager) Reload() error {
 			}
 		} else {
 			singles[t] = struct{}{}
+		}
+	}
+	domainEntries, err := m.st.ListDomainWhitelist()
+	if err != nil {
+		return err
+	}
+	for _, e := range domainEntries {
+		for _, ip := range e.ResolvedIPs {
+			if net.ParseIP(ip) != nil {
+				singles[ip] = struct{}{}
+			}
 		}
 	}
 
@@ -118,6 +134,102 @@ func (m *Manager) UpdateIPWhitelist(id int64, target, note string) error {
 		return err
 	}
 	return m.Reload()
+}
+
+func normalizeDomain(target string) (string, error) {
+	t := strings.ToLower(strings.TrimSpace(target))
+	if host, port, err := net.SplitHostPort(t); err == nil && port != "" {
+		t = host
+	} else if i := strings.LastIndexByte(t, ':'); i > 0 {
+		if _, err := strconv.Atoi(t[i+1:]); err == nil {
+			t = t[:i]
+		}
+	}
+	t = strings.TrimSuffix(t, ".")
+	if len(t) == 0 || len(t) > 253 || net.ParseIP(t) != nil || !strings.Contains(t, ".") {
+		return "", fmt.Errorf("target must be a valid domain")
+	}
+	for _, label := range strings.Split(t, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", fmt.Errorf("target must be a valid domain")
+		}
+		for _, c := range label {
+			if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+				return "", fmt.Errorf("target must be a valid domain")
+			}
+		}
+	}
+	return t, nil
+}
+
+func (m *Manager) AddDomainWhitelist(ctx context.Context, domain, note string) error {
+	d, err := normalizeDomain(domain)
+	if err != nil {
+		return err
+	}
+	if err := m.st.AddDomainWhitelist(d, note); err != nil {
+		return err
+	}
+	return m.RefreshDomainWhitelist(ctx)
+}
+
+func (m *Manager) DeleteDomainWhitelist(id int64) error {
+	if err := m.st.DeleteDomainWhitelist(id); err != nil {
+		return err
+	}
+	return m.Reload()
+}
+
+// RefreshDomainWhitelist 在本机解析域名，并原子替换它对应的白名单地址。
+func (m *Manager) RefreshDomainWhitelist(ctx context.Context) error {
+	entries, err := m.st.ListDomainWhitelist()
+	if err != nil {
+		return err
+	}
+	resolver := net.DefaultResolver
+	for _, entry := range entries {
+		lookupCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		addrs, lookupErr := resolver.LookupIPAddr(lookupCtx, entry.Domain)
+		cancel()
+		if lookupErr != nil {
+			_ = m.st.SetDomainWhitelistResolution(entry.ID, entry.ResolvedIPs, lookupErr.Error())
+			continue
+		}
+		seen := make(map[string]struct{})
+		var ips []string
+		for _, addr := range addrs {
+			ip := addr.IP.String()
+			if ip == "" {
+				continue
+			}
+			if _, ok := seen[ip]; !ok {
+				seen[ip] = struct{}{}
+				ips = append(ips, ip)
+			}
+		}
+		sort.Strings(ips)
+		_ = m.st.SetDomainWhitelistResolution(entry.ID, ips, "")
+	}
+	return m.Reload()
+}
+
+func (m *Manager) RunDomainWhitelistResolver(ctx context.Context, every time.Duration) {
+	if every <= 0 {
+		every = time.Minute
+	}
+	go func() {
+		_ = m.RefreshDomainWhitelist(ctx)
+		ticker := time.NewTicker(every)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_ = m.RefreshDomainWhitelist(ctx)
+			}
+		}
+	}()
 }
 
 // errIPInvalid 用于 IP 校验失败。

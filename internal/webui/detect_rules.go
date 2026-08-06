@@ -40,6 +40,8 @@ type detectRuleAPI struct {
 	TokenDistinctIPsGTE       int `json:"token_distinct_ips_gte"`
 	IPDistinctTokensWindowSec int `json:"ip_distinct_tokens_window_sec"`
 	IPDistinctTokensGTE       int `json:"ip_distinct_tokens_gte"`
+	CloudTokenUAsWindowSec    int `json:"cloud_token_distinct_uas_window_sec"`
+	CloudTokenUAsGTE          int `json:"cloud_token_distinct_uas_gte"`
 
 	// 云 IP / GeoIP / ISP(高级,可选)
 	FromCloudIP    bool     `json:"from_cloud_ip"`
@@ -87,6 +89,10 @@ func rowToAPI(r store.DetectRuleRow) (*detectRuleAPI, error) {
 		a.IPDistinctTokensWindowSec = int(w.IPDistinctTokens.Window.Std().Seconds())
 		a.IPDistinctTokensGTE = w.IPDistinctTokens.GTE
 	}
+	if w.CloudTokenDistinctUAs != nil {
+		a.CloudTokenUAsWindowSec = int(w.CloudTokenDistinctUAs.Window.Std().Seconds())
+		a.CloudTokenUAsGTE = w.CloudTokenDistinctUAs.GTE
+	}
 	return a, nil
 }
 
@@ -126,8 +132,11 @@ func apiToWhen(a *detectRuleAPI) (config.When, error) {
 	if w.IPDistinctTokens, err = mkCond(a.IPDistinctTokensWindowSec, a.IPDistinctTokensGTE, "单 IP 多 token"); err != nil {
 		return w, err
 	}
+	if w.CloudTokenDistinctUAs, err = mkCond(a.CloudTokenUAsWindowSec, a.CloudTokenUAsGTE, "云 IP 单 token 多 UA"); err != nil {
+		return w, err
+	}
 	// 至少一个条件不为空
-	if w.TokenFreq == nil && w.IPFreq == nil && w.TokenDistinctIPs == nil && w.IPDistinctTokens == nil &&
+	if w.TokenFreq == nil && w.IPFreq == nil && w.TokenDistinctIPs == nil && w.IPDistinctTokens == nil && w.CloudTokenDistinctUAs == nil &&
 		!w.FromCloudIP && len(w.CountryIn) == 0 && len(w.CountryNotIn) == 0 &&
 		len(w.UsageTypeIn) == 0 && len(w.UsageTypeNotIn) == 0 && len(w.ISPContains) == 0 {
 		return w, fmt.Errorf("至少配置一个触发条件")

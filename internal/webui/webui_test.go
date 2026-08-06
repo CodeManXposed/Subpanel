@@ -3,6 +3,7 @@ package webui
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -136,6 +137,176 @@ func TestLoginAndAccessAPI(t *testing.T) {
 	}
 	if s.TotalEvents < 1 {
 		t.Errorf("expected at least 1 event, got %d", s.TotalEvents)
+	}
+}
+
+func TestAWSIPChangeAPIRecordsSnapshot(t *testing.T) {
+	srv, st, _ := setup(t)
+	h := srv.Handler()
+	cookie := login(t, h)
+	actionAt := time.Now().Truncate(time.Second)
+	st.SubmitEvent(store.Event{
+		TS: actionAt.Add(-10 * time.Minute), Tenant: "default", ClientIP: "8.8.8.8",
+		UA: "clash", TokenHash: "snapshot-token", Action: "pass", CloudProvider: "aws", ASN: "AS16509",
+	})
+	time.Sleep(150 * time.Millisecond)
+
+	body := strings.NewReader(fmt.Sprintf(`{"occurred_ts":%d,"old_ip":"1.2.3.4","new_ip":"5.6.7.8","lookback_minutes":20}`,
+		actionAt.UnixMilli()))
+	req := httptest.NewRequest(http.MethodPost, "/api/aws-ip-changes/add", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("add change: %d %s", w.Code, w.Body.String())
+	}
+	var change store.AWSIPChange
+	if err := json.NewDecoder(w.Body).Decode(&change); err != nil {
+		t.Fatal(err)
+	}
+	if change.SiteCount != 1 || change.SubscriberCount != 1 || change.PullCount != 1 {
+		t.Fatalf("unexpected change response: %+v", change)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/aws-ip-changes/detail?id=%d", change.ID), nil)
+	req.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "snapshot-token") || !strings.Contains(w.Body.String(), "default") {
+		t.Fatalf("detail: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestDNSWatcherAPIStartsForAllSites(t *testing.T) {
+	srv, _, _ := setup(t)
+	h := srv.Handler()
+	cookie := login(t, h)
+
+	body := strings.NewReader(`{"dns_name":"localhost","tenant":"","lookback_minutes":15}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/dns-watchers/add", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("add DNS watcher: %d %s", w.Code, w.Body.String())
+	}
+	var watcher store.DNSWatcher
+	if err := json.NewDecoder(w.Body).Decode(&watcher); err != nil {
+		t.Fatal(err)
+	}
+	if watcher.DNSName != "localhost" || watcher.Tenant != "" || !watcher.Enabled || watcher.LastIPs == "" {
+		t.Fatalf("unexpected watcher: %+v", watcher)
+	}
+	body = strings.NewReader(fmt.Sprintf(`{"id":%d,"note":"测试入口"}`, watcher.ID))
+	req = httptest.NewRequest(http.MethodPost, "/api/dns-watchers/note", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("save DNS watcher note: %d %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/dns-watchers", nil)
+	req.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"dns_name":"localhost"`) || !strings.Contains(w.Body.String(), `"note":"测试入口"`) {
+		t.Fatalf("list DNS watchers: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestCloudUAProbeRuleConversion(t *testing.T) {
+	a := &detectRuleAPI{CloudTokenUAsWindowSec: 60, CloudTokenUAsGTE: 4}
+	w, err := apiToWhen(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.CloudTokenDistinctUAs == nil || w.CloudTokenDistinctUAs.Window.Std() != time.Minute || w.CloudTokenDistinctUAs.GTE != 4 {
+		t.Fatalf("unexpected condition: %+v", w.CloudTokenDistinctUAs)
+	}
+	row, err := rowToAPI(store.DetectRuleRow{Name: "cloud_ua_probe", WhenJSON: `{"CloudTokenDistinctUAs":{"Window":60000000000,"GTE":4}}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.CloudTokenUAsWindowSec != 60 || row.CloudTokenUAsGTE != 4 {
+		t.Fatalf("unexpected API rule: %+v", row)
+	}
+}
+
+func TestFocusTokenAPI(t *testing.T) {
+	srv, _, _ := setup(t)
+	h := srv.Handler()
+	cookie := login(t, h)
+	body := strings.NewReader(`{"token":"focus-token","tenant":"default","note":""}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/focus/add", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("focus add: %d %s", w.Code, w.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/focus?tenant=default", nil)
+	req.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"token":"focus-token"`) {
+		t.Fatalf("focus list: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestTokenAssociationAPI(t *testing.T) {
+	srv, _, _ := setup(t)
+	h := srv.Handler()
+	cookie := login(t, h)
+	body := strings.NewReader(`{"token":"new-token","related_token":"old-token","tenant":"default"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/token-associations/add", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"ok":true`) {
+		t.Fatalf("associate token: %d %s", w.Code, w.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/suspect-detail?token=new-token&tenant=default&window=1h", nil)
+	req.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"token":"old-token"`) {
+		t.Fatalf("association detail: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestBatchIPBanSeparatorsAndValidation(t *testing.T) {
+	srv, _, bans := setup(t)
+	h := srv.Handler()
+	cookie := login(t, h)
+	post := func(payload string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/bans/add", strings.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(cookie)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w
+	}
+	w := post(`{"kind":"ip","target":"1.1.1.1, 2.2.2.2 / 3.3.3.3\n4.4.4.4，1.1.1.1","reason":"batch","ttl":"24h"}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"added":4`) || !strings.Contains(w.Body.String(), `"total":4`) {
+		t.Fatalf("batch add: %d %s", w.Code, w.Body.String())
+	}
+	if len(bans.Snapshot()) != 4 {
+		t.Fatalf("want 4 unique bans, got %+v", bans.Snapshot())
+	}
+	w = post(`{"kind":"ip","target":"1.1.1.1","reason":"updated"}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"updated":1`) {
+		t.Fatalf("duplicate update: %d %s", w.Code, w.Body.String())
+	}
+	w = post(`{"kind":"ip","target":"5.5.5.5 / not-an-ip"}`)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "无效 IP") || len(bans.Snapshot()) != 4 {
+		t.Fatalf("invalid batch must be atomic: code=%d body=%s bans=%+v", w.Code, w.Body.String(), bans.Snapshot())
 	}
 }
 

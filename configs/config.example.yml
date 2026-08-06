@@ -10,8 +10,9 @@ hmac_salt_file: "/opt/Sub-Panel/data/salt"
 storage:
   sqlite_path: "/opt/Sub-Panel/data/sub-panel.db"
   retention:
-    events: 7d         # 请求事件保留 7 天
-    incidents: 30d     # 异常事件保留 30 天
+    events: 180d          # 请求事件保留 180 天
+    incidents: 180d       # 异常事件保留 180 天
+    aws_ip_changes: 180d  # AWS 换 IP 记录及订阅者快照保留 180 天
   batch_flush_interval: 1s
   batch_flush_size: 100
 
@@ -70,3 +71,10 @@ detector:
         token_distinct_ips:
           window: 5m
           gte: 5
+
+    - name: cloud_ua_probe
+      desc: 同一 token 在同一云厂商 IP 上短时间伪装多种客户端测活
+      when:
+        cloud_token_distinct_uas:
+          window: 1m
+          gte: 4

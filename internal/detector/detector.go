@@ -20,6 +20,7 @@ type Detector struct {
 	ipFreq      *slidingwin.Counter
 	tokenIPSet  *slidingwin.DistinctSet
 	ipTokenSet  *slidingwin.DistinctSet
+	tokenIPUAs  *slidingwin.TimedDistinctSet
 	ipWhitelist map[string]struct{}
 
 	// 可选:云 IP 查询函数。nil 时 from_cloud_ip 规则跳过。
@@ -67,6 +68,7 @@ func New(cfg *config.DetectorCfg) (*Detector, error) {
 		ipFreq:      slidingwin.NewCounter(bucket, maxWindow),
 		tokenIPSet:  slidingwin.NewDistinctSet(bucket, maxWindow),
 		ipTokenSet:  slidingwin.NewDistinctSet(bucket, maxWindow),
+		tokenIPUAs:  slidingwin.NewTimedDistinctSet(maxWindow),
 		ipWhitelist: map[string]struct{}{},
 	}
 	d.maxWindow.Store(int64(maxWindow))
@@ -87,6 +89,7 @@ func (d *Detector) ResetAll() {
 	d.ipFreq.Reset()
 	d.tokenIPSet.Reset()
 	d.ipTokenSet.Reset()
+	d.tokenIPUAs.Reset()
 }
 
 // ResetToken 清掉指定 token 在 detector 里所有滑窗里的累计状态(tokenFreq / tokenIPSet)
@@ -104,11 +107,12 @@ func (d *Detector) ResetToken(tokenHash string) {
 	for _, ip := range ips {
 		d.ipFreq.Delete(ip)
 		d.ipTokenSet.Delete(ip)
+		d.tokenIPUAs.Delete(tokenIPUAKey(tokenHash, ip))
 	}
 }
 
 func (d *Detector) GCTargets() []interface{ GC() } {
-	return []interface{ GC() }{d.tokenFreq, d.ipFreq, d.tokenIPSet, d.ipTokenSet}
+	return []interface{ GC() }{d.tokenFreq, d.ipFreq, d.tokenIPSet, d.ipTokenSet, d.tokenIPUAs}
 }
 
 // Observe 把请求记入计数器(请求落库前调用)。
@@ -118,9 +122,11 @@ func (d *Detector) Observe(ip, tokenHash, ua string) {
 		d.tokenFreq.Inc(tokenHash)
 		d.tokenIPSet.Add(tokenHash, ip)
 		d.ipTokenSet.Add(ip, tokenHash)
+		if strings.TrimSpace(ua) != "" {
+			d.tokenIPUAs.Add(tokenIPUAKey(tokenHash, ip), ua)
+		}
 	}
 	d.ipFreq.Inc(ip)
-	_ = ua
 }
 
 // Result 检测结果。Hit=true 即命中,命中后由调用方直接投毒。
@@ -196,6 +202,14 @@ func (d *Detector) matchRule(r config.Rule, ip, tokenHash string) (bool, string)
 			return true, formatN("ip_distinct_tokens", n, c)
 		}
 	}
+	if c := w.CloudTokenDistinctUAs; c != nil && tokenHash != "" && d.cloudLookup != nil {
+		n := d.tokenIPUAs.Count(tokenIPUAKey(tokenHash, ip), c.Window.Std())
+		if n >= c.GTE {
+			if hit, prov := d.cloudLookup(ip); hit {
+				return true, formatN("cloud_token_distinct_uas", n, c) + " provider=" + prov
+			}
+		}
+	}
 	if w.FromCloudIP && d.cloudLookup != nil {
 		if hit, prov := d.cloudLookup(ip); hit {
 			return true, "cloud_ip:" + prov
@@ -257,17 +271,22 @@ func (d *Detector) SetRules(rs []config.Rule) {
 	d.ipFreq.SetMaxWindow(maxWindow)
 	d.tokenIPSet.SetMaxWindow(maxWindow)
 	d.ipTokenSet.SetMaxWindow(maxWindow)
+	d.tokenIPUAs.SetMaxWindow(maxWindow)
 }
 
 func rulesMaxWindow(rules []config.Rule) time.Duration {
 	maxWindow := time.Hour
 	for _, r := range rules {
 		w := r.When
-		for _, c := range []*config.Cond{w.TokenFreq, w.IPFreq, w.TokenDistinctIPs, w.IPDistinctTokens} {
+		for _, c := range []*config.Cond{w.TokenFreq, w.IPFreq, w.TokenDistinctIPs, w.IPDistinctTokens, w.CloudTokenDistinctUAs} {
 			if c != nil && c.Window.Std() > maxWindow {
 				maxWindow = c.Window.Std()
 			}
 		}
 	}
 	return maxWindow
+}
+
+func tokenIPUAKey(tokenHash, ip string) string {
+	return tokenHash + "\x00" + ip
 }
