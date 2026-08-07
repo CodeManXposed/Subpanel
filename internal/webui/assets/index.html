@@ -75,7 +75,7 @@
       <div class="avatar" id="userAvatar">A</div>
       <div>
         <div class="user-name">admin</div>
-        <div class="muted" style="font-size:11px">Sub-Panel v0.1.67</div>
+        <div class="muted" style="font-size:11px">Sub-Panel v0.1.68</div>
       </div>
       <button class="logout-btn" id="logoutBtn" title="退出">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
@@ -521,20 +521,110 @@
 
       <!-- 设置 -->
       <section id="tab-settings" class="tab">
-        <div class="card">
-          <h3>前置 CDN / 真实 IP</h3>
-          <p class="muted" style="margin:0 0 12px">
-            Sub-Panel 建议放在 CDN 后面使用。CDN 回源到订阅网关时必须透传真实访客 IP,
-            否则短时间多设备、云厂商、频率规则都会只看到 CDN 节点 IP。
-          </p>
-          <div id="cdnSettingsBox" class="mono" style="background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;padding:12px;font-size:12px;line-height:1.7">
-            加载中…
+        <div class="card cdn-guide-card">
+          <div class="cdn-guide-heading">
+            <div>
+              <h3>前置 CDN / 真实 IP · 配置向导</h3>
+              <p>照着下面 5 步操作。配置正确后，Sub-Panel 才能按真实订阅者 IP 进行云厂商、频率和多设备检测。</p>
+            </div>
+            <span class="guide-time">预计 5–10 分钟</span>
           </div>
-          <div style="margin-top:12px;display:grid;gap:8px">
-            <div class="muted"><strong>CDN 推荐配置</strong>: 回源地址填 <code>http://你的 SubPanel IP:18443</code>; 回源协议用 HTTP 即可,外层 HTTPS 交给 CDN 证书。</div>
-            <div class="muted"><strong>Header 要求</strong>: 优先传 <code>X-Real-IP</code>,同时保留 <code>X-Forwarded-For</code>; Cloudflare 可使用 <code>CF-Connecting-IP</code>。</div>
-            <div class="muted"><strong>安全边界</strong>: 只信任 <code>trust_proxies</code> 里的 CDN 回源 IP。不要把 <code>0.0.0.0/0</code> 加进去,否则任何人都能伪造真实 IP。</div>
+
+          <div class="cdn-flow" aria-label="订阅请求链路">
+            <div><strong>订阅客户端</strong><span>发起 HTTPS 请求</span></div><b>→</b>
+            <div><strong>CDN</strong><span>证书 / 防护 / 透传 IP</span></div><b>→</b>
+            <div class="active"><strong>Sub-Panel :18443</strong><span>识别、筛选、记录</span></div><b>→</b>
+            <div><strong>订阅源站</strong><span>V2Board 上游</span></div>
           </div>
+
+          <div class="cdn-guide-alert warning">
+            <strong>先记住这两个概念</strong>
+            <span><code>真实访客 IP</code> 是拉取订阅的用户；<code>可信代理 IP</code> 是连接 Sub-Panel 的 CDN 回源节点或本机 Nginx。两者不是同一个 IP。</span>
+          </div>
+
+          <div class="cdn-guide-steps">
+            <details class="cdn-guide-step" open>
+              <summary><span class="step-no">1</span><span><strong>在 CDN 面板添加订阅域名</strong><small>让订阅请求先到 CDN，再回源 Sub-Panel</small></span></summary>
+              <div class="step-body">
+                <div class="guide-field-grid">
+                  <div><span>加速域名</span><strong>你的订阅域名</strong><small>例如 sub.example.com</small></div>
+                  <div><span>回源地址</span><strong>Sub-Panel 服务器 IP</strong><small>不要填 V2Board 源站</small></div>
+                  <div><span>回源端口</span><strong>18443</strong><small>默认订阅网关端口</small></div>
+                  <div><span>回源协议</span><strong>HTTP</strong><small>外层 HTTPS 由 CDN 证书负责</small></div>
+                  <div><span>回源 Host</span><strong>订阅域名或保持原 Host</strong><small>不要改成其他机场域名</small></div>
+                  <div><span>缓存</span><strong>关闭 / 绕过</strong><small>订阅内容不可被 CDN 公共缓存</small></div>
+                </div>
+                <div class="guide-checkline"><span>□</span> HTTPS 证书已生效　<span>□</span> Query 参数和完整路径原样回源　<span>□</span> 未开启页面缓存</div>
+              </div>
+            </details>
+
+            <details class="cdn-guide-step" open>
+              <summary><span class="step-no">2</span><span><strong>让 CDN 透传真实访客 IP</strong><small>在 CDN 的回源 Header / 请求头设置中完成</small></span></summary>
+              <div class="step-body">
+                <div class="guide-table">
+                  <div class="head"><span>Header</span><span>应填写的值</span><span>说明</span></div>
+                  <div><code>X-Real-IP</code><code>访客真实 IP</code><span>推荐，单值最直观</span></div>
+                  <div><code>X-Forwarded-For</code><code>保留 / 追加客户端 IP</code><span>不要覆盖已有链路</span></div>
+                  <div><code>CF-Connecting-IP</code><code>Cloudflare 自动提供</code><span>仅 Cloudflare 使用</span></div>
+                </div>
+                <div class="cdn-guide-alert info"><strong>找不到这个设置？</strong><span>在 CDN 面板搜索“回源请求头”“客户端真实 IP”“X-Forwarded-For”或咨询厂商。不要手工填写某个固定访客 IP。</span></div>
+              </div>
+            </details>
+
+            <details class="cdn-guide-step" open>
+              <summary><span class="step-no">3</span><span><strong>配置 Sub-Panel 的可信代理</strong><small>选择你的部署方式，复制配置到 /opt/Sub-Panel/config.yml</small></span></summary>
+              <div class="step-body">
+                <div class="guide-mode-tabs" role="tablist" aria-label="选择 CDN 部署方式">
+                  <button type="button" class="active" data-cdn-guide-mode="generic">通用 CDN</button>
+                  <button type="button" data-cdn-guide-mode="cloudflare">Cloudflare</button>
+                  <button type="button" data-cdn-guide-mode="nginx">aaPanel / Nginx</button>
+                </div>
+                <p id="cdnGuideModeHint" class="muted guide-mode-hint"></p>
+                <div class="guide-code-wrap">
+                  <button type="button" class="guide-copy-btn" id="cdnGuideConfigCopy">复制配置</button>
+                  <pre id="cdnGuideConfigCode"></pre>
+                </div>
+                <div class="cdn-guide-alert danger"><strong>禁止这样填</strong><span><code>0.0.0.0/0</code>、<code>::/0</code> 或任何不受控的大网段会允许公网用户伪造 IP。通用 CDN 必须向厂商索取“回源节点 IP 段”。</span></div>
+              </div>
+            </details>
+
+            <details class="cdn-guide-step">
+              <summary><span class="step-no">4</span><span><strong>保存配置并重启服务</strong><small>配置文件不会自动热加载</small></span></summary>
+              <div class="step-body">
+                <div class="guide-code-wrap">
+                  <button type="button" class="guide-copy-btn" id="cdnGuideRestartCopy">复制命令</button>
+                  <pre id="cdnGuideRestartCode">sudo systemctl restart sub-panel
+sudo systemctl status sub-panel --no-pager
+curl -fsS http://127.0.0.1:19090/healthz</pre>
+                </div>
+                <p class="muted">看到服务状态为 <code>active (running)</code>，并且健康检查返回 <code>{"ok":true}</code>，即可继续下一步。</p>
+              </div>
+            </details>
+
+            <details class="cdn-guide-step" open>
+              <summary><span class="step-no">5</span><span><strong>从订阅域名访问面板并验收</strong><small>下面是本次请求的实时诊断，不是示例数据</small></span></summary>
+              <div class="step-body">
+                <div id="cdnGuideChecks" class="guide-validation-grid">
+                  <div><i class="pending">…</i><span><strong>连接来自可信代理</strong><small>Remote IP 命中 trust_proxies</small></span></div>
+                  <div><i class="pending">…</i><span><strong>收到真实 IP Header</strong><small>Header 有合法客户端 IP</small></span></div>
+                  <div><i class="pending">…</i><span><strong>识别到真实访客 IP</strong><small>Client IP 不再是代理连接 IP</small></span></div>
+                </div>
+                <div id="cdnSettingsBox" class="cdn-diagnostic-box mono">加载实时诊断…</div>
+                <button type="button" id="cdnDiagnosticRefresh" class="guide-refresh-btn">重新检测</button>
+              </div>
+            </details>
+          </div>
+
+          <details class="cdn-troubleshoot">
+            <summary>仍然识别失败？展开故障排查</summary>
+            <div>
+              <p><strong>Remote IP 不可信：</strong>把诊断里的 Remote IP 加入 <code>trust_proxies</code>；如果是动态 CDN 节点，应添加厂商公布的完整回源 IP 段。</p>
+              <p><strong>Header 全部为空：</strong>CDN 没有透传真实 IP，回到第 2 步设置回源 Header。</p>
+              <p><strong>Client IP 等于 CDN IP：</strong>Header 值可能填成了 CDN 节点 IP，检查变量是否选择了“客户端 IP / 访客 IP”。</p>
+              <p><strong>经过 aaPanel/Nginx：</strong>Sub-Panel 的直接连接通常是 <code>127.0.0.1</code>，应信任本机代理，同时让 Nginx 保留 CDN 传来的 <code>X-Forwarded-For</code>。</p>
+              <p><strong>最后检查：</strong>用手机流量刷新一次真实订阅，再到“请求日志”确认记录的 IP 是手机运营商 IP，而不是 CDN/AWS 节点 IP。</p>
+            </div>
+          </details>
         </div>
 
         <div class="card">

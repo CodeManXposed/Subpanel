@@ -839,6 +839,99 @@ function renderList(items) {
   return items.map(x => `<code>${escapeHTML(x)}</code>`).join(' ');
 }
 
+const CDN_GUIDE_MODES = {
+  generic: {
+    hint: '适用于大多数商业 CDN。把厂商提供的“回源节点 IP / CIDR”逐行加入 trust_proxies，不是填写访客 IP。',
+    code: `# /opt/Sub-Panel/config.yml
+real_ip:
+  cloudflare: false
+  trust_headers:
+    - "X-Real-IP"
+    - "X-Forwarded-For"
+  trust_proxies:
+    - "127.0.0.1"
+    - "::1"
+    - "你的 CDN 回源 IP 或 CIDR"`,
+  },
+  cloudflare: {
+    hint: 'Cloudflare 模式会自动加入其官方 IPv4/IPv6 网段，并优先读取 CF-Connecting-IP，无需手工维护 Cloudflare IP 段。',
+    code: `# /opt/Sub-Panel/config.yml
+real_ip:
+  cloudflare: true
+  trust_headers:
+    - "CF-Connecting-IP"
+    - "X-Real-IP"
+    - "X-Forwarded-For"
+  trust_proxies:
+    - "127.0.0.1"
+    - "::1"`,
+  },
+  nginx: {
+    hint: '适用于 CDN → aaPanel/Nginx → Sub-Panel。信任本机反代，并优先读取包含完整代理链的 X-Forwarded-For。',
+    code: `# /opt/Sub-Panel/config.yml
+real_ip:
+  cloudflare: false
+  trust_headers:
+    - "X-Forwarded-For"
+    - "X-Real-IP"
+  trust_proxies:
+    - "127.0.0.1"
+    - "::1"
+
+# aaPanel/Nginx 反向代理应包含：
+# proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`,
+  },
+};
+
+async function copyGuideText(text, btn) {
+  let ok = false;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.cssText = 'position:fixed;opacity:0;left:-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      ok = document.execCommand('copy');
+      ta.remove();
+    }
+  } catch (err) { console.warn('复制失败', err); }
+  if (!ok) return toast('复制失败，请手工选择代码', 'error');
+  const old = btn.textContent;
+  btn.textContent = '已复制 ✓';
+  setTimeout(() => { btn.textContent = old; }, 1200);
+}
+
+function setCDNGuideMode(mode) {
+  const selected = CDN_GUIDE_MODES[mode] || CDN_GUIDE_MODES.generic;
+  const code = $('#cdnGuideConfigCode');
+  const hint = $('#cdnGuideModeHint');
+  if (code) code.textContent = selected.code;
+  if (hint) hint.textContent = selected.hint;
+  $$('[data-cdn-guide-mode]').forEach(btn => btn.classList.toggle('active', btn.dataset.cdnGuideMode === mode));
+}
+
+function setCDNGuideCheck(index, pass) {
+  const item = $$('#cdnGuideChecks > div')[index];
+  if (!item) return;
+  const icon = item.querySelector('i');
+  icon.className = pass ? 'pass' : 'fail';
+  icon.textContent = pass ? '✓' : '!';
+}
+
+$$('[data-cdn-guide-mode]').forEach(btn => btn.addEventListener('click', () => setCDNGuideMode(btn.dataset.cdnGuideMode)));
+setCDNGuideMode('generic');
+$('#cdnGuideConfigCopy')?.addEventListener('click', e => copyGuideText($('#cdnGuideConfigCode').textContent, e.currentTarget));
+$('#cdnGuideRestartCopy')?.addEventListener('click', e => copyGuideText($('#cdnGuideRestartCode').textContent, e.currentTarget));
+$('#cdnDiagnosticRefresh')?.addEventListener('click', e => {
+  const btn = e.currentTarget;
+  btn.classList.add('loading');
+  loadCDNSettings().finally(() => btn.classList.remove('loading'));
+});
+
 async function loadCDNSettings() {
   const box = $('#cdnSettingsBox');
   if (!box) return;
@@ -849,18 +942,27 @@ async function loadCDNSettings() {
   }
   const cfg = r.real_ip;
   const d = r.diagnostic;
+  const selectedHeader = (d.headers || []).some(h => h.selected);
   const headerRows = (d.headers || []).map(h => {
     const mark = h.selected ? '✅' : '·';
     const value = h.value ? escapeHTML(h.value) : '<span class="muted">空</span>';
     return `<div>${mark} <code>${escapeHTML(h.name)}</code>: ${value} <span class="muted">(${escapeHTML(h.reason || '-')})</span></div>`;
   }).join('') || '<div class="muted">当前请求没有可检查的真实 IP Header</div>';
   const ok = d.trusted_proxy && d.client_ip && d.client_ip !== d.remote_ip;
-  const status = ok
-    ? '<span style="color:#16a34a;font-weight:700">已通过可信代理头识别真实 IP</span>'
-    : '<span style="color:#dc2626;font-weight:700">当前仍按连接 IP 处理</span>';
+  setCDNGuideCheck(0, Boolean(d.trusted_proxy));
+  setCDNGuideCheck(1, selectedHeader);
+  setCDNGuideCheck(2, Boolean(ok));
+  let status;
+  if (ok) {
+    status = '<div class="diagnostic-status pass">✓ 配置通过：已从可信代理 Header 识别真实访客 IP</div>';
+  } else if (!d.trusted_proxy) {
+    status = '<div class="diagnostic-status fail">! 第 3 步未通过：当前 Remote IP 尚未加入 trust_proxies</div>';
+  } else {
+    status = '<div class="diagnostic-status fail">! 第 2 步未通过：代理已可信，但没有收到可用的真实访客 IP Header</div>';
+  }
   box.innerHTML = `
     <div style="display:grid;gap:4px">
-      <div>状态: ${status}</div>
+      ${status}
       <div>Cloudflare 模式: <strong>${cfg.cloudflare ? '开启' : '关闭'}</strong></div>
       <div>信任 Header: ${renderList(cfg.trust_headers)}</div>
       <div>信任代理: ${renderList(cfg.trust_proxies)}</div>
