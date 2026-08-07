@@ -11,10 +11,11 @@
 <div class="app">
 
   <!-- ============ 左侧导航 ============ -->
-  <aside class="sidebar">
+  <aside class="sidebar" id="sidebar">
     <div class="brand">
       <div class="logo">S</div>
-      Sub-Panel
+      <span>Sub-Panel</span>
+      <button class="sidebar-close-btn" id="sidebarCloseBtn" aria-label="关闭导航">×</button>
     </div>
 
     <div class="sidebar-section">监控</div>
@@ -74,17 +75,21 @@
       <div class="avatar" id="userAvatar">A</div>
       <div>
         <div class="user-name">admin</div>
-        <div class="muted" style="font-size:11px">Sub-Panel v0.1.56</div>
+        <div class="muted" style="font-size:11px">Sub-Panel v0.1.66</div>
       </div>
       <button class="logout-btn" id="logoutBtn" title="退出">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
       </button>
     </div>
   </aside>
+  <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
 
   <!-- ============ 主区 ============ -->
   <main class="main">
     <div class="topbar">
+      <button class="mobile-menu-btn" id="mobileMenuBtn" aria-label="打开导航">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+      </button>
       <div class="page-title" id="pageTitle">概览</div>
       <div class="topbar-right">
         <select id="tenantSel"></select>
@@ -170,6 +175,12 @@
               <option value="">所有网络</option>
               <option value="yes">仅云厂商 ASN</option>
               <option value="no">排除云厂商 ASN</option>
+            </select>
+            <select id="evClientMatch" title="比较订阅 flag 后缀与实际 User-Agent">
+              <option value="">所有后缀 / UA</option>
+              <option value="mismatch">仅后缀与 UA 不匹配</option>
+              <option value="match">仅后缀与 UA 匹配</option>
+              <option value="unknown">无法判断</option>
             </select>
             <select id="evProvider" title="按具体云厂商筛选">
               <option value="">所有云厂商</option>
@@ -327,15 +338,34 @@
             </div>
           </div>
           <p class="muted" style="margin:0 0 12px">
-            命中任意规则即视为非法访问,直接<strong>返回投毒订阅</strong>(改写节点 IP 到黑洞段)。规则保存后立即热生效,无需重启。
+            每条规则可单独选择<strong>投毒订阅</strong>(HTTP 200，节点 IP 改写到黑洞段)或<strong>禁止访问</strong>(HTTP 403)。规则保存后立即热生效,无需重启。
           </p>
           <div class="datatable">
             <table>
               <thead><tr>
-                <th>名称</th><th>描述</th><th>条件摘要</th>
+                <th>名称</th><th>描述</th><th>条件摘要</th><th>命中后处置</th>
                 <th>启用</th><th>更新时间</th><th>操作</th>
               </tr></thead>
               <tbody id="rulesTbody"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card" style="margin-top:16px">
+          <div class="card-header">
+            <div>
+              <h3>UA 白名单</h3>
+              <p class="muted" style="margin:4px 0 0">使用 Go RE2 正则表达式并忽略大小写，仅豁免“非常见 UA”规则，不会绕过其他 IP、频率或云厂商规则。</p>
+            </div>
+          </div>
+          <div class="filter-bar">
+            <input id="uaWLPattern" placeholder="正则，如 ^MyClient/\\d+\\.\\d+" style="min-width:320px">
+            <input id="uaWLNote" placeholder="备注">
+            <button class="primary" id="uaWLAddBtn">添加白名单</button>
+          </div>
+          <div class="datatable">
+            <table>
+              <thead><tr><th>UA 正则表达式</th><th>备注</th><th>创建时间</th><th></th></tr></thead>
+              <tbody id="uaWLTbody"></tbody>
             </table>
           </div>
         </div>
@@ -426,8 +456,8 @@
             <h3>AWS 入口 DNS 自动追踪</h3>
             <span class="muted" style="font-size:13px">检测到 A 记录变化时，自动冻结变化前 15/20 分钟的订阅者。</span>
           </div>
-          <div class="filter-bar" style="align-items:flex-end;flex-wrap:wrap">
-            <div style="flex:1;min-width:260px">
+          <div class="filter-bar aws-watcher-form">
+            <div class="aws-watcher-dns-field">
               <label style="display:block;font-size:12px;margin-bottom:4px">入口 DNS</label>
               <input id="awsWatcherDNS" placeholder="例如 aws-entry.example.com" class="mono" style="width:100%">
             </div>
@@ -447,12 +477,17 @@
             <button class="primary" id="awsWatcherAddBtn">开始追踪</button>
           </div>
           <p class="muted" style="margin:10px 0 12px">不选站点时，该 DNS 变化会记录全部站点；快照持久保存，不受日志清理影响。</p>
-          <div id="awsWatcherList" class="ev-list"></div>
+          <div id="awsWatcherList" class="aws-watcher-grid"></div>
         </div>
         <div class="card" style="margin-top:16px">
           <div class="card-header">
             <h3>历史换 IP 记录</h3>
-            <button id="awsChangeRefreshBtn">刷新</button>
+            <div class="actions aws-change-filter-actions">
+              <select id="awsChangeDNSFilter" title="按入口 DNS 筛选换 IP 记录">
+                <option value="">全部入口 DNS</option>
+              </select>
+              <button id="awsChangeRefreshBtn">刷新</button>
+            </div>
           </div>
           <div id="awsChangeList" class="ev-list"></div>
         </div>
@@ -627,6 +662,15 @@
         <input id="ruleFormDesc" placeholder="一句话说清这条规则在防什么">
       </div>
 
+      <div class="form-row rule-action-field">
+        <label>命中后处置 <span class="req">*</span></label>
+        <select id="ruleFormAction">
+          <option value="fake">投毒订阅（HTTP 200，返回黑洞节点）</option>
+          <option value="deny">禁止访问（HTTP 403）</option>
+        </select>
+        <p class="hint">多条规则同时命中时，“禁止访问”优先于“投毒订阅”。</p>
+      </div>
+
       <div class="section-title">计数条件</div>
       <div class="rule-cond-list">
         <div class="cond-row-v2">
@@ -666,6 +710,13 @@
         </div>
       </div>
       <p class="hint" style="margin:8px 0 14px">同一行两个值都 &gt; 0 才生效。“云 IP 单 token 多 UA”只统计同一 token + 同一云厂商 IP，适合识别伪装多种客户端的测活。</p>
+
+      <div class="section-title">即时条件</div>
+      <label class="inline-check rule-uncommon-ua-check">
+        <input type="checkbox" id="ruleFormUncommonUA">
+        请求 UA 未命中常规订阅客户端库、且不在 UA 白名单时触发
+      </label>
+      <p class="hint" style="margin:6px 0 14px">该条件单次请求即可命中；建议处置选择“投毒订阅”。空 UA、浏览器或脚本 UA 均属于非常见 UA。</p>
 
       <details class="advanced">
         <summary>高级条件:云 IP / 地理 / ISP</summary>

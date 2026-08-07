@@ -6,11 +6,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/huabanmao168/SubPanel/internal/blacklist"
 	"github.com/huabanmao168/SubPanel/internal/config"
 	"github.com/huabanmao168/SubPanel/internal/slidingwin"
 )
 
-// Severity / sevRank 删除:规则不再分等级,命中即投毒。
+// Severity / sevRank 删除:规则不再分等级。处置由每条规则的 Action 决定。
 
 type Detector struct {
 	cfg         *config.DetectorCfg
@@ -29,6 +30,8 @@ type Detector struct {
 	geoLookup func(ip string) *GeoInfo
 	// 可选:外部 IP 白名单提供者(热更新,来自 DB)。
 	dynamicIPWhitelist func(ip string) bool
+	// 可选:动态 UA 白名单。仅豁免 uncommon_ua 条件，不跳过其他风控规则。
+	dynamicUAWhitelist func(ua string) bool
 }
 
 // GeoInfo 给 detector 用的精简版 IP 地理信息。
@@ -53,6 +56,11 @@ func (d *Detector) SetGeoLookup(fn func(ip string) *GeoInfo) {
 // SetDynamicIPWhitelist 注入 DB 来源的 IP 白名单查询函数。
 func (d *Detector) SetDynamicIPWhitelist(fn func(string) bool) {
 	d.dynamicIPWhitelist = fn
+}
+
+// SetDynamicUAWhitelist 注入 DB 来源的 UA 白名单查询函数。
+func (d *Detector) SetDynamicUAWhitelist(fn func(string) bool) {
+	d.dynamicUAWhitelist = fn
 }
 
 func New(cfg *config.DetectorCfg) (*Detector, error) {
@@ -129,11 +137,12 @@ func (d *Detector) Observe(ip, tokenHash, ua string) {
 	d.ipFreq.Inc(ip)
 }
 
-// Result 检测结果。Hit=true 即命中,命中后由调用方直接投毒。
+// Result 检测结果。多条规则同时命中时 deny 优先于 fake。
 type Result struct {
-	Hit  bool
-	Tags []string // 命中的规则名
-	Note string
+	Hit    bool
+	Action string   // fake|deny
+	Tags   []string // 命中的规则名
+	Note   string
 }
 
 // Whitelisted IP 白名单 — 完全跳过所有规则。
@@ -156,28 +165,41 @@ func (d *Detector) Evaluate(ip, tokenHash, ua string) Result {
 		return Result{}
 	}
 	var (
-		tags  []string
-		notes []string
+		tags   []string
+		notes  []string
+		action = "fake"
 	)
 	rules := d.cfg.Rules
 	if snap := d.rulesSnap.Load(); snap != nil {
 		rules = *snap
 	}
 	for _, r := range rules {
-		hit, note := d.matchRule(r, ip, tokenHash)
+		hit, note := d.matchRule(r, ip, tokenHash, ua)
 		if !hit {
 			continue
 		}
 		tags = append(tags, r.Name)
+		if strings.EqualFold(strings.TrimSpace(r.Action), "deny") {
+			action = "deny"
+		}
 		if note != "" {
 			notes = append(notes, note)
 		}
 	}
-	return Result{Hit: len(tags) > 0, Tags: tags, Note: strings.Join(notes, "; ")}
+	return Result{Hit: len(tags) > 0, Action: action, Tags: tags, Note: strings.Join(notes, "; ")}
 }
 
-func (d *Detector) matchRule(r config.Rule, ip, tokenHash string) (bool, string) {
+func (d *Detector) matchRule(r config.Rule, ip, tokenHash, ua string) (bool, string) {
 	w := r.When
+	if w.UncommonUA && !blacklist.IsKnownSubClient(ua) {
+		if d.dynamicUAWhitelist == nil || !d.dynamicUAWhitelist(ua) {
+			shown := strings.TrimSpace(ua)
+			if shown == "" {
+				shown = "(empty)"
+			}
+			return true, "uncommon_ua:" + shown
+		}
+	}
 	if c := w.TokenFreq; c != nil && tokenHash != "" {
 		n := d.tokenFreq.Sum(tokenHash, c.Window.Std())
 		if n >= c.GTE {

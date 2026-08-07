@@ -182,6 +182,21 @@ func TestE2EUnsupportedUpstreamFallsBackToGeneratedFake(t *testing.T) {
 	}
 }
 
+func TestE2ERuleDenyReturnsForbidden(t *testing.T) {
+	gw, _, _, _, cleanup := newE2E(t, false, config.Rule{
+		Name:   "deny_once",
+		Action: "deny",
+		When:   config.When{IPFreq: &config.Cond{Window: config.Duration(time.Minute), GTE: 1}},
+	})
+	defer cleanup()
+
+	w := httptest.NewRecorder()
+	gw.ServeHTTP(w, mkSubReq("sub.example.com", "Clash/1.0", "blocked", "clash", "9.9.9.9"))
+	if w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != "Forbidden" {
+		t.Fatalf("expected HTTP 403 deny, got %d %q", w.Code, w.Body.String())
+	}
+}
+
 func TestE2EHighTokenFreqRedDenyAndBan(t *testing.T) {
 	gw, _, _, bans, cleanup := newE2E(t, false)
 	defer cleanup()

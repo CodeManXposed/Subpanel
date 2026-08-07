@@ -2,6 +2,7 @@ package detector
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,5 +76,41 @@ func TestCloudTokenDistinctUAsRequiresSameTokenIPAndCloud(t *testing.T) {
 	}
 	if got := d.Evaluate("47.1.2.3", "token-c", ""); got.Hit {
 		t.Fatalf("duplicate UA values must count once: %+v", got)
+	}
+}
+
+func TestUncommonUARuleAndDynamicWhitelist(t *testing.T) {
+	cfg := &config.DetectorCfg{Rules: []config.Rule{{
+		Name: "uncommon_ua", Action: "fake", When: config.When{UncommonUA: true},
+	}}}
+	d, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := d.Evaluate("1.2.3.4", "tok", "FlClash/v0.8.90"); got.Hit {
+		t.Fatalf("known subscription UA must not trigger: %+v", got)
+	}
+	if got := d.Evaluate("1.2.3.4", "tok", "Mozilla/5.0"); !got.Hit || got.Action != "fake" {
+		t.Fatalf("uncommon UA should trigger fake: %+v", got)
+	}
+	d.SetDynamicUAWhitelist(func(ua string) bool { return strings.Contains(ua, "InternalFetcher") })
+	if got := d.Evaluate("1.2.3.4", "tok", "InternalFetcher/1.0"); got.Hit {
+		t.Fatalf("dynamic UA whitelist must exempt uncommon rule: %+v", got)
+	}
+}
+
+func TestDenyActionWinsWhenMultipleRulesMatch(t *testing.T) {
+	cfg := &config.DetectorCfg{Rules: []config.Rule{
+		{Name: "poison", Action: "fake", When: config.When{IPFreq: &config.Cond{Window: config.Duration(time.Minute), GTE: 1}}},
+		{Name: "block", Action: "deny", When: config.When{IPFreq: &config.Cond{Window: config.Duration(time.Minute), GTE: 1}}},
+	}}
+	d, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Observe("1.2.3.4", "token", "client")
+	got := d.Evaluate("1.2.3.4", "token", "client")
+	if !got.Hit || got.Action != "deny" || len(got.Tags) != 2 {
+		t.Fatalf("expected deny precedence, got %+v", got)
 	}
 }

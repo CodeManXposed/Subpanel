@@ -37,7 +37,7 @@ import (
 	"github.com/huabanmao168/SubPanel/internal/webui"
 )
 
-var Version = "0.1.56"
+var Version = "0.1.66"
 
 func main() {
 	if len(os.Args) >= 2 {
@@ -132,6 +132,10 @@ func main() {
 		logger.Error("初始化触发规则失败", "err", err)
 		os.Exit(1)
 	}
+	if err := ensureUncommonUARule(st); err != nil {
+		logger.Error("初始化非常见 UA 规则失败", "err", err)
+		os.Exit(1)
+	}
 	if rs, err := loadDetectRulesFromDB(st); err != nil {
 		logger.Error("加载触发规则失败", "err", err)
 		os.Exit(1)
@@ -203,6 +207,7 @@ func main() {
 	}
 	rulesMgr.RunDomainWhitelistResolver(ctxFetch, 30*time.Second)
 	det.SetDynamicIPWhitelist(rulesMgr.IPWhitelisted)
+	det.SetDynamicUAWhitelist(rulesMgr.UAWhitelisted)
 
 	fk := faker.New(cfg.Faker.BlackholeIPs, cfg.Faker.NodeCount)
 
@@ -441,6 +446,39 @@ func seedDetectRulesFromYAML(st *store.Store, cfg *config.Config, logger *slog.L
 		}
 	}
 	return nil
+}
+
+// ensureUncommonUARule 为已有安装执行一次升级迁移。管理员之后即使删除该规则，
+// 也不会在每次重启时被重新创建。
+func ensureUncommonUARule(st *store.Store) error {
+	const migrationKey = "migration_uncommon_ua_rule_v1"
+	if done, _ := st.GetMeta(migrationKey); done == "1" {
+		return nil
+	}
+	rows, err := st.ListDetectRules()
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if row.Name == "uncommon_ua" {
+			return st.SetMeta(migrationKey, "1")
+		}
+	}
+	whenJSON, err := json.Marshal(config.When{UncommonUA: true})
+	if err != nil {
+		return err
+	}
+	if err := st.UpsertDetectRule(store.DetectRuleRow{
+		Name:      "uncommon_ua",
+		Desc:      "请求 UA 未命中常规订阅客户端库且不在 UA 白名单时自动投毒",
+		Action:    "fake",
+		WhenJSON:  string(whenJSON),
+		Enabled:   true,
+		SortOrder: 45,
+	}); err != nil {
+		return err
+	}
+	return st.SetMeta(migrationKey, "1")
 }
 
 // loadDetectRulesFromDB 读 DB 里启用的规则,反序列化成 config.Rule slice。

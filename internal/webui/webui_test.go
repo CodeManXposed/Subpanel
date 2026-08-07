@@ -227,12 +227,27 @@ func TestCloudUAProbeRuleConversion(t *testing.T) {
 	if w.CloudTokenDistinctUAs == nil || w.CloudTokenDistinctUAs.Window.Std() != time.Minute || w.CloudTokenDistinctUAs.GTE != 4 {
 		t.Fatalf("unexpected condition: %+v", w.CloudTokenDistinctUAs)
 	}
-	row, err := rowToAPI(store.DetectRuleRow{Name: "cloud_ua_probe", WhenJSON: `{"CloudTokenDistinctUAs":{"Window":60000000000,"GTE":4}}`})
+	row, err := rowToAPI(store.DetectRuleRow{Name: "cloud_ua_probe", Action: "deny", WhenJSON: `{"CloudTokenDistinctUAs":{"Window":60000000000,"GTE":4}}`})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if row.CloudTokenUAsWindowSec != 60 || row.CloudTokenUAsGTE != 4 {
+	if row.CloudTokenUAsWindowSec != 60 || row.CloudTokenUAsGTE != 4 || row.Action != "deny" {
 		t.Fatalf("unexpected API rule: %+v", row)
+	}
+}
+
+func TestUncommonUARuleConversion(t *testing.T) {
+	a := &detectRuleAPI{UncommonUA: true, Action: "fake"}
+	w, err := apiToWhen(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !w.UncommonUA {
+		t.Fatal("uncommon UA condition lost")
+	}
+	row, err := rowToAPI(store.DetectRuleRow{Name: "uncommon_ua", Action: "fake", WhenJSON: `{"UncommonUA":true}`})
+	if err != nil || !row.UncommonUA {
+		t.Fatalf("unexpected API rule: %+v err=%v", row, err)
 	}
 }
 

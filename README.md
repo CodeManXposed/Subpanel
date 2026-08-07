@@ -22,9 +22,30 @@ curl -fsSL https://raw.githubusercontent.com/CodeManXposed/Subpanel/main/install
 
 ## 升级
 
-再跑一次同样的命令即可。会自动:
+安装完成后可直接运行快捷升级脚本:
 
-- 停服务 → 替换二进制 → 重启
+```bash
+bash /opt/Sub-Panel/upgrade.sh
+```
+
+也可以不依赖本地文件，在线执行:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/CodeManXposed/Subpanel/main/upgrade.sh | bash
+```
+
+指定版本:
+
+```bash
+SUB_PANEL_VERSION=v0.1.66 bash /opt/Sub-Panel/upgrade.sh
+```
+
+升级脚本会自动:
+
+- 识别 amd64 / arm64 并下载对应 Release
+- 校验 SHA256 与二进制版本
+- 备份旧二进制 → 替换 → 重启
+- 启动失败时自动回滚
 - 保留 `/opt/Sub-Panel/config.yml` 和 `/opt/Sub-Panel/data/`
 
 ## 目录结构
@@ -36,6 +57,7 @@ curl -fsSL https://raw.githubusercontent.com/CodeManXposed/Subpanel/main/install
 ├── ip2region.xdb          # GeoIP 数据(原始拷贝)
 ├── ip2asn-v4.tsv.gz       # ASN/组织数据(原始拷贝)
 ├── uninstall.sh           # 卸载脚本
+├── upgrade.sh             # 快捷升级（失败自动回滚）
 └── data/
     ├── sub-panel.db       # SQLite 业务库
     └── salt               # HMAC 盐(首启自动生成)

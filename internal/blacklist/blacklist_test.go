@@ -30,6 +30,10 @@ func TestIsKnownSubClient(t *testing.T) {
 		{"Hiddify/2.0.5", true},
 		{"Streisand/1.6.0", true},
 		{"Surfboard/2.24", true},
+		{"Karing/1.2.3", true},
+		{"Egern/1.22.0", true},
+		{"mzjsq-verge/5.1.0 Platform/android", true},
+		{"SagerNet/0.8.1", true},
 
 		// 真浏览器 — 不应命中(保留拦截能力)
 		{"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36", false},

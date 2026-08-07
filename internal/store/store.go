@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS events (
     asn         TEXT,
     asn_org     TEXT,
     cloud_provider TEXT
+    ,client_match INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_events_ts          ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_token       ON events(token_hash, ts);
@@ -125,6 +126,7 @@ CREATE TABLE IF NOT EXISTS detect_rules (
     name       TEXT PRIMARY KEY,
     desc       TEXT,
     severity   TEXT NOT NULL,         -- yellow|orange|red
+	 action      TEXT NOT NULL DEFAULT 'fake', -- fake|deny
     when_json  TEXT NOT NULL,         -- 序列化的 config.When
     enabled    INTEGER NOT NULL DEFAULT 1,
     sort_order INTEGER NOT NULL DEFAULT 0,
@@ -239,6 +241,9 @@ type Event struct {
 	ASN           string // AS4134
 	ASNOrg        string // ASN 注册组织
 	CloudProvider string // aws/aliyun/cloudflare/...;空表示非已知云厂商
+	ClientMatch   string // match/mismatch;空表示后缀或 UA 无法可靠识别
+	SuffixClient  string // 从 flag 识别出的客户端/配置家族
+	UAClient      string // 从 User-Agent 识别出的客户端家族
 	ReTriggered   bool   // 曾标记已处理后又出现的新请求
 	Focused       bool   // 该请求发生时 token 已进入重点关注名单
 }
@@ -302,6 +307,7 @@ func Open(path string, flushEvery time.Duration, flushSize int) (*Store, error) 
 		"ALTER TABLE events ADD COLUMN asn TEXT",
 		"ALTER TABLE events ADD COLUMN asn_org TEXT",
 		"ALTER TABLE events ADD COLUMN cloud_provider TEXT",
+		"ALTER TABLE events ADD COLUMN client_match INTEGER",
 	} {
 		_, _ = db.Exec(alter) // duplicate column 错误忽略
 	}
@@ -311,16 +317,24 @@ func Open(path string, flushEvery time.Duration, flushSize int) (*Store, error) 
 		"CREATE INDEX IF NOT EXISTS idx_events_usage_ts   ON events(usage_type, ts)",
 		"CREATE INDEX IF NOT EXISTS idx_events_cloud_ts   ON events(cloud_provider, ts)",
 		"CREATE INDEX IF NOT EXISTS idx_events_asn_ts     ON events(asn, ts)",
+		"CREATE INDEX IF NOT EXISTS idx_events_client_match_ts ON events(client_match, ts)",
 	} {
 		if _, err := db.Exec(idx); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("geoip index: %w", err)
 		}
 	}
+	// 为升级前的日志补齐“订阅后缀与 UA 是否匹配”。-1 表示未知，不误报。
+	if _, err := db.Exec(clientMatchBackfillSQL()); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("client match backfill: %w", err)
+	}
 	// 清理 v1 残留:cloud_cidrs 表(已被 xdb 替代)
 	_, _ = db.Exec("DROP TABLE IF EXISTS cloud_cidrs")
 	// 补 tenants.report_id 列(老库升级)
 	_, _ = db.Exec("ALTER TABLE tenants ADD COLUMN report_id TEXT NOT NULL DEFAULT ''")
+	// 触发规则处置动作。旧规则保持 fake，升级不改变现有行为。
+	_, _ = db.Exec("ALTER TABLE detect_rules ADD COLUMN action TEXT NOT NULL DEFAULT 'fake'")
 	// DNS 追踪 IP 存活时间(老库升级)
 	_, _ = db.Exec("ALTER TABLE dns_watchers ADD COLUMN last_changed_ts INTEGER NOT NULL DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE dns_watchers ADD COLUMN note TEXT NOT NULL DEFAULT ''")
@@ -461,8 +475,8 @@ func (s *Store) insertEvents(es []Event) error {
 		return err
 	}
 	stmt, err := tx.Prepare(`INSERT INTO events
-		(ts,tenant,client_ip,ua,token_hash,flag,path,status,action,rule_tags,upstream_ms,resp_size,country,usage_type,isp,asn,asn_org,cloud_provider)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		(ts,tenant,client_ip,ua,token_hash,flag,path,status,action,rule_tags,upstream_ms,resp_size,country,usage_type,isp,asn,asn_org,cloud_provider,client_match)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		_ = tx.Rollback()
 		return err
@@ -473,7 +487,7 @@ func (s *Store) insertEvents(es []Event) error {
 		if _, err := stmt.Exec(
 			e.TS.UnixMilli(), e.Tenant, e.ClientIP, e.UA, e.TokenHash, e.Flag,
 			e.Path, e.Status, e.Action, string(tags), e.UpstreamMS, e.RespSize,
-			e.Country, e.UsageType, e.ISP, e.ASN, e.ASNOrg, e.CloudProvider,
+			e.Country, e.UsageType, e.ISP, e.ASN, e.ASNOrg, e.CloudProvider, clientMatchDBValue(e.Flag, e.UA),
 		); err != nil {
 			_ = tx.Rollback()
 			return err
@@ -574,18 +588,19 @@ func (s *Store) ListActiveBans(ctx context.Context) ([]Ban, error) {
 // ----- 查询 API(给 Web UI) -----
 
 type EventFilter struct {
-	Tenant    string
-	ClientIP  string
-	TokenHash string
-	Action    string
-	Usage     string // usage_type 精确匹配(IDC/CDN/DYN/MOB/...)
-	Cloud     string // "yes"=云厂商,"no"=非云厂商
-	Provider  string // cloud_provider 精确匹配
-	ASN       string // ASN 精确匹配,如 AS16509
-	Since     time.Time
-	Until     time.Time
-	Limit     int
-	Offset    int
+	Tenant      string
+	ClientIP    string
+	TokenHash   string
+	Action      string
+	Usage       string // usage_type 精确匹配(IDC/CDN/DYN/MOB/...)
+	Cloud       string // "yes"=云厂商,"no"=非云厂商
+	Provider    string // cloud_provider 精确匹配
+	ASN         string // ASN 精确匹配,如 AS16509
+	ClientMatch string // mismatch/match/unknown
+	Since       time.Time
+	Until       time.Time
+	Limit       int
+	Offset      int
 	// IncludeResolved 为 true 时不过滤已处理 token;默认 false。
 	// 单 token 精确过滤(TokenHash != "")时会自动忽略此开关——
 	// 用户显式查某个 token 就该看到完整记录。
@@ -595,6 +610,7 @@ type EventFilter struct {
 func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error) {
 	q := `SELECT ts,tenant,client_ip,ua,token_hash,flag,path,status,action,rule_tags,upstream_ms,resp_size,
 			COALESCE(country,''),COALESCE(usage_type,''),COALESCE(isp,''),COALESCE(asn,''),COALESCE(asn_org,''),COALESCE(cloud_provider,''),
+			client_match,
 			CASE WHEN EXISTS (SELECT 1 FROM resolved_tokens rt
 				WHERE (rt.token=events.token_hash OR events.token_hash IN
 					(SELECT a2.token FROM token_associations a1 JOIN token_associations a2
@@ -644,6 +660,14 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error)
 		q += " AND UPPER(asn)=UPPER(?)"
 		args = append(args, f.ASN)
 	}
+	switch f.ClientMatch {
+	case "mismatch":
+		q += " AND client_match=1"
+	case "match":
+		q += " AND client_match=0"
+	case "unknown":
+		q += " AND client_match=-1"
+	}
 	if !f.Since.IsZero() {
 		q += " AND ts>=?"
 		args = append(args, f.Since.UnixMilli())
@@ -682,9 +706,10 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error)
 		var tags sql.NullString
 		var ua, tokenHash, flag, path, action sql.NullString
 		var reTriggered, focused int
+		var clientMatch sql.NullInt64
 		if err := rows.Scan(&ts, &e.Tenant, &e.ClientIP, &ua, &tokenHash, &flag,
 			&path, &e.Status, &action, &tags, &e.UpstreamMS, &e.RespSize,
-			&e.Country, &e.UsageType, &e.ISP, &e.ASN, &e.ASNOrg, &e.CloudProvider, &reTriggered, &focused); err != nil {
+			&e.Country, &e.UsageType, &e.ISP, &e.ASN, &e.ASNOrg, &e.CloudProvider, &clientMatch, &reTriggered, &focused); err != nil {
 			return nil, err
 		}
 		e.TS = time.UnixMilli(ts)
@@ -695,6 +720,7 @@ func (s *Store) QueryEvents(ctx context.Context, f EventFilter) ([]Event, error)
 		e.Action = action.String
 		e.ReTriggered = reTriggered != 0
 		e.Focused = focused != 0
+		e.SuffixClient, e.UAClient, e.ClientMatch = classifyClientMatch(e.Flag, e.UA)
 		if tags.Valid {
 			_ = json.Unmarshal([]byte(tags.String), &e.RuleTags)
 		}
@@ -1238,6 +1264,7 @@ type AWSIPChangeSubscriber struct {
 	CloudProvider string `json:"cloud_provider"`
 	ASN           string `json:"asn"`
 	ASNOrg        string `json:"asn_org"`
+	UAUncommon    bool   `json:"ua_uncommon"`
 }
 
 // AddAWSIPChange 新增换 IP 记录，并在同一事务中冻结动作前 15/20 分钟的订阅者。
@@ -1946,6 +1973,7 @@ type DetectRuleRow struct {
 	Name      string
 	Desc      string
 	Severity  string
+	Action    string
 	WhenJSON  string
 	Enabled   bool
 	SortOrder int
@@ -1959,12 +1987,12 @@ func (s *Store) UpsertDetectRule(r DetectRuleRow) error {
 		enabled = 1
 	}
 	_, err := s.db.Exec(
-		`INSERT INTO detect_rules (name,desc,severity,when_json,enabled,sort_order,created_ts,updated_ts)
-		 VALUES (?,?,?,?,?,?,?,?)
+		`INSERT INTO detect_rules (name,desc,severity,action,when_json,enabled,sort_order,created_ts,updated_ts)
+		 VALUES (?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(name) DO UPDATE SET desc=excluded.desc, severity=excluded.severity,
-		   when_json=excluded.when_json, enabled=excluded.enabled, sort_order=excluded.sort_order,
+		   action=excluded.action, when_json=excluded.when_json, enabled=excluded.enabled, sort_order=excluded.sort_order,
 		   updated_ts=excluded.updated_ts`,
-		r.Name, r.Desc, r.Severity, r.WhenJSON, enabled, r.SortOrder, now, now)
+		r.Name, r.Desc, r.Severity, normalizeRuleAction(r.Action), r.WhenJSON, enabled, r.SortOrder, now, now)
 	return err
 }
 
@@ -1975,7 +2003,7 @@ func (s *Store) DeleteDetectRule(name string) error {
 
 func (s *Store) ListDetectRules() ([]DetectRuleRow, error) {
 	rows, err := s.db.Query(
-		`SELECT name, COALESCE(desc,''), severity, when_json, enabled, sort_order, updated_ts
+		`SELECT name, COALESCE(desc,''), severity, COALESCE(NULLIF(action,''),'fake'), when_json, enabled, sort_order, updated_ts
 		 FROM detect_rules ORDER BY sort_order, name`)
 	if err != nil {
 		return nil, err
@@ -1986,7 +2014,7 @@ func (s *Store) ListDetectRules() ([]DetectRuleRow, error) {
 		var r DetectRuleRow
 		var en int
 		var uts int64
-		if err := rows.Scan(&r.Name, &r.Desc, &r.Severity, &r.WhenJSON, &en, &r.SortOrder, &uts); err != nil {
+		if err := rows.Scan(&r.Name, &r.Desc, &r.Severity, &r.Action, &r.WhenJSON, &en, &r.SortOrder, &uts); err != nil {
 			return nil, err
 		}
 		r.Enabled = en == 1
@@ -1994,6 +2022,13 @@ func (s *Store) ListDetectRules() ([]DetectRuleRow, error) {
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+func normalizeRuleAction(action string) string {
+	if strings.EqualFold(strings.TrimSpace(action), "deny") {
+		return "deny"
+	}
+	return "fake"
 }
 
 func (s *Store) CountDetectRules() (int, error) {
@@ -2527,9 +2562,10 @@ type IPDetail struct {
 }
 
 type UADetail struct {
-	UA       string `json:"ua"`
-	HitCount int    `json:"hit_count"`
-	LastSeen int64  `json:"last_seen"`
+	UA         string `json:"ua"`
+	HitCount   int    `json:"hit_count"`
+	LastSeen   int64  `json:"last_seen"`
+	UAUncommon bool   `json:"ua_uncommon"`
 }
 
 func (s *Store) QuerySuspectDetail(token, tenant string, since time.Time) (*SuspectDetail, error) {

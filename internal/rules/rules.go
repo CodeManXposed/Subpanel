@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,6 +27,7 @@ type Manager struct {
 	// IP 白名单:支持单 IP 和 CIDR
 	ipWhitelistSingle map[string]struct{}
 	ipWhitelistNets   []*net.IPNet
+	uaWhitelist       []*regexp.Regexp
 }
 
 func NewManager(st *store.Store) *Manager {
@@ -66,12 +68,49 @@ func (m *Manager) Reload() error {
 			}
 		}
 	}
+	uaEntries, err := m.st.ListUARules("whitelist")
+	if err != nil {
+		return err
+	}
+	uaWhitelist := make([]*regexp.Regexp, 0, len(uaEntries))
+	for _, e := range uaEntries {
+		if p := strings.TrimSpace(e.Pattern); p != "" {
+			re, compileErr := compileUARegex(p)
+			if compileErr != nil {
+				return fmt.Errorf("invalid UA whitelist regex %q: %w", p, compileErr)
+			}
+			uaWhitelist = append(uaWhitelist, re)
+		}
+	}
 
 	m.mu.Lock()
 	m.ipWhitelistSingle = singles
 	m.ipWhitelistNets = nets
+	m.uaWhitelist = uaWhitelist
 	m.mu.Unlock()
 	return nil
+}
+
+func compileUARegex(pattern string) (*regexp.Regexp, error) {
+	// 用非捕获分组包裹，确保用户表达式里的 | 也完整受忽略大小写修饰。
+	return regexp.Compile("(?i:" + pattern + ")")
+}
+
+// UAWhitelisted 使用 Go RE2 语法对 User-Agent 做忽略大小写的正则匹配。
+// 仅用于豁免“非常见 UA”规则，不影响其他行为规则。
+func (m *Manager) UAWhitelisted(ua string) bool {
+	ua = strings.TrimSpace(ua)
+	if ua == "" {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, pattern := range m.uaWhitelist {
+		if pattern.MatchString(ua) {
+			return true
+		}
+	}
+	return false
 }
 
 // IPWhitelisted 检查 IP 是否在白名单(支持精确和 CIDR)。
@@ -115,6 +154,27 @@ func (m *Manager) AddIPWhitelist(target, note string) error {
 
 func (m *Manager) DeleteIPWhitelist(id int64) error {
 	if err := m.st.DeleteIPWhitelist(id); err != nil {
+		return err
+	}
+	return m.Reload()
+}
+
+func (m *Manager) AddUAWhitelist(pattern, note string) error {
+	p := strings.TrimSpace(pattern)
+	if p == "" {
+		return &simpleErr{"UA regex cannot be empty"}
+	}
+	if _, err := compileUARegex(p); err != nil {
+		return fmt.Errorf("UA 正则表达式无效: %w", err)
+	}
+	if err := m.st.AddUARule(store.UARule{Kind: "whitelist", Pattern: p, Note: strings.TrimSpace(note)}); err != nil {
+		return err
+	}
+	return m.Reload()
+}
+
+func (m *Manager) DeleteUAWhitelist(id int64) error {
+	if err := m.st.DeleteUARule(id); err != nil {
 		return err
 	}
 	return m.Reload()

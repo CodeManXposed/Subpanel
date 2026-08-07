@@ -320,12 +320,25 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 7) 执行:命中即投毒,未命中放行
+	// 7) 执行:按命中规则处置。多规则同时命中时 detector 返回 deny 优先。
 	if res.Hit {
-		g.respondFake(w, r, pr, tokenHash, res.Tags, start)
+		if res.Action == "deny" {
+			g.respondDeny(w, pr, tokenHash, res.Tags, start)
+		} else {
+			g.respondFake(w, r, pr, tokenHash, res.Tags, start)
+		}
 	} else {
 		g.transparentProxyWithLog(w, r, pr, tokenHash, res.Tags, "pass", start)
 	}
+}
+
+func (g *Gateway) respondDeny(w http.ResponseWriter, pr *parser.Request, tokenHash string, tags []string, start time.Time) {
+	setNoStoreHeaders(w.Header())
+	const body = "Forbidden\n"
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusForbidden)
+	_, _ = io.WriteString(w, body)
+	g.logEvent(pr, tokenHash, "deny", http.StatusForbidden, tags, 0, int64(len(body)), start)
 }
 
 // 带日志的反代
@@ -538,8 +551,6 @@ func (b *bufferingWriter) Write(p []byte) (int, error) {
 	_, _ = b.body.Write(p)
 	return len(p), nil
 }
-
-// handleDeny 已删除:命中规则统一投毒,banlist 命中也走投毒。
 
 // logEvent 仅落库,不写响应。
 func (g *Gateway) logEvent(

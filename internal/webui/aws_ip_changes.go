@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/huabanmao168/SubPanel/internal/blacklist"
 	"github.com/huabanmao168/SubPanel/internal/dnswatch"
 	"github.com/huabanmao168/SubPanel/internal/store"
 )
@@ -102,6 +103,9 @@ func (s *Server) apiAWSIPChangeDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	if rows == nil {
 		rows = []store.AWSIPChangeSubscriber{}
+	}
+	for i := range rows {
+		rows[i].UAUncommon = !blacklist.IsKnownSubClient(rows[i].UA)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"change": change, "subscribers": rows})
 }

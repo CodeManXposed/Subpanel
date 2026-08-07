@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/huabanmao168/SubPanel/internal/blacklist"
 	"github.com/huabanmao168/SubPanel/internal/geoip"
 	"github.com/huabanmao168/SubPanel/internal/store"
 )
@@ -188,6 +189,9 @@ func (s *Server) apiSuspectDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	for i := range detail.IPs {
 		enrich(&detail.IPs[i])
+	}
+	for i := range detail.UAs {
+		detail.UAs[i].UAUncommon = !blacklist.IsKnownSubClient(detail.UAs[i].UA)
 	}
 	writeJSON(w, 200, detail)
 }

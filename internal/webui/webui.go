@@ -132,6 +132,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/detect_rules", s.auth(http.HandlerFunc(s.apiDetectRules)))
 	mux.Handle("/api/detect_rules/save", s.auth(http.HandlerFunc(s.apiDetectRuleSave)))
 	mux.Handle("/api/detect_rules/remove", s.auth(http.HandlerFunc(s.apiDetectRuleRemove)))
+	mux.Handle("/api/ua-whitelist", s.auth(http.HandlerFunc(s.apiUAWhitelistList)))
+	mux.Handle("/api/ua-whitelist/add", s.auth(http.HandlerFunc(s.apiUAWhitelistAdd)))
+	mux.Handle("/api/ua-whitelist/remove", s.auth(http.HandlerFunc(s.apiUAWhitelistRemove)))
 	mux.Handle("/api/config", s.auth(http.HandlerFunc(s.apiConfig)))
 	mux.Handle("/api/notifier", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 410, map[string]any{"error": "notifier removed"})
@@ -323,17 +326,18 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 		dur = 24 * time.Hour
 	}
 	f := store.EventFilter{
-		Tenant:    q.Get("tenant"),
-		ClientIP:  q.Get("ip"),
-		TokenHash: q.Get("token"),
-		Action:    q.Get("action"),
-		Usage:     strings.ToUpper(strings.TrimSpace(q.Get("usage"))),
-		Cloud:     strings.ToLower(strings.TrimSpace(q.Get("cloud"))),
-		Provider:  strings.ToLower(strings.TrimSpace(q.Get("provider"))),
-		ASN:       strings.ToUpper(strings.TrimSpace(q.Get("asn"))),
-		Since:     time.Now().Add(-dur),
-		Limit:     limit,
-		Offset:    offset,
+		Tenant:      q.Get("tenant"),
+		ClientIP:    q.Get("ip"),
+		TokenHash:   q.Get("token"),
+		Action:      q.Get("action"),
+		Usage:       strings.ToUpper(strings.TrimSpace(q.Get("usage"))),
+		Cloud:       strings.ToLower(strings.TrimSpace(q.Get("cloud"))),
+		Provider:    strings.ToLower(strings.TrimSpace(q.Get("provider"))),
+		ASN:         strings.ToUpper(strings.TrimSpace(q.Get("asn"))),
+		ClientMatch: strings.ToLower(strings.TrimSpace(q.Get("client_match"))),
+		Since:       time.Now().Add(-dur),
+		Limit:       limit,
+		Offset:      offset,
 	}
 	// 默认隐藏白名单 IP 的请求(走 rules.IPWhitelisted,支持 CIDR)。
 	// show_whitelist=1 时显示。单 IP 精确查询时也跳过过滤(用户显式要看)。
@@ -353,6 +357,7 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 		ASNOrg      string `json:"ASNOrg"`
 		Usage       string `json:"Usage"`
 		UsageSource string `json:"UsageSource"`
+		UAUncommon  bool   `json:"UAUncommon"`
 	}
 	gi := geoip.Global()
 	out := make([]eventOut, 0, len(evs))
@@ -360,7 +365,7 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 		if hideWL && e.ClientIP != "" && s.rules != nil && s.rules.IPWhitelisted(e.ClientIP) {
 			continue
 		}
-		row := eventOut{Event: e}
+		row := eventOut{Event: e, UAUncommon: !blacklist.IsKnownSubClient(e.UA)}
 		if e.ClientIP != "" {
 			if info := gi.Lookup(e.ClientIP); info != nil {
 				row.CountryName = info.Country

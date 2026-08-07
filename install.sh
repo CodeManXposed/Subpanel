@@ -145,6 +145,12 @@ curl -fsSL -o "$SERVICE_FILE" \
 systemctl daemon-reload
 
 # 14) 写卸载脚本
+log "安装快捷升级脚本…"
+curl -fsSL -o "${INSTALL_DIR}/upgrade.sh" \
+  "https://raw.githubusercontent.com/${REPO}/main/upgrade.sh" \
+  || die "快捷升级脚本下载失败"
+chmod 0755 "${INSTALL_DIR}/upgrade.sh"
+
 cat > "${INSTALL_DIR}/uninstall.sh" <<'UNINST'
 #!/usr/bin/env bash
 # Sub-Panel 卸载脚本。默认保留 config + data,加 --purge 才全删。
@@ -203,10 +209,11 @@ if systemctl is-active --quiet "$SERVICE_NAME"; then
   echo "    systemctl status  sub-panel    # 状态"
   echo "    systemctl restart sub-panel    # 重启"
   echo "    journalctl -u sub-panel -f     # 看日志"
+  echo "    bash /opt/Sub-Panel/upgrade.sh           # 快捷升级"
   echo "    bash /opt/Sub-Panel/uninstall.sh         # 卸载(留数据)"
   echo "    bash /opt/Sub-Panel/uninstall.sh --purge # 完全卸载"
   echo ""
-  echo "  升级:再跑一次本安装命令即可,会保留 config + data。"
+  echo "  升级:bash /opt/Sub-Panel/upgrade.sh（保留 config + data，失败自动回滚）"
   echo ""
 else
   warn "服务未能正常启动,查看日志:journalctl -u ${SERVICE_NAME} -e --no-pager"

@@ -25,9 +25,10 @@ import (
 // detectRuleAPI:对外 JSON 形态,字段平铺,前端表单填起来方便。
 // 时长统一用秒数(yaml 用 Duration 字符串,这里 API 端用整数秒便于前端处理)。
 type detectRuleAPI struct {
-	Name string `json:"name"`
-	Desc string `json:"desc"`
-	// Severity 已废弃,API 不再返回也不再接收;命中规则统一投毒。
+	Name   string `json:"name"`
+	Desc   string `json:"desc"`
+	Action string `json:"action"` // fake|deny
+	// Severity 已废弃,API 不再返回也不再接收。
 	Enabled   bool `json:"enabled"`
 	SortOrder int  `json:"sort_order"`
 
@@ -45,6 +46,7 @@ type detectRuleAPI struct {
 
 	// 云 IP / GeoIP / ISP(高级,可选)
 	FromCloudIP    bool     `json:"from_cloud_ip"`
+	UncommonUA     bool     `json:"uncommon_ua"`
 	CountryIn      []string `json:"country_in"`
 	CountryNotIn   []string `json:"country_not_in"`
 	UsageTypeIn    []string `json:"usage_type_in"`
@@ -63,9 +65,11 @@ func rowToAPI(r store.DetectRuleRow) (*detectRuleAPI, error) {
 	a := &detectRuleAPI{
 		Name:           r.Name,
 		Desc:           r.Desc,
+		Action:         ruleAction(r.Action),
 		Enabled:        r.Enabled,
 		SortOrder:      r.SortOrder,
 		FromCloudIP:    w.FromCloudIP,
+		UncommonUA:     w.UncommonUA,
 		CountryIn:      w.CountryIn,
 		CountryNotIn:   w.CountryNotIn,
 		UsageTypeIn:    w.UsageTypeIn,
@@ -96,10 +100,18 @@ func rowToAPI(r store.DetectRuleRow) (*detectRuleAPI, error) {
 	return a, nil
 }
 
+func ruleAction(action string) string {
+	if strings.EqualFold(strings.TrimSpace(action), "deny") {
+		return "deny"
+	}
+	return "fake"
+}
+
 // apiToWhen 把对外平铺字段还原成 config.When。
 func apiToWhen(a *detectRuleAPI) (config.When, error) {
 	w := config.When{
 		FromCloudIP:    a.FromCloudIP,
+		UncommonUA:     a.UncommonUA,
 		CountryIn:      trimList(a.CountryIn),
 		CountryNotIn:   trimList(a.CountryNotIn),
 		UsageTypeIn:    trimList(a.UsageTypeIn),
@@ -137,7 +149,7 @@ func apiToWhen(a *detectRuleAPI) (config.When, error) {
 	}
 	// 至少一个条件不为空
 	if w.TokenFreq == nil && w.IPFreq == nil && w.TokenDistinctIPs == nil && w.IPDistinctTokens == nil && w.CloudTokenDistinctUAs == nil &&
-		!w.FromCloudIP && len(w.CountryIn) == 0 && len(w.CountryNotIn) == 0 &&
+		!w.FromCloudIP && !w.UncommonUA && len(w.CountryIn) == 0 && len(w.CountryNotIn) == 0 &&
 		len(w.UsageTypeIn) == 0 && len(w.UsageTypeNotIn) == 0 && len(w.ISPContains) == 0 {
 		return w, fmt.Errorf("至少配置一个触发条件")
 	}
@@ -199,6 +211,14 @@ func (s *Server) apiDetectRuleSave(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": "规则名必填"})
 		return
 	}
+	body.Action = strings.ToLower(strings.TrimSpace(body.Action))
+	if body.Action == "" {
+		body.Action = "fake"
+	}
+	if body.Action != "fake" && body.Action != "deny" {
+		writeJSON(w, 400, map[string]any{"error": "处置动作只能是 fake 或 deny"})
+		return
+	}
 	when, err := apiToWhen(&body.detectRuleAPI)
 	if err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
@@ -220,6 +240,7 @@ func (s *Server) apiDetectRuleSave(w http.ResponseWriter, r *http.Request) {
 		Name:      body.Name,
 		Desc:      body.Desc,
 		Severity:  "", // 已废弃,DB 列保留兼容
+		Action:    body.Action,
 		WhenJSON:  string(buf),
 		Enabled:   body.Enabled,
 		SortOrder: body.SortOrder,
@@ -261,6 +282,76 @@ func (s *Server) apiDetectRuleRemove(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
+func (s *Server) apiUAWhitelistList(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.st.ListUARules("whitelist")
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	type item struct {
+		ID        int64  `json:"id"`
+		Pattern   string `json:"pattern"`
+		Note      string `json:"note"`
+		CreatedTS int64  `json:"created_ts"`
+	}
+	out := make([]item, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, item{ID: row.ID, Pattern: row.Pattern, Note: row.Note, CreatedTS: row.CreatedTS.Unix()})
+	}
+	writeJSON(w, 200, out)
+}
+
+func (s *Server) apiUAWhitelistAdd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{"error": "POST only"})
+		return
+	}
+	var body struct {
+		Pattern string `json:"pattern"`
+		Note    string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	if s.rules == nil {
+		writeJSON(w, 503, map[string]any{"error": "规则管理器未就绪"})
+		return
+	}
+	if err := s.rules.AddUAWhitelist(body.Pattern, body.Note); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+func (s *Server) apiUAWhitelistRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{"error": "POST only"})
+		return
+	}
+	var body struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	if body.ID <= 0 {
+		writeJSON(w, 400, map[string]any{"error": "id 必填"})
+		return
+	}
+	if s.rules == nil {
+		writeJSON(w, 503, map[string]any{"error": "规则管理器未就绪"})
+		return
+	}
+	if err := s.rules.DeleteUAWhitelist(body.ID); err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
 // reloadDetectRules 从 DB 读启用的规则,推到 detector 热生效。
 func (s *Server) reloadDetectRules() error {
 	rows, err := s.st.ListDetectRules()
@@ -277,9 +368,10 @@ func (s *Server) reloadDetectRules() error {
 			return fmt.Errorf("规则 %s 反序列化失败: %w", r.Name, err)
 		}
 		out = append(out, config.Rule{
-			Name: r.Name,
-			Desc: r.Desc,
-			When: w,
+			Name:   r.Name,
+			Desc:   r.Desc,
+			Action: ruleAction(r.Action),
+			When:   w,
 		})
 	}
 	s.det.SetRules(out)

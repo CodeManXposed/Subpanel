@@ -161,7 +161,7 @@ const TAB_LOADERS = {
   'ip-bans': () => loadBans(),
   'ip-whitelist': () => loadIPWhitelist(),
   'cloud-ip': () => loadGeoIPInfo(),
-  'detect-rules': () => loadRulesTable(),
+  'detect-rules': () => { loadRulesTable(); loadUAWhitelist(); },
   'suspects': () => loadSuspects(),
   'aws-ip-changes': () => loadAWSIPChanges(),
   'tenants': () => loadTenantsTable(),
@@ -178,8 +178,19 @@ $$('.navlink').forEach(a => {
     const sec = document.getElementById('tab-' + tab);
     if (sec) sec.classList.add('active');
     $('#pageTitle').textContent = TAB_TITLES[tab] || tab;
+    document.body.classList.remove('mobile-nav-open');
     if (TAB_LOADERS[tab]) TAB_LOADERS[tab]();
   });
+});
+
+function setMobileNav(open) {
+  document.body.classList.toggle('mobile-nav-open', Boolean(open));
+}
+$('#mobileMenuBtn').addEventListener('click', () => setMobileNav(true));
+$('#sidebarCloseBtn').addEventListener('click', () => setMobileNav(false));
+$('#sidebarBackdrop').addEventListener('click', () => setMobileNav(false));
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') setMobileNav(false);
 });
 
 $('#refreshBtn').addEventListener('click', () => {
@@ -265,7 +276,7 @@ let evOffset = 0;
 
 function renderEventCard(e) {
   const card = document.createElement('div');
-  card.className = 'ev-card';
+  card.className = `ev-card${e.UAUncommon ? ' ev-card-uncommon-ua' : ''}`;
   const region = [e.CountryName, e.Province, e.City].filter(x => x && x !== '0').join(' · ') || '未知';
   const isp = e.ISP && e.ISP !== '0' ? escapeHTML(e.ISP) : '<span class="muted">未知</span>';
   const tags = (e.RuleTags || []).length
@@ -281,6 +292,12 @@ function renderEventCard(e) {
 	: '';
   const cloudBit = e.CloudProvider
     ? `<span class="pill red" title="命中云厂商 ASN">云厂商 · ${escapeHTML(cloudProviderLabel(e.CloudProvider))}</span>`
+    : '';
+  const clientMismatchBit = e.ClientMatch === 'mismatch'
+    ? `<span class="pill red" title="订阅后缀：${escapeHTML(e.SuffixClient || e.Flag || '未知')}；实际 UA：${escapeHTML(e.UAClient || '未知')}">后缀 ≠ UA</span>`
+    : '';
+  const uncommonUABit = e.UAUncommon
+    ? '<span class="pill orange" title="未命中常规订阅客户端 UA 库，仅作风险提示">非常见 UA</span>'
     : '';
   // 已处理按钮:仅当有 token 时显示。data-tenant 用事件自己的 tenant(不是当前过滤)。
   const resolveBtn = tokenFull
@@ -300,6 +317,8 @@ function renderEventCard(e) {
       ${e.ReTriggered ? '<span class="pill red">⚠ 已处理后再次触发</span>' : ''}
       ${e.Focused ? '<span class="pill red">⚠ 重点关注对象行为</span>' : ''}
       ${cloudBit}
+      ${clientMismatchBit}
+      ${uncommonUABit}
       ${tags}
       ${resetBtn}
       ${resolveBtn}
@@ -385,6 +404,7 @@ async function loadEvents(append = false) {
     ip: $('#evIP').value, token: $('#evToken').value, action: $('#evAction').value,
     usage: $('#evUsage').value,
     cloud: $('#evCloud').value,
+    client_match: $('#evClientMatch').value,
     provider: $('#evProvider').value,
     asn: $('#evASN').value.trim(),
     show_whitelist: $('#evShowWL').checked ? '1' : '0',
@@ -1097,6 +1117,7 @@ function ruleSummary(r) {
   fmt('Tok×IP', r.token_distinct_ips_window_sec, r.token_distinct_ips_gte, 'IP');
   fmt('IP×Tok', r.ip_distinct_tokens_window_sec, r.ip_distinct_tokens_gte, 'Tok');
   fmt('云IP×UA', r.cloud_token_distinct_uas_window_sec, r.cloud_token_distinct_uas_gte, 'UA');
+  if (r.uncommon_ua) parts.push('<strong>非常见UA</strong>');
   if (r.from_cloud_ip) parts.push('<strong>云IP</strong>');
   if (r.country_in && r.country_in.length) parts.push(`<strong>国家∈</strong>${r.country_in.join(',')}`);
   if (r.country_not_in && r.country_not_in.length) parts.push(`<strong>国家∉</strong>${r.country_not_in.join(',')}`);
@@ -1104,6 +1125,10 @@ function ruleSummary(r) {
   if (r.usage_type_not_in && r.usage_type_not_in.length) parts.push(`<strong>用途∉</strong>${r.usage_type_not_in.map(usageLabel).join(',')}`);
   if (r.isp_contains && r.isp_contains.length) parts.push(`<strong>ISP⊇</strong>${r.isp_contains.join(',')}`);
   return parts.length ? parts.join(' · ') : '<span style="color:#dc2626">⚠ 无任何条件</span>';
+}
+
+function ruleActionLabel(action) {
+  return action === 'deny' ? '禁止访问 · 403' : '投毒订阅 · 200';
 }
 
 async function loadRulesTable() {
@@ -1119,6 +1144,7 @@ async function loadRulesTable() {
       <td class="mono">${escapeHtml(x.name)}</td>
       <td>${escapeHtml(x.desc || '-')}</td>
       <td class="rule-summary">${ruleSummary(x)}</td>
+      <td><span class="pill ${x.action === 'deny' ? 'deny' : 'fake'}">${ruleActionLabel(x.action)}</span></td>
       <td>${x.enabled ? '✓' : '<span style="color:#9ca3af">×</span>'}</td>
       <td class="mono" style="color:#6b7280">${fmtTs(x.updated_ts)}</td>
       <td>
@@ -1163,7 +1189,8 @@ function openRuleModal(r) {
   const set = (id, v) => { $('#' + id).value = v == null ? '' : v; };
   set('ruleFormName',          isEdit ? r.name : '');
   set('ruleFormDesc',          isEdit ? r.desc : '');
-  // 等级字段已废弃,命中即投毒。
+  set('ruleFormAction',        isEdit ? (r.action || 'fake') : 'fake');
+  // 等级字段已废弃。
   set('ruleFormTfWin',         isEdit ? (r.token_freq_window_sec || '') : '');
   set('ruleFormTfGte',         isEdit ? (r.token_freq_gte || '') : '');
   set('ruleFormIfWin',         isEdit ? (r.ip_freq_window_sec || '') : '');
@@ -1174,6 +1201,7 @@ function openRuleModal(r) {
   set('ruleFormIdGte',         isEdit ? (r.ip_distinct_tokens_gte || '') : '');
   set('ruleFormCloudUAWin',    isEdit ? (r.cloud_token_distinct_uas_window_sec || '') : '');
   set('ruleFormCloudUAGte',    isEdit ? (r.cloud_token_distinct_uas_gte || '') : '');
+  $('#ruleFormUncommonUA').checked = isEdit ? !!r.uncommon_ua : false;
   set('ruleFormCountryIn',     isEdit ? listToCSV(r.country_in) : '');
   set('ruleFormCountryNotIn',  isEdit ? listToCSV(r.country_not_in) : '');
   set('ruleFormUsageIn',       isEdit ? listToCSV(r.usage_type_in) : '');
@@ -1208,6 +1236,7 @@ $('#ruleFormSave').addEventListener('click', async () => {
     original_name:                     $('#ruleModal').dataset.originalName || '',
     name,
     desc:                              $('#ruleFormDesc').value.trim(),
+    action:                            $('#ruleFormAction').value,
     enabled:                           $('#ruleFormEnabledOn').checked,
     sort_order:                        parseInt($('#ruleModal').dataset.sortOrder || '0', 10),
     token_freq_window_sec:             num('ruleFormTfWin'),
@@ -1220,6 +1249,7 @@ $('#ruleFormSave').addEventListener('click', async () => {
     ip_distinct_tokens_gte:            num('ruleFormIdGte'),
     cloud_token_distinct_uas_window_sec: num('ruleFormCloudUAWin'),
     cloud_token_distinct_uas_gte:        num('ruleFormCloudUAGte'),
+    uncommon_ua:                        $('#ruleFormUncommonUA').checked,
     from_cloud_ip:                     $('#ruleFormFromCloud').checked,
     country_in:                        csvToList($('#ruleFormCountryIn').value),
     country_not_in:                    csvToList($('#ruleFormCountryNotIn').value),
@@ -1235,6 +1265,40 @@ $('#ruleFormSave').addEventListener('click', async () => {
   } else {
     toast((r && r.error) || '失败', 'error');
   }
+});
+
+async function loadUAWhitelist() {
+  const list = await api('/api/ua-whitelist');
+  const tbody = $('#uaWLTbody');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  if (!Array.isArray(list) || !list.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">暂无自定义 UA 白名单；内置常规订阅客户端无需重复添加</td></tr>';
+    return;
+  }
+  for (const row of list) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td class="mono">${escapeHtml(row.pattern)}</td><td>${escapeHtml(row.note || '-')}</td><td class="mono">${fmtTs(row.created_ts)}</td><td><button class="danger ua-wl-remove" data-id="${row.id}">删除</button></td>`;
+    tbody.appendChild(tr);
+  }
+  $$('.ua-wl-remove').forEach(btn => btn.addEventListener('click', async () => {
+    if (!confirm('确认删除该 UA 白名单？')) return;
+    const r = await apiPost('/api/ua-whitelist/remove', { id: Number(btn.dataset.id) });
+    if (r && r.ok) { toast('已删除', 'success'); loadUAWhitelist(); }
+    else toast((r && r.error) || '删除失败', 'error');
+  }));
+}
+
+$('#uaWLAddBtn').addEventListener('click', async () => {
+  const pattern = $('#uaWLPattern').value.trim();
+  if (!pattern) { toast('请输入 UA 正则表达式', 'error'); return; }
+  const r = await apiPost('/api/ua-whitelist/add', { pattern, note: $('#uaWLNote').value.trim() });
+  if (r && r.ok) {
+    $('#uaWLPattern').value = '';
+    $('#uaWLNote').value = '';
+    toast('UA 白名单已添加并热生效', 'success');
+    loadUAWhitelist();
+  } else toast((r && r.error) || '添加失败', 'error');
 });
 
 // ────────────────────────────────────────────────
@@ -1525,7 +1589,7 @@ async function toggleSuspectDetail(card, r) {
     }
     html += '</div></div>';
   }
-  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:10px;padding-top:10px;border-top:1px dashed var(--border)">';
+  html += '<div class="suspect-detail-grid">';
 
   // IP 列表
   html += '<div><div style="font-weight:600;font-size:12px;margin-bottom:6px;color:#374151">IP 列表 (' + (detail.ips||[]).length + ')</div>';
@@ -1551,7 +1615,7 @@ async function toggleSuspectDetail(card, r) {
     html += '<tr style="color:#6b7280;border-bottom:1px solid #e5e7eb"><th style="text-align:left;padding:2px 6px">User-Agent</th><th style="text-align:right;padding:2px 6px">次数</th><th style="text-align:right;padding:2px 6px">最近</th></tr>';
     for (const ua of detail.uas) {
       const last = new Date(ua.last_seen).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
-      html += `<tr style="border-bottom:1px solid #f3f4f6"><td class="mono" style="padding:3px 6px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHTML(ua.ua)}">${escapeHTML(ua.ua)}</td><td class="mono" style="text-align:right;padding:3px 6px">${ua.hit_count}</td><td class="mono" style="text-align:right;padding:3px 6px">${last}</td></tr>`;
+      html += `<tr class="${ua.ua_uncommon ? 'ua-row-uncommon' : ''}" style="border-bottom:1px solid #f3f4f6"><td class="mono" style="padding:3px 6px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHTML(ua.ua)}">${ua.ua_uncommon ? '<span class="pill orange">非常见</span> ' : ''}${escapeHTML(ua.ua || '(空 UA)')}</td><td class="mono" style="text-align:right;padding:3px 6px">${ua.hit_count}</td><td class="mono" style="text-align:right;padding:3px 6px">${last}</td></tr>`;
     }
     html += '</table>';
   } else { html += '<div style="color:#9ca3af;font-size:11px">无记录</div>'; }
@@ -1665,30 +1729,31 @@ async function loadAWSIPChanges() {
   } else {
     for (const watcher of watchers) {
       const card = document.createElement('div');
-      card.className = 'ev-card';
+      card.className = 'ev-card aws-watcher-card';
       const history = watcher.ip_history || [];
       const historyHTML = history.length
-        ? `<div class="datatable" style="margin-top:10px"><div style="padding:7px 10px;font-weight:650">过去 ${history.length} 个 IP 存活记录</div><table><thead><tr><th>IP 地址</th><th>开始</th><th>结束</th><th>存活时间</th></tr></thead><tbody>${history.map(h => `<tr><td class="mono">${escapeHTML(h.ip)}</td><td class="mono">${escapeHTML(fmtTime(new Date(h.started_ts)))}</td><td class="mono">${escapeHTML(fmtTime(new Date(h.ended_ts)))}</td><td><strong>${escapeHTML(fmtAliveSeconds(h.alive_seconds))}</strong></td></tr>`).join('')}</tbody></table></div>`
-        : '<div class="muted" style="margin-top:9px;font-size:12px">暂无过去 IP 记录</div>';
+        ? `<details class="aws-history-fold"><summary><span>历史 IP</span><strong>${history.length} 条</strong><span class="mono">最近 ${escapeHTML(history[0].ip)}</span><span>${escapeHTML(fmtAliveSeconds(history[0].alive_seconds))}</span></summary><div class="datatable"><table><thead><tr><th>IP 地址</th><th>开始</th><th>结束</th><th>存活时间</th></tr></thead><tbody>${history.map(h => `<tr><td class="mono">${escapeHTML(h.ip)}</td><td class="mono">${escapeHTML(fmtTime(new Date(h.started_ts)))}</td><td class="mono">${escapeHTML(fmtTime(new Date(h.ended_ts)))}</td><td><strong>${escapeHTML(fmtAliveSeconds(h.alive_seconds))}</strong></td></tr>`).join('')}</tbody></table></div></details>`
+        : '<div class="aws-no-history">暂无历史 IP</div>';
       card.innerHTML = `
-        <div class="ev-card-head">
-          <span class="pill ${watcher.enabled ? 'pass' : ''}">${watcher.enabled ? '追踪中' : '已暂停'}</span>
-          <strong class="mono">${escapeHTML(watcher.dns_name)}</strong>
-          <input class="aws-watcher-note" data-id="${watcher.id}" maxlength="200" value="${escapeHTML(watcher.note || '')}" placeholder="填写备注" title="回车或移开光标自动保存" style="width:180px;height:30px;padding:4px 9px;font-size:12px">
-          <span class="ev-spacer"></span>
-          <span class="pill tag">${watcher.lookback_minutes} 分钟快照</span>
+        <div class="aws-watcher-top">
+          <div class="aws-watcher-identity">
+            <span class="pill ${watcher.enabled ? 'pass' : ''}">${watcher.enabled ? '追踪中' : '已暂停'}</span>
+            <strong class="mono aws-watcher-domain">${escapeHTML(watcher.dns_name)}</strong>
+            <input class="aws-watcher-note" data-id="${watcher.id}" maxlength="200" value="${escapeHTML(watcher.note || '')}" placeholder="填写备注" title="回车或移开光标自动保存">
+          </div>
+          <div class="aws-watcher-actions">
+            <span class="pill tag">${watcher.lookback_minutes} 分钟</span>
+            <button class="aws-watcher-toggle" data-id="${watcher.id}" data-enabled="${watcher.enabled ? '0' : '1'}">${watcher.enabled ? '暂停' : '继续'}</button>
+            <button class="danger aws-watcher-remove" data-id="${watcher.id}">删除</button>
+          </div>
         </div>
-        <div class="ev-meta">
-          <span class="ev-meta-item"><span class="ev-label">站点范围</span><strong>${escapeHTML(watcher.tenant || '全部站点')}</strong></span>
-          <span class="ev-meta-item"><span class="ev-label">当前 IP</span><span class="mono">${escapeHTML(watcher.last_ips || '-')}</span></span>
-          <span class="ev-meta-item"><span class="ev-label">当前存活</span><strong class="aws-alive-clock" data-started="${watcher.last_changed_ts || 0}">${fmtAliveSeconds(watcher.alive_seconds || 0)}</strong></span>
-          <span class="ev-meta-item"><span class="ev-label">最后检查</span><span class="mono">${watcher.last_checked_ts ? escapeHTML(fmtTime(new Date(watcher.last_checked_ts))) : '-'}</span></span>
-          ${watcher.last_error ? `<span class="ev-meta-item"><span class="ev-label">错误</span><span style="color:var(--red)">${escapeHTML(watcher.last_error)}</span></span>` : ''}
+        <div class="aws-watcher-metrics">
+          <span><small>范围</small><strong>${escapeHTML(watcher.tenant || '全部站点')}</strong></span>
+          <span><small>当前 IP</small><b class="mono">${escapeHTML(watcher.last_ips || '-')}</b></span>
+          <span><small>存活</small><strong class="aws-alive-clock" data-started="${watcher.last_changed_ts || 0}">${fmtAliveSeconds(watcher.alive_seconds || 0)}</strong></span>
+          <span><small>检查</small><b class="mono">${watcher.last_checked_ts ? escapeHTML(fmtTime(new Date(watcher.last_checked_ts))) : '-'}</b></span>
         </div>
-        <div class="sus-actions">
-          <button class="aws-watcher-toggle" data-id="${watcher.id}" data-enabled="${watcher.enabled ? '0' : '1'}">${watcher.enabled ? '暂停' : '继续追踪'}</button>
-          <button class="danger aws-watcher-remove" data-id="${watcher.id}">删除追踪</button>
-        </div>
+        ${watcher.last_error ? `<div class="aws-watcher-error">${escapeHTML(watcher.last_error)}</div>` : ''}
         ${historyHTML}`;
       watcherList.appendChild(card);
     }
@@ -1699,10 +1764,34 @@ async function loadAWSIPChanges() {
   if (!list) return;
   list.innerHTML = '';
   if (!rows || !rows.length) {
+    $('#awsChangeDNSFilter').innerHTML = '<option value="">全部入口 DNS</option>';
     list.innerHTML = '<div class="empty-state">暂无换 IP 记录</div>';
     return;
   }
-  for (const r of rows) {
+  const dnsFilter = $('#awsChangeDNSFilter');
+  const selectedDNS = dnsFilter.value;
+  const dnsStats = new Map();
+  for (const row of rows) {
+    const dns = row.dns_name || '手动记录';
+    const item = dnsStats.get(dns) || { count: 0, note: '' };
+    item.count++;
+    if (!item.note && row.note) item.note = row.note;
+    dnsStats.set(dns, item);
+  }
+  dnsFilter.innerHTML = '<option value="">全部入口 DNS</option>';
+  for (const [dns, item] of [...dnsStats.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const option = document.createElement('option');
+    option.value = dns;
+    option.textContent = `${item.note ? item.note + ' · ' : ''}${dns}（${item.count}）`;
+    dnsFilter.appendChild(option);
+  }
+  dnsFilter.value = dnsStats.has(selectedDNS) ? selectedDNS : '';
+  const visibleRows = dnsFilter.value ? rows.filter(row => (row.dns_name || '手动记录') === dnsFilter.value) : rows;
+  if (!visibleRows.length) {
+    list.innerHTML = '<div class="empty-state">该入口暂无换 IP 记录</div>';
+    return;
+  }
+  for (const r of visibleRows) {
     const card = document.createElement('div');
     card.className = 'ev-card';
     card.innerHTML = `
@@ -1762,17 +1851,17 @@ async function toggleAWSChangeDetail(card, id) {
     const rows = grouped[site];
     const uniqueTokens = new Set(rows.map(x => x.token)).size;
     html += `<div class="datatable" style="margin-top:12px"><div style="padding:8px 10px;font-weight:650">站点：${escapeHTML(site)} · ${uniqueTokens} 个订阅者 · ${rows.reduce((n,x)=>n+(x.pull_count||0),0)} 次拉取</div>`;
-    html += '<table><thead><tr><th>Token</th><th>订阅者 IP</th><th>UA</th><th>云厂商 / ASN</th><th style="text-align:right">次数</th><th>首次</th><th>最后</th></tr></thead><tbody>';
+    html += '<table class="aws-subscriber-table"><thead><tr><th>Token</th><th>订阅者 IP</th><th>UA</th><th>云厂商 / ASN</th><th style="text-align:right">次数</th><th>首次</th><th>最后</th></tr></thead><tbody>';
     for (const row of rows) {
       const network = [cloudProviderLabel(row.cloud_provider), row.asn, row.asn_org].filter(Boolean).join(' · ') || '-';
-      html += `<tr>
-        <td class="mono"><span>${escapeHTML(row.token)}</span><button type="button" class="ip-copy-btn copyable" data-copy="${escapeHTML(row.token)}">复制</button></td>
-        <td class="mono"><span>${escapeHTML(row.client_ip || '-')}</span>${row.client_ip ? `<button type="button" class="ip-copy-btn copyable" data-copy="${escapeHTML(row.client_ip)}">复制</button>` : ''}</td>
-        <td class="mono" style="max-width:260px;word-break:break-all">${escapeHTML(row.ua || '-')}</td>
-        <td>${escapeHTML(network)}</td>
-        <td class="mono" style="text-align:right"><strong>${row.pull_count || 0}</strong></td>
-        <td class="mono">${escapeHTML(fmtTime(new Date(row.first_seen_ts)))}</td>
-        <td class="mono">${escapeHTML(fmtTime(new Date(row.last_seen_ts)))}</td>
+      html += `<tr class="${row.ua_uncommon ? 'aws-subscriber-row-uncommon' : ''}">
+        <td class="mono aws-subscriber-token" data-label="Token"><div class="aws-copy-wrap"><span class="aws-cell-value" title="${escapeHTML(row.token)}">${escapeHTML(row.token)}</span><button type="button" class="ip-copy-btn copyable" data-copy="${escapeHTML(row.token)}">复制</button></div></td>
+        <td class="mono aws-subscriber-ip" data-label="订阅者 IP"><div class="aws-copy-wrap"><span class="aws-cell-value" title="${escapeHTML(row.client_ip || '-')}">${escapeHTML(row.client_ip || '-')}</span>${row.client_ip ? `<button type="button" class="ip-copy-btn copyable" data-copy="${escapeHTML(row.client_ip)}">复制</button>` : ''}</div></td>
+        <td class="mono aws-subscriber-ua" data-label="UA"><div class="aws-ellipsis-wrap" title="${escapeHTML(row.ua || '-')}">${row.ua_uncommon ? '<span class="pill orange">非常见</span>' : ''}<span class="aws-cell-value">${escapeHTML(row.ua || '(空 UA)')}</span></div></td>
+        <td class="aws-subscriber-network" data-label="云厂商 / ASN"><div class="aws-ellipsis-wrap" title="${escapeHTML(network)}"><span class="aws-cell-value">${escapeHTML(network)}</span></div></td>
+        <td class="mono aws-subscriber-count" data-label="次数"><strong>${row.pull_count || 0}</strong></td>
+        <td class="mono aws-subscriber-time" data-label="首次">${escapeHTML(fmtTime(new Date(row.first_seen_ts)))}</td>
+        <td class="mono aws-subscriber-time" data-label="最后">${escapeHTML(fmtTime(new Date(row.last_seen_ts)))}</td>
       </tr>`;
     }
     html += '</tbody></table></div>';
@@ -1804,6 +1893,7 @@ $('#awsWatcherAddBtn').addEventListener('click', async () => {
 });
 
 $('#awsChangeRefreshBtn').addEventListener('click', () => loadAWSIPChanges());
+$('#awsChangeDNSFilter').addEventListener('change', () => loadAWSIPChanges());
 
 $('#awsWatcherList').addEventListener('click', async (e) => {
   const toggleBtn = e.target.closest('.aws-watcher-toggle');

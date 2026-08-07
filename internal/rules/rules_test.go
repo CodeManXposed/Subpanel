@@ -50,3 +50,27 @@ func TestNormalizeDomainAcceptsNodePort(t *testing.T) {
 		}
 	}
 }
+
+func TestUAWhitelistCaseInsensitiveRegex(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "ua-rules.db"), time.Second, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	m := NewManager(st)
+	if err := m.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AddUAWhitelist(`^MyClient/\d+\.\d+ \(iOS\)$`, "internal"); err != nil {
+		t.Fatal(err)
+	}
+	if !m.UAWhitelisted("myclient/2.0 (ios)") {
+		t.Fatal("expected case-insensitive regex match")
+	}
+	if m.UAWhitelisted("prefix myclient/2.0 (ios)") || m.UAWhitelisted("Mozilla/5.0") {
+		t.Fatal("unrelated UA must not match")
+	}
+	if err := m.AddUAWhitelist(`[invalid`, "bad"); err == nil {
+		t.Fatal("invalid regex must be rejected")
+	}
+}

@@ -115,7 +115,7 @@ func IsOverseaCountry(iso, country string) bool {
 
 // IsBrowser 简单判断 — Accept 头含 text/html。
 // 真浏览器打开订阅链接时 Accept 带 text/html;但部分订阅客户端
-//(如 clash-verge)底层 HTTP 也发 text/html,故需配合 UA 白名单豁免,
+// (如 clash-verge)底层 HTTP 也发 text/html,故需配合 UA 白名单豁免,
 // 见 Evaluate 中 !IsKnownSubClient(ua) 的判断。
 func IsBrowser(acceptHeader string) bool {
 	return strings.Contains(strings.ToLower(acceptHeader), "text/html")
@@ -141,6 +141,18 @@ var SubClientUAKeywords = []string{
 	"hiddify",      // Hiddify
 	"streisand",    // Streisand
 	"surfboard",    // Surfboard
+	"verge",        // Clash Verge / Clash Verge Rev / mzjsq-verge
+	"flclash",      // FlClash（部分版本 UA 不带 clash）
+	"karing",       // Karing
+	"egern",        // Egern
+	"sagernet",     // SagerNet
+	"matsuri",      // Matsuri
+	"foxray",       // FoXray
+	"potatso",      // Potatso
+	"oneclick",     // OneClick
+	"openclash",    // OpenClash
+	"sub-store",    // Sub-Store
+	"substore",     // 部分版本不带连字符
 }
 
 // IsKnownSubClient 判断 UA 是否命中已知订阅客户端关键字。空 UA 不豁免。

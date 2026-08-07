@@ -79,10 +79,11 @@ type DetectorCfg struct {
 }
 
 type Rule struct {
-	Name string `yaml:"name"`
-	Desc string `yaml:"desc"`
-	When When   `yaml:"when"`
-	// Severity 已废弃:规则不再分等级,命中即投毒。yaml 里的 severity 字段会被忽略。
+	Name   string `yaml:"name"`
+	Desc   string `yaml:"desc"`
+	Action string `yaml:"action"` // fake(投毒，默认) | deny(HTTP 403)
+	When   When   `yaml:"when"`
+	// Severity 已废弃。yaml 里的 severity 字段会被忽略。
 }
 
 type When struct {
@@ -91,6 +92,7 @@ type When struct {
 	TokenDistinctIPs *Cond `yaml:"token_distinct_ips"`
 	IPDistinctTokens *Cond `yaml:"ip_distinct_tokens"`
 	FromCloudIP      bool  `yaml:"from_cloud_ip"` // 命中云厂商 IP 库
+	UncommonUA       bool  `yaml:"uncommon_ua"`   // UA 未命中常规订阅客户端库且不在动态白名单
 	// CloudTokenDistinctUAs: 同一 token 在当前云厂商 IP 上的不同 UA 数。
 	// 这是组合条件，只有“UA 达标”和“当前 IP 为云厂商”同时成立才触发。
 	CloudTokenDistinctUAs *Cond `yaml:"cloud_token_distinct_uas"`

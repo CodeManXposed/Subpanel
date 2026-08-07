@@ -87,6 +87,38 @@ func TestCloudASNEventFiltersAndSuspectStats(t *testing.T) {
 	}
 }
 
+func TestClientSuffixUAMatchFilters(t *testing.T) {
+	st := newTestStore(t)
+	now := time.Now()
+	for _, event := range []Event{
+		{TS: now, Tenant: "t1", TokenHash: "bad", Flag: "clash", UA: "Shadowrocket/2.2.63", Action: "pass"},
+		{TS: now, Tenant: "t1", TokenHash: "good", Flag: "clash", UA: "Stash/2.5.0", Action: "pass"},
+		{TS: now, Tenant: "t1", TokenHash: "unknown", Flag: "ss", UA: "curl/8", Action: "pass"},
+	} {
+		st.SubmitEvent(event)
+	}
+	time.Sleep(400 * time.Millisecond)
+
+	tests := []struct {
+		filter string
+		token  string
+		state  string
+	}{
+		{filter: "mismatch", token: "bad", state: "mismatch"},
+		{filter: "match", token: "good", state: "match"},
+		{filter: "unknown", token: "unknown", state: ""},
+	}
+	for _, test := range tests {
+		events, err := st.QueryEvents(context.Background(), EventFilter{Tenant: "t1", ClientMatch: test.filter})
+		if err != nil {
+			t.Fatalf("%s filter: %v", test.filter, err)
+		}
+		if len(events) != 1 || events[0].TokenHash != test.token || events[0].ClientMatch != test.state {
+			t.Fatalf("%s filter returned %+v", test.filter, events)
+		}
+	}
+}
+
 func TestAddAndListBans(t *testing.T) {
 	st := newTestStore(t)
 	exp := time.Now().Add(time.Hour)
