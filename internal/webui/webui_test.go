@@ -208,13 +208,59 @@ func TestDNSWatcherAPIStartsForAllSites(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("save DNS watcher note: %d %s", w.Code, w.Body.String())
 	}
+	body = strings.NewReader(fmt.Sprintf(`{"id":%d,"minutes":3}`, watcher.ID))
+	req = httptest.NewRequest(http.MethodPost, "/api/dns-watchers/lookback", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"minutes":3`) {
+		t.Fatalf("save DNS watcher lookback: %d %s", w.Code, w.Body.String())
+	}
 
 	req = httptest.NewRequest(http.MethodGet, "/api/dns-watchers", nil)
 	req.AddCookie(cookie)
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"dns_name":"localhost"`) || !strings.Contains(w.Body.String(), `"note":"测试入口"`) {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"dns_name":"localhost"`) || !strings.Contains(w.Body.String(), `"note":"测试入口"`) || !strings.Contains(w.Body.String(), `"lookback_minutes":3`) {
 		t.Fatalf("list DNS watchers: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAWSFailureHookRequiresSecretAndRecordsAnchor(t *testing.T) {
+	srv, st, _ := setup(t)
+	h := srv.Handler()
+	now := time.Now().UnixMilli()
+	_, err := st.AddDNSWatcher(context.Background(), store.DNSWatcher{
+		DNSName: "entry.example.com", Tenant: "", LookbackMinutes: 20, Enabled: true,
+		LastIPs: "1.2.3.4", LastCheckedTS: now, LastChangedTS: now - 60_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetMeta("report_secret", "hook-secret"); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"dns_name":"entry.example.com","tenant":"","ip":"1.2.3.4"}`
+	req := httptest.NewRequest(http.MethodPost, "/hook/aws-failure", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("missing secret: %d %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/hook/aws-failure", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Report-Key", "hook-secret")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "failure anchor recorded") {
+		t.Fatalf("record failure: %d %s", w.Code, w.Body.String())
+	}
+	watchers, err := st.ListDNSWatchers(context.Background(), false)
+	if err != nil || len(watchers) != 1 || watchers[0].PendingFailureTS == 0 || watchers[0].PendingFailureIP != "1.2.3.4" {
+		t.Fatalf("anchor not persisted: watchers=%+v err=%v", watchers, err)
 	}
 }
 
@@ -395,7 +441,99 @@ func TestBanAddRemoveViaAPI(t *testing.T) {
 	}
 }
 
-// TestHashTokenAPI 已删除:/api/hash-token 路由随 token 黑名单一起废弃。
+func TestTokenBanActionsViaAPI(t *testing.T) {
+	srv, _, bans := setup(t)
+	h := srv.Handler()
+	cookie := login(t, h)
+
+	post := func(path, payload string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(cookie)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w
+	}
+	w := post("/api/bans/add", `{"kind":"token","target":"tok-a, tok-b\ntok-a","action":"deny","reason":"leaked","ttl":"24h"}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"added":2`) || !strings.Contains(w.Body.String(), `"action":"deny"`) {
+		t.Fatalf("token add: %d %s", w.Code, w.Body.String())
+	}
+	if hit, action, reason := bans.CheckToken("tok-a"); !hit || action != "deny" || reason != "leaked" {
+		t.Fatalf("token check=(%v,%q,%q)", hit, action, reason)
+	}
+
+	w = post("/api/bans/add", `{"kind":"token","target":"tok-a","action":"fake","reason":"changed"}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"updated":1`) {
+		t.Fatalf("token update: %d %s", w.Code, w.Body.String())
+	}
+	if hit, action, _ := bans.CheckToken("tok-a"); !hit || action != "fake" {
+		t.Fatalf("updated token check=(%v,%q)", hit, action)
+	}
+
+	w = post("/api/bans/remove", `{"kind":"token","target":"tok-a"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("token remove: %d %s", w.Code, w.Body.String())
+	}
+	if hit, _, _ := bans.CheckToken("tok-a"); hit {
+		t.Error("token should be removed")
+	}
+
+	w = post("/api/bans/add", `{"kind":"token","target":"tok-c","action":"drop"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid action: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestTokenBlockWorkflowViaAPI(t *testing.T) {
+	srv, st, bans := setup(t)
+	h := srv.Handler()
+	cookie := login(t, h)
+
+	post := func(path, payload string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(cookie)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w
+	}
+
+	w := post("/api/token-blocks/add", `{"token":"suspect-token","tenant":"sled","action":"deny","reason":"confirmed leak","ttl":"24h"}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"action":"deny"`) {
+		t.Fatalf("token block add: %d %s", w.Code, w.Body.String())
+	}
+	if hit, action, reason := bans.CheckToken("suspect-token"); !hit || action != "deny" || reason != "confirmed leak" {
+		t.Fatalf("runtime token block=(%v,%q,%q)", hit, action, reason)
+	}
+	resolved, err := st.ListResolvedTokens(context.Background(), "sled")
+	if err != nil || len(resolved) != 1 || resolved[0].Token != "suspect-token" {
+		t.Fatalf("resolved after block: rows=%+v err=%v", resolved, err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/token-blocks?tenant=sled", nil)
+	req.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"token":"suspect-token"`) || !strings.Contains(w.Body.String(), `"tenant":"sled"`) {
+		t.Fatalf("token block list: %d %s", w.Code, w.Body.String())
+	}
+
+	w = post("/api/token-blocks/remove", `{"token":"suspect-token"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("token block remove: %d %s", w.Code, w.Body.String())
+	}
+	if hit, _, _ := bans.CheckToken("suspect-token"); hit {
+		t.Error("runtime token block remained after remove")
+	}
+	resolved, err = st.ListResolvedTokens(context.Background(), "sled")
+	if err != nil || len(resolved) != 0 {
+		t.Fatalf("resolved remained after unblock: rows=%+v err=%v", resolved, err)
+	}
+}
+
+// Token 目前以原文反查用户，管理面直接录入，无需单独的 hash-token API。
 
 func TestLogoutInvalidatesSession(t *testing.T) {
 	srv, _, _ := setup(t)

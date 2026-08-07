@@ -50,6 +50,7 @@ const TAG_PREFIX_CN = {
   // 白名单 / 路径
   'ip_whitelist':   '白名单放行',
   'banlist_ip':     'IP 黑名单',
+  'banlist_token':  'Token 黑名单',
   'path_not_match': '路径不匹配',
   // 上游
   'upstream_bad':   '上游异常',
@@ -144,7 +145,7 @@ async function apiPost(path, body) {
 const TAB_TITLES = {
   'dashboard': '概览',
   'events': '请求日志',
-  'resolved': '已处理 Token',
+  'resolved': '已拉黑 Token',
   'ip-bans': '黑名单',
   'ip-whitelist': 'IP 白名单',
   'cloud-ip': 'GeoIP 库',
@@ -299,9 +300,9 @@ function renderEventCard(e) {
   const uncommonUABit = e.UAUncommon
     ? '<span class="pill orange" title="未命中常规订阅客户端 UA 库，仅作风险提示">非常见 UA</span>'
     : '';
-  // 已处理按钮:仅当有 token 时显示。data-tenant 用事件自己的 tenant(不是当前过滤)。
+  // 拉黑 Token:仅当有 token 时显示。data-tenant 用事件自己的 tenant(不是当前过滤)。
   const resolveBtn = tokenFull
-    ? `<button class="ev-resolve" data-token="${escapeHTML(tokenFull)}" data-tenant="${escapeHTML(e.Tenant || '')}" title="归档当前记录；后续再次触发会重新出现">已处理</button>`
+    ? `<button class="danger ev-token-block" data-token="${escapeHTML(tokenFull)}" data-tenant="${escapeHTML(e.Tenant || '')}" title="将此 Token 加入黑名单">拉黑 Token</button>`
     : '';
   // 重置滑窗按钮:把此 token 在风控滑窗里的累计计数清掉,把它"拉出来"。
   // 不是免疫——下次再命中规则照样投毒。仅对 fake / fake_failed 事件显示。
@@ -314,7 +315,7 @@ function renderEventCard(e) {
       <span class="ev-time mono">${escapeHTML(fmtTime(e.TS))}</span>
       <span class="ev-status mono">HTTP ${e.Status || '—'}</span>
       <span class="ev-spacer"></span>
-      ${e.ReTriggered ? '<span class="pill red">⚠ 已处理后再次触发</span>' : ''}
+      ${e.ReTriggered ? '<span class="pill red">⚠ 历史处理后再次触发</span>' : ''}
       ${e.Focused ? '<span class="pill red">⚠ 重点关注对象行为</span>' : ''}
       ${cloudBit}
       ${clientMismatchBit}
@@ -462,7 +463,7 @@ $('#evPurge').addEventListener('click', async () => {
   }
 });
 
-// 事件卡片"已处理"按钮:事件委托。
+// 事件卡片 Token 拉黑 / 重置窗口：事件委托。
 $('#evList').addEventListener('click', async (e) => {
   const resetBtn = e.target.closest('.ev-reset');
   if (resetBtn) {
@@ -477,39 +478,38 @@ $('#evList').addEventListener('click', async (e) => {
     }
     return;
   }
-  const btn = e.target.closest('.ev-resolve');
+  const btn = e.target.closest('.ev-token-block');
   if (!btn) return;
   const token = btn.dataset.token || '';
   const tenant = btn.dataset.tenant || '';
   if (!token) return;
-  const r = await apiPost('/api/resolved/add', { token, tenant, note: '' });
-  if (r && r.ok) {
-    loadEvents(false);
-  } else {
-    alert('标记失败:' + (r && r.error ? r.error : '未知错误'));
-  }
+  openTokenBlockModal(token, tenant, 'events');
 });
 
-// ---- 已处理 Token 列表 ----
+// ---- 已拉黑 Token 列表 ----
 async function loadResolved() {
   const q = new URLSearchParams();
   if (state.tenant) q.set('tenant', state.tenant);
-  const rows = await api('/api/resolved' + (q.toString() ? '?' + q : ''));
+  const rows = await api('/api/token-blocks' + (q.toString() ? '?' + q : ''));
   const tbody = $('#resolvedTbody');
   if (!tbody) return;
   tbody.innerHTML = '';
   if (!rows || !rows.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">无已处理 token</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">暂无拉黑 Token</td></tr>';
     return;
   }
   for (const r of rows) {
     const tr = document.createElement('tr');
+    const action = r.action === 'deny' ? 'deny' : 'fake';
+    const exp = r.expires_ts ? fmtTime(new Date(r.expires_ts)) : '<span style="color:var(--danger)">永久</span>';
     tr.innerHTML = `
       <td class="mono copyable" data-copy="${escapeHTML(r.token)}" title="点击复制">${escapeHTML(r.token)}</td>
       <td>${escapeHTML(r.tenant || '-')}</td>
-      <td>${escapeHTML(r.note || '-')}</td>
-      <td class="mono">${escapeHTML(fmtTime(new Date(r.resolved_ts)))}</td>
-      <td><button class="danger res-restore" data-token="${escapeHTML(r.token)}">恢复</button></td>
+      <td><span class="pill ${action}">${action === 'deny' ? '全拒绝 · 403' : '全投毒 · 200'}</span></td>
+      <td>${escapeHTML(r.reason || '-')}</td>
+      <td class="mono">${escapeHTML(fmtTime(new Date(r.created_ts)))}</td>
+      <td class="mono">${exp}</td>
+      <td><button class="danger res-restore" data-token="${escapeHTML(r.token)}">解除拉黑</button></td>
     `;
     tbody.appendChild(tr);
   }
@@ -518,10 +518,58 @@ async function loadResolved() {
 $('#resolvedTbody')?.addEventListener('click', async (e) => {
   const btn = e.target.closest('.res-restore');
   if (!btn) return;
-  if (!confirm('恢复后此 token 将重新出现在请求日志里,确定?')) return;
-  const r = await apiPost('/api/resolved/remove', { token: btn.dataset.token });
+  if (!confirm('解除后此 Token 将恢复到正常检测流程，并重新出现在嫌疑/请求列表，确定？')) return;
+  const r = await apiPost('/api/token-blocks/remove', { token: btn.dataset.token });
   if (r && r.ok) loadResolved();
-  else alert('恢复失败:' + (r && r.error ? r.error : '未知错误'));
+  else alert('解除失败:' + (r && r.error ? r.error : '未知错误'));
+});
+
+let tokenBlockContext = null;
+
+function openTokenBlockModal(token, tenant, source) {
+  tokenBlockContext = { token, tenant: tenant || '', source: source || '' };
+  $('#tokenBlockValue').textContent = token;
+  $('#tokenBlockCopy').dataset.copy = token;
+  $('#tokenBlockAction').value = 'fake';
+  $('#tokenBlockReason').value = '';
+  $('#tokenBlockTTL').value = '';
+  $('#tokenBlockModal').style.display = 'flex';
+  bindCopyHandlers($('#tokenBlockModal'));
+}
+
+function closeTokenBlockModal() {
+  $('#tokenBlockModal').style.display = 'none';
+  tokenBlockContext = null;
+}
+
+$('#tokenBlockClose')?.addEventListener('click', closeTokenBlockModal);
+$('#tokenBlockCancel')?.addEventListener('click', closeTokenBlockModal);
+$('#tokenBlockModal')?.addEventListener('click', e => {
+  if (e.target.id === 'tokenBlockModal') closeTokenBlockModal();
+});
+$('#tokenBlockConfirm')?.addEventListener('click', async e => {
+  if (!tokenBlockContext) return;
+  const btn = e.currentTarget;
+  btn.classList.add('loading');
+  const action = $('#tokenBlockAction').value === 'deny' ? 'deny' : 'fake';
+  const r = await apiPost('/api/token-blocks/add', {
+    token: tokenBlockContext.token,
+    tenant: tokenBlockContext.tenant,
+    action,
+    reason: $('#tokenBlockReason').value.trim(),
+    ttl: $('#tokenBlockTTL').value.trim(),
+  });
+  btn.classList.remove('loading');
+  if (!r || !r.ok) {
+    toast((r && r.error) || '拉黑失败', 'error');
+    return;
+  }
+  const source = tokenBlockContext.source;
+  closeTokenBlockModal();
+  toast(action === 'deny' ? 'Token 已拉黑：全拒绝' : 'Token 已拉黑：全投毒', 'success');
+  if (source === 'events') loadEvents(false);
+  if (source === 'suspects') loadSuspects();
+  if (document.querySelector('.navlink.active')?.dataset.tab === 'resolved') loadResolved();
 });
 
 // ---- 请求日志页顶部:异常 IP Top 20(复用 /api/incidents/agg_ip) ----
@@ -572,17 +620,32 @@ async function loadEvTopIP() {
   });
 }
 
-// ---- bans (仅 IP,token 黑名单已废弃) ----
+// ---- IP / Token 黑名单 ----
 async function loadBans() {
   await loadBlacklistCfg();
   const bs = await api('/api/bans');
   if (!bs) return;
   const ipTbody = $('#ipBanTbody'); ipTbody.innerHTML = '';
-  let ipCount = 0;
+  const tokenTbody = $('#tokenBanTbody'); tokenTbody.innerHTML = '';
+  let ipCount = 0, tokenCount = 0;
   for (const b of bs || []) {
-    if (b.Kind !== 'ip') continue;  // 兼容老库残留的 token 行,直接跳过
     const exp = b.ExpiresTS ? fmtTime(b.ExpiresTS) : '<span style="color:var(--danger)">永久</span>';
     const tr = document.createElement('tr');
+    if (b.Kind === 'token') {
+      const action = b.Action === 'deny' ? 'deny' : 'fake';
+      tr.innerHTML = `
+        <td class="mono" data-label="Token"><div class="token-ban-value-wrap"><span class="token-ban-value" title="${escapeHTML(b.Target)}">${escapeHTML(b.Target)}</span><button type="button" class="ip-copy-btn copyable" data-copy="${escapeHTML(b.Target)}">复制</button></div></td>
+        <td data-label="动作"><span class="pill ${action}">${action === 'deny' ? '全拒绝 · 403' : '全投毒 · 200'}</span></td>
+        <td data-label="原因">${escapeHTML(b.Reason || '')}</td>
+        <td class="mono" data-label="创建" style="white-space:nowrap">${escapeHTML(fmtTime(b.CreatedTS))}</td>
+        <td class="mono" data-label="过期" style="white-space:nowrap">${exp}</td>
+        <td data-label="来源"><span class="pill ${b.CreatedBy === 'auto' ? 'red' : ''}">${b.CreatedBy === 'auto' ? '自动' : (b.CreatedBy === 'manual' ? '手动' : escapeHTML(b.CreatedBy))}</span></td>
+        <td data-label="操作"><button class="danger" data-kind="token" data-target="${escapeHTML(b.Target)}">解除</button></td>
+      `;
+      tokenTbody.appendChild(tr); tokenCount++;
+      continue;
+    }
+    if (b.Kind !== 'ip') continue;
     tr.innerHTML = `
       <td class="mono" title="${escapeHTML(b.Target)}">${escapeHTML(b.Target)}</td>
       <td>${escapeHTML(b.Reason || '')}</td>
@@ -595,11 +658,13 @@ async function loadBans() {
     ipTbody.appendChild(tr); ipCount++;
   }
   if (!ipCount) ipTbody.innerHTML = '<tr><td colspan="7" class="empty-state">无封禁 IP</td></tr>';
-  $$('#ipBanTbody button.danger').forEach(btn => {
+  if (!tokenCount) tokenTbody.innerHTML = '<tr><td colspan="7" class="empty-state">暂无拉黑 Token</td></tr>';
+  bindCopyHandlers(tokenTbody);
+  $$('#ipBanTbody button.danger, #tokenBanTbody button.danger').forEach(btn => {
     btn.addEventListener('click', async () => {
-      if (!confirm('解封 ' + btn.dataset.target + ' ?')) return;
+      if (!confirm('解除 ' + (btn.dataset.kind === 'token' ? 'Token ' : 'IP ') + btn.dataset.target + ' ?')) return;
       const r = await apiPost('/api/bans/remove', { kind: btn.dataset.kind, target: btn.dataset.target });
-      if (r && r.ok) { toast('已解封', 'success'); loadBans(); }
+      if (r && r.ok) { toast('已解除', 'success'); loadBans(); }
       else toast((r && r.error) || '失败', 'error');
     });
   });
@@ -620,7 +685,25 @@ $('#banIPAddBtn').addEventListener('click', async () => {
   } else toast((r && r.error) || '失败', 'error');
 });
 
-// token 黑名单已废弃(v2board 重置 token 后 hash 失效),不再注册按钮。
+$('#banTokenAddBtn').addEventListener('click', async () => {
+  const target = $('#banTokenTarget').value.trim();
+  if (!target) return toast('Token 不能为空', 'error');
+  const action = $('#banTokenAction').value === 'deny' ? 'deny' : 'fake';
+  const r = await apiPost('/api/bans/add', {
+    kind: 'token', target, action,
+    reason: $('#banTokenReason').value.trim(),
+    ttl: $('#banTokenTTL').value.trim(),
+  });
+  if (r && r.ok) {
+    $('#banTokenTarget').value = '';
+    $('#banTokenReason').value = '';
+    $('#banTokenTTL').value = '';
+    const updated = Number(r.updated || 0);
+    const actionText = action === 'deny' ? '全拒绝' : '全投毒';
+    toast(`已${actionText}拉黑 ${r.added || 0} 个${updated ? `，更新 ${updated} 个` : ''}`, 'success');
+    loadBans();
+  } else toast((r && r.error) || '失败', 'error');
+});
 
 // ---- 全局黑名单配置(海外/云/ISP/浏览器)----
 async function loadBlacklistCfg() {
@@ -1547,21 +1630,23 @@ async function loadSuspects() {
 async function loadSuspectResolved() {
   const q = new URLSearchParams();
   if (state.tenant) q.set('tenant', state.tenant);
-  const rows = await api('/api/resolved' + (q.toString() ? '?' + q : ''));
+  const rows = await api('/api/token-blocks' + (q.toString() ? '?' + q : ''));
   const tbody = $('#suspectResolvedTbody');
   if (!tbody) return;
   tbody.innerHTML = '';
   if (!rows || !rows.length) {
-    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">暂无已处理用户</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">暂无拉黑 Token</td></tr>';
     return;
   }
   for (const r of rows) {
     const tr = document.createElement('tr');
+    const action = r.action === 'deny' ? 'deny' : 'fake';
     tr.innerHTML = `
       <td class="mono copyable" data-copy="${escapeHTML(r.token)}" title="点击复制">${escapeHTML(r.token)}</td>
       <td>${escapeHTML(r.tenant || '-')}</td>
-      <td class="mono">${escapeHTML(fmtTime(new Date(r.resolved_ts)))}</td>
-      <td><button class="danger suspect-res-restore" data-token="${escapeHTML(r.token)}">恢复</button></td>
+      <td><span class="pill ${action}">${action === 'deny' ? '全拒绝 · 403' : '全投毒 · 200'}</span></td>
+      <td class="mono">${escapeHTML(fmtTime(new Date(r.created_ts)))}</td>
+      <td><button class="danger suspect-res-restore" data-token="${escapeHTML(r.token)}">解除拉黑</button></td>
     `;
     tbody.appendChild(tr);
   }
@@ -1667,7 +1752,7 @@ function renderSuspectCard(r) {
       </span>
       <span class="ev-tenant mono">${escapeHTML(r.tenant)}</span>
       <span class="ev-spacer"></span>
-      ${r.retriggered ? '<span class="pill red">⚠ 已处理后再次触发</span>' : ''}
+      ${r.retriggered ? '<span class="pill red">⚠ 历史处理后再次触发</span>' : ''}
       ${r.cloud_pull_count > 0 ? `<span class="pill red" title="云厂商网络拉取次数">云拉取 ${r.cloud_pull_count}</span>` : ''}
       <span class="pill ${usageCls}">${usageTxt}</span>
     </div>
@@ -1690,14 +1775,14 @@ function renderSuspectCard(r) {
     ${cloudProviders.length ? `<div class="ev-row-full"><span class="ev-label">云厂商</span><span>${cloudProviders.map(x => `<span class="pill red">${escapeHTML(x)}</span>`).join(' ')}</span></div>` : ''}
     ${cloudASNs.length ? `<div class="ev-row-full"><span class="ev-label">云 ASN</span><span class="mono">${cloudASNs.map(escapeHTML).join('<br>')}</span></div>` : ''}
     <div class="sus-actions suspect-card-actions">
-      ${tokenFull ? `<button class="sus-associate" data-token="${escapeHTML(tokenFull)}" data-tenant="${escapeHTML(r.tenant || '')}">关联Token</button><button class="sus-resolve" data-token="${escapeHTML(tokenFull)}" data-tenant="${escapeHTML(r.tenant || '')}">已处理</button><button class="primary sus-focus" data-token="${escapeHTML(tokenFull)}" data-tenant="${escapeHTML(r.tenant || '')}">重点关注</button>` : ''}
+      ${tokenFull ? `<button class="sus-associate" data-token="${escapeHTML(tokenFull)}" data-tenant="${escapeHTML(r.tenant || '')}">关联Token</button><button class="danger sus-token-block" data-token="${escapeHTML(tokenFull)}" data-tenant="${escapeHTML(r.tenant || '')}">拉黑Token</button><button class="primary sus-focus" data-token="${escapeHTML(tokenFull)}" data-tenant="${escapeHTML(r.tenant || '')}">重点关注</button>` : ''}
     </div>
     <div class="suspect-detail" style="display:none"></div>
   `;
   card.style.cursor = 'pointer';
   card.title = '点击展开详情';
   card.addEventListener('click', (e) => {
-    if (e.target.closest('.copyable') || e.target.closest('.sus-associate') || e.target.closest('.sus-resolve') || e.target.closest('.sus-focus')) return;
+    if (e.target.closest('.copyable') || e.target.closest('.sus-associate') || e.target.closest('.sus-token-block') || e.target.closest('.sus-focus')) return;
     toggleSuspectDetail(card, r);
   });
   return card;
@@ -1781,7 +1866,7 @@ $('#suspectCloud').addEventListener('change', () => renderSuspects());
 $('#suspectProvider').addEventListener('change', () => renderSuspects());
 $('#suspectASN').addEventListener('input', () => renderSuspects());
 
-// 嫌疑卡片"已处理"按钮:事件委托
+// 嫌疑卡片 Token 拉黑 / 重点关注：事件委托
 $('#suspectsList').addEventListener('click', async (e) => {
 	const associateBtn = e.target.closest('.sus-associate');
 	if (associateBtn) {
@@ -1801,15 +1886,19 @@ $('#suspectsList').addEventListener('click', async (e) => {
 		}
 		return;
 	}
-  const resolveBtn = e.target.closest('.sus-resolve');
+  const blockBtn = e.target.closest('.sus-token-block');
   const focusBtn = e.target.closest('.sus-focus');
-  if (!resolveBtn && !focusBtn) return;
+  if (!blockBtn && !focusBtn) return;
   e.stopPropagation();
-  const btn = resolveBtn || focusBtn;
+  if (blockBtn) {
+    openTokenBlockModal(blockBtn.dataset.token, blockBtn.dataset.tenant || '', 'suspects');
+    return;
+  }
+  const btn = focusBtn;
   const body = { token: btn.dataset.token, tenant: btn.dataset.tenant || '', note: '' };
-  const r = await apiPost(resolveBtn ? '/api/resolved/add' : '/api/focus/add', body);
+  const r = await apiPost('/api/focus/add', body);
   if (r && r.ok) {
-    toast(resolveBtn ? '已处理' : '已加入重点关注', 'success');
+    toast('已加入重点关注', 'success');
     loadSuspects();
   }
 });
@@ -1825,10 +1914,10 @@ $('#suspectFocusTbody').addEventListener('click', async (e) => {
 $('#suspectResolvedTbody').addEventListener('click', async (e) => {
   const btn = e.target.closest('.suspect-res-restore');
   if (!btn) return;
-  if (!confirm('恢复后此 token 将重新出现在请求日志里，确定？')) return;
-  const r = await apiPost('/api/resolved/remove', { token: btn.dataset.token });
+  if (!confirm('解除后此 Token 将恢复到正常检测流程，并重新出现在嫌疑列表，确定？')) return;
+  const r = await apiPost('/api/token-blocks/remove', { token: btn.dataset.token });
   if (r && r.ok) loadSuspects();
-  else alert('恢复失败:' + (r && r.error ? r.error : '未知错误'));
+  else alert('解除失败:' + (r && r.error ? r.error : '未知错误'));
 });
 
 // ════════════════════════════════════════════════════
@@ -1844,6 +1933,14 @@ function fmtAliveSeconds(total) {
   if (hours) return `${hours}小时 ${minutes}分 ${seconds}秒`;
   if (minutes) return `${minutes}分 ${seconds}秒`;
   return `${seconds}秒`;
+}
+
+function fmtBeforeFailure(seconds) {
+  seconds = Math.max(0, Math.floor(Number(seconds) || 0));
+  if (seconds < 60) return `${seconds}秒前`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return `${minutes}分${rest ? ` ${rest}秒` : ''}前`;
 }
 
 function refreshAWSAliveClocks() {
@@ -1890,7 +1987,8 @@ async function loadAWSIPChanges() {
             <input class="aws-watcher-note" data-id="${watcher.id}" maxlength="200" value="${escapeHTML(watcher.note || '')}" placeholder="填写备注" title="回车或移开光标自动保存">
           </div>
           <div class="aws-watcher-actions">
-            <span class="pill tag">${watcher.lookback_minutes} 分钟</span>
+            ${watcher.pending_failure_ts ? '<span class="pill orange">已收到 TCP 失联信号</span>' : ''}
+            <label class="aws-lookback-inline" title="手动设置下次换 IP 的回溯范围"><input class="aws-watcher-lookback" data-id="${watcher.id}" type="number" min="1" max="120" step="1" value="${watcher.lookback_minutes}" inputmode="numeric"><span>分钟</span></label>
             <button class="aws-watcher-toggle" data-id="${watcher.id}" data-enabled="${watcher.enabled ? '0' : '1'}">${watcher.enabled ? '暂停' : '继续'}</button>
             <button class="danger aws-watcher-remove" data-id="${watcher.id}">删除</button>
           </div>
@@ -1900,6 +1998,7 @@ async function loadAWSIPChanges() {
           <span><small>当前 IP</small><b class="mono">${escapeHTML(watcher.last_ips || '-')}</b></span>
           <span><small>存活</small><strong class="aws-alive-clock" data-started="${watcher.last_changed_ts || 0}">${fmtAliveSeconds(watcher.alive_seconds || 0)}</strong></span>
           <span><small>检查</small><b class="mono">${watcher.last_checked_ts ? escapeHTML(fmtTime(new Date(watcher.last_checked_ts))) : '-'}</b></span>
+          ${watcher.pending_failure_ts ? `<span><small>首次失联</small><strong class="aws-failure-time">${escapeHTML(fmtTime(new Date(watcher.pending_failure_ts)))}</strong></span>` : ''}
         </div>
         ${watcher.last_error ? `<div class="aws-watcher-error">${escapeHTML(watcher.last_error)}</div>` : ''}
         ${historyHTML}`;
@@ -1949,7 +2048,8 @@ async function loadAWSIPChanges() {
         ${r.note ? `<span class="pill tag">${escapeHTML(r.note)}</span>` : ''}
         <span class="mono">${escapeHTML(fmtTime(new Date(r.occurred_ts)))}</span>
         <span class="ev-spacer"></span>
-        <span class="pill tag">${r.lookback_minutes} 分钟快照</span>
+        <span class="pill ${r.failure_ts ? 'orange' : 'tag'}">${r.failure_ts ? '精准失联锚点' : '仅 DNS 锚点'}</span>
+        <span class="pill tag">${r.lookback_minutes} 分钟取证</span>
       </div>
       <div class="ev-row-full">
         <span class="ev-label">入口</span>
@@ -1958,6 +2058,7 @@ async function loadAWSIPChanges() {
         <span class="mono">${escapeHTML(r.new_ip || '-')}</span>
       </div>
       <div class="ev-meta">
+        ${r.failure_ts ? `<span class="ev-meta-item"><span class="ev-label">TCP 首次失联</span><strong class="mono">${escapeHTML(fmtTime(new Date(r.failure_ts)))}</strong></span><span class="ev-meta-item"><span class="ev-label">DNS 变更延迟</span><strong>${escapeHTML(fmtAliveSeconds((r.occurred_ts-r.failure_ts)/1000))}</strong></span>` : ''}
         <span class="ev-meta-item"><span class="ev-label">范围</span><strong>${escapeHTML(r.tenant || '全部站点')}</strong></span>
         <span class="ev-meta-item"><span class="ev-label">站点</span><strong>${r.site_count || 0}</strong></span>
         <span class="ev-meta-item"><span class="ev-label">订阅者</span><strong>${r.subscriber_count || 0}</strong></span>
@@ -1994,19 +2095,27 @@ async function toggleAWSChangeDetail(card, id) {
     box.dataset.loaded = '1';
     return;
   }
-  let html = '';
+  const preciseAnchor = Boolean(data.change && data.change.failure_ts);
+  let html = `<div class="aws-snapshot-toolbar"><span>${preciseAnchor ? '已按 TCP 首次失联时间排序，越接近失联越可疑。' : '本条没有 TCP 失联上报，只能按 DNS 变更时间回溯。'}</span><select class="aws-proximity-filter"><option value="0">显示全部</option><option value="60">只看 1 分钟内</option><option value="180">只看 3 分钟内</option><option value="300">只看 5 分钟内</option></select></div>`;
   for (const site of sites) {
     const rows = grouped[site];
     const uniqueTokens = new Set(rows.map(x => x.token)).size;
     html += `<div class="datatable" style="margin-top:12px"><div style="padding:8px 10px;font-weight:650">站点：${escapeHTML(site)} · ${uniqueTokens} 个订阅者 · ${rows.reduce((n,x)=>n+(x.pull_count||0),0)} 次拉取</div>`;
-    html += '<table class="aws-subscriber-table"><thead><tr><th>Token</th><th>订阅者 IP</th><th>UA</th><th>云厂商 / ASN</th><th style="text-align:right">次数</th><th>首次</th><th>最后</th></tr></thead><tbody>';
+    const proximityLabel = preciseAnchor ? '距失联' : '距 DNS 变化';
+    html += `<table class="aws-subscriber-table"><thead><tr><th>Token</th><th>订阅者 IP</th><th>UA</th><th>云厂商 / ASN</th><th>${proximityLabel}</th><th style="text-align:right">次数</th><th>首次</th><th>最后</th></tr></thead><tbody>`;
     for (const row of rows) {
       const network = [cloudProviderLabel(row.cloud_provider), row.asn, row.asn_org].filter(Boolean).join(' · ') || '-';
-      html += `<tr class="${row.ua_uncommon ? 'aws-subscriber-row-uncommon' : ''}">
+      const proximityClass = preciseAnchor && row.seconds_before_failure <= 60 ? 'aws-subscriber-row-hot' : (preciseAnchor && row.seconds_before_failure <= 300 ? 'aws-subscriber-row-warm' : '');
+      const repeatedClass = row.repeated_before_changes ? 'aws-subscriber-row-repeat' : '';
+      const repeatedLabel = row.repeated_before_changes
+        ? `<span class="pill red" title="同一入口、同一站点最近 ${row.recent_change_total} 次换 IP 中出现 ${row.recent_change_hits} 次">${row.recent_change_hits === row.recent_change_total ? `连续 ${row.recent_change_hits} 次` : `换IP ${row.recent_change_hits}/${row.recent_change_total}`}</span>`
+        : '';
+      html += `<tr data-offset="${Number(row.seconds_before_failure) || 0}" class="${row.ua_uncommon ? 'aws-subscriber-row-uncommon' : ''} ${proximityClass} ${repeatedClass}">
         <td class="mono aws-subscriber-token" data-label="Token"><div class="aws-copy-wrap"><span class="aws-cell-value" title="${escapeHTML(row.token)}">${escapeHTML(row.token)}</span><button type="button" class="ip-copy-btn copyable" data-copy="${escapeHTML(row.token)}">复制</button></div></td>
         <td class="mono aws-subscriber-ip" data-label="订阅者 IP"><div class="aws-copy-wrap"><span class="aws-cell-value" title="${escapeHTML(row.client_ip || '-')}">${escapeHTML(row.client_ip || '-')}</span>${row.client_ip ? `<button type="button" class="ip-copy-btn copyable" data-copy="${escapeHTML(row.client_ip)}">复制</button>` : ''}</div></td>
         <td class="mono aws-subscriber-ua" data-label="UA"><div class="aws-ellipsis-wrap" title="${escapeHTML(row.ua || '-')}">${row.ua_uncommon ? '<span class="pill orange">非常见</span>' : ''}<span class="aws-cell-value">${escapeHTML(row.ua || '(空 UA)')}</span></div></td>
         <td class="aws-subscriber-network" data-label="云厂商 / ASN"><div class="aws-ellipsis-wrap" title="${escapeHTML(network)}"><span class="aws-cell-value">${escapeHTML(network)}</span></div></td>
+        <td class="mono aws-subscriber-proximity" data-label="${proximityLabel}">${repeatedLabel}${preciseAnchor && row.seconds_before_failure <= 60 ? '<span class="pill red">高度相关</span>' : ''}<strong>${escapeHTML(fmtBeforeFailure(row.seconds_before_failure))}</strong></td>
         <td class="mono aws-subscriber-count" data-label="次数"><strong>${row.pull_count || 0}</strong></td>
         <td class="mono aws-subscriber-time" data-label="首次">${escapeHTML(fmtTime(new Date(row.first_seen_ts)))}</td>
         <td class="mono aws-subscriber-time" data-label="最后">${escapeHTML(fmtTime(new Date(row.last_seen_ts)))}</td>
@@ -2017,6 +2126,13 @@ async function toggleAWSChangeDetail(card, id) {
   box.innerHTML = html;
   box.dataset.loaded = '1';
   bindCopyHandlers(box);
+  const proximityFilter = box.querySelector('.aws-proximity-filter');
+  if (proximityFilter) proximityFilter.addEventListener('change', () => {
+    const limit = Number(proximityFilter.value || 0);
+    box.querySelectorAll('tbody tr[data-offset]').forEach(row => {
+      row.style.display = !limit || Number(row.dataset.offset) <= limit ? '' : 'none';
+    });
+  });
 }
 
 $('#awsWatcherAddBtn').addEventListener('click', async () => {
@@ -2042,6 +2158,27 @@ $('#awsWatcherAddBtn').addEventListener('click', async () => {
 
 $('#awsChangeRefreshBtn').addEventListener('click', () => loadAWSIPChanges());
 $('#awsChangeDNSFilter').addEventListener('change', () => loadAWSIPChanges());
+
+$('#awsWatcherList').addEventListener('change', async e => {
+  const input = e.target.closest('.aws-watcher-lookback');
+  if (!input) return;
+  const minutes = Math.floor(Number(input.value));
+  if (!Number.isFinite(minutes) || minutes < 1 || minutes > 120) {
+    alert('回溯时间必须是 1–120 分钟的整数');
+    loadAWSIPChanges();
+    return;
+  }
+  input.disabled = true;
+  const r = await apiPost('/api/dns-watchers/lookback', { id: Number(input.dataset.id), minutes });
+  input.disabled = false;
+  if (!r || r.error) {
+    alert('保存回溯时间失败：' + ((r && r.error) || '未知错误'));
+    loadAWSIPChanges();
+    return;
+  }
+  input.value = String(r.minutes);
+  toast(`回溯时间已改为 ${r.minutes} 分钟`, 'success');
+});
 
 $('#awsWatcherList').addEventListener('click', async (e) => {
   const toggleBtn = e.target.closest('.aws-watcher-toggle');

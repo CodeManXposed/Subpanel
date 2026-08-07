@@ -97,6 +97,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/login", s.apiLogin)
 	mux.HandleFunc("/api/logout", s.apiLogout)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, map[string]any{"ok": true}) })
+	mux.HandleFunc("/hook/aws-failure", s.apiAWSFailureReport)
 
 	// 需要登录
 	mux.Handle("/", s.auth(http.HandlerFunc(s.indexPage)))
@@ -106,6 +107,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/resolved", s.auth(http.HandlerFunc(s.apiResolvedList)))
 	mux.Handle("/api/resolved/add", s.auth(http.HandlerFunc(s.apiResolvedAdd)))
 	mux.Handle("/api/resolved/remove", s.auth(http.HandlerFunc(s.apiResolvedRemove)))
+	mux.Handle("/api/token-blocks", s.auth(http.HandlerFunc(s.apiTokenBlocks)))
+	mux.Handle("/api/token-blocks/add", s.auth(http.HandlerFunc(s.apiTokenBlockAdd)))
+	mux.Handle("/api/token-blocks/remove", s.auth(http.HandlerFunc(s.apiTokenBlockRemove)))
 	mux.Handle("/api/focus", s.auth(http.HandlerFunc(s.apiFocusList)))
 	mux.Handle("/api/focus/add", s.auth(http.HandlerFunc(s.apiFocusAdd)))
 	mux.Handle("/api/focus/remove", s.auth(http.HandlerFunc(s.apiFocusRemove)))
@@ -117,6 +121,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/dns-watchers/add", s.auth(http.HandlerFunc(s.apiDNSWatcherAdd)))
 	mux.Handle("/api/dns-watchers/toggle", s.auth(http.HandlerFunc(s.apiDNSWatcherToggle)))
 	mux.Handle("/api/dns-watchers/note", s.auth(http.HandlerFunc(s.apiDNSWatcherNote)))
+	mux.Handle("/api/dns-watchers/lookback", s.auth(http.HandlerFunc(s.apiDNSWatcherLookback)))
 	mux.Handle("/api/dns-watchers/remove", s.auth(http.HandlerFunc(s.apiDNSWatcherRemove)))
 	mux.Handle("/api/incidents", s.auth(http.HandlerFunc(s.apiIncidents)))
 	mux.Handle("/api/incidents/agg_ip", s.auth(http.HandlerFunc(s.apiIncidentsAggIP)))
@@ -491,6 +496,141 @@ func (s *Server) apiResolvedRemove(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
+type tokenBlockOut struct {
+	Token     string     `json:"token"`
+	Tenant    string     `json:"tenant"`
+	Reason    string     `json:"reason"`
+	Action    string     `json:"action"`
+	CreatedTS time.Time  `json:"created_ts"`
+	ExpiresTS *time.Time `json:"expires_ts,omitempty"`
+	CreatedBy string     `json:"created_by"`
+}
+
+// apiTokenBlocks GET /api/token-blocks?tenant=xxx — 当前真正生效的 Token 黑名单。
+func (s *Server) apiTokenBlocks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, 405, map[string]any{"error": "GET only"})
+		return
+	}
+	tenant := r.URL.Query().Get("tenant")
+	bans, err := s.st.ListActiveBans(r.Context())
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	resolved, err := s.st.ListResolvedTokens(r.Context(), "")
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	resolvedByToken := make(map[string]store.ResolvedToken, len(resolved))
+	for _, item := range resolved {
+		resolvedByToken[item.Token] = item
+	}
+	out := make([]tokenBlockOut, 0)
+	for _, b := range bans {
+		if b.Kind != "token" {
+			continue
+		}
+		item := tokenBlockOut{
+			Token: b.Target, Reason: b.Reason, Action: b.Action,
+			CreatedTS: b.CreatedTS, ExpiresTS: b.ExpiresTS, CreatedBy: b.CreatedBy,
+		}
+		if resolvedItem, ok := resolvedByToken[b.Target]; ok {
+			item.Tenant = resolvedItem.Tenant
+		}
+		if tenant != "" && item.Tenant != "" && item.Tenant != tenant {
+			continue
+		}
+		out = append(out, item)
+	}
+	writeJSON(w, 200, out)
+}
+
+// apiTokenBlockAdd POST /api/token-blocks/add — 拉黑并归档 Token。
+func (s *Server) apiTokenBlockAdd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{"error": "POST only"})
+		return
+	}
+	var body struct {
+		Token  string `json:"token"`
+		Tenant string `json:"tenant"`
+		Reason string `json:"reason"`
+		Action string `json:"action"`
+		TTL    string `json:"ttl"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	body.Token = strings.TrimSpace(body.Token)
+	if body.Token == "" {
+		writeJSON(w, 400, map[string]any{"error": "token is empty"})
+		return
+	}
+	if len(body.Token) > 512 {
+		writeJSON(w, 400, map[string]any{"error": "Token 长度不能超过 512 个字符"})
+		return
+	}
+	if body.Action == "" {
+		body.Action = "fake"
+	}
+	if body.Action != "fake" && body.Action != "deny" {
+		writeJSON(w, 400, map[string]any{"error": "action must be fake or deny"})
+		return
+	}
+	var ttl time.Duration
+	if strings.TrimSpace(body.TTL) != "" {
+		parsed, err := time.ParseDuration(strings.TrimSpace(body.TTL))
+		if err != nil {
+			writeJSON(w, 400, map[string]any{"error": "bad ttl: " + err.Error()})
+			return
+		}
+		ttl = parsed
+	}
+	target := s.hasher.Hash(body.Token)
+	if err := s.bans.AddToken(target, body.Action, strings.TrimSpace(body.Reason), ttl, "manual"); err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	if err := s.st.AddResolvedToken(r.Context(), target, strings.TrimSpace(body.Tenant), "token_block:"+body.Action); err != nil {
+		_ = s.bans.RemoveToken(target)
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "action": body.Action})
+}
+
+// apiTokenBlockRemove POST /api/token-blocks/remove — 解除拉黑并取消归档。
+func (s *Server) apiTokenBlockRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{"error": "POST only"})
+		return
+	}
+	var body struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	body.Token = strings.TrimSpace(body.Token)
+	if body.Token == "" {
+		writeJSON(w, 400, map[string]any{"error": "token is empty"})
+		return
+	}
+	if err := s.bans.RemoveToken(body.Token); err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	if err := s.st.RemoveResolvedToken(r.Context(), body.Token); err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
 func (s *Server) apiFocusList(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.st.ListFocusTokens(r.Context(), r.URL.Query().Get("tenant"))
 	if err != nil {
@@ -617,6 +757,7 @@ func (s *Server) apiBanAdd(w http.ResponseWriter, r *http.Request) {
 		Target string `json:"target"`
 		Reason string `json:"reason"`
 		TTL    string `json:"ttl"`
+		Action string `json:"action"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
@@ -670,7 +811,9 @@ func (s *Server) apiBanAdd(w http.ResponseWriter, r *http.Request) {
 		}
 		existing := make(map[string]bool)
 		for _, entry := range s.bans.Snapshot() {
-			existing[entry.Target] = true
+			if entry.Kind == "ip" {
+				existing[entry.Target] = true
+			}
 		}
 		added, updated := 0, 0
 		for _, target := range targets {
@@ -686,8 +829,64 @@ func (s *Server) apiBanAdd(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, 200, map[string]any{"ok": true, "total": len(targets), "added": added, "updated": updated})
 		return
+	case "token":
+		if body.Action == "" {
+			body.Action = "fake"
+		}
+		if body.Action != "fake" && body.Action != "deny" {
+			writeJSON(w, 400, map[string]any{"error": "action must be fake or deny"})
+			return
+		}
+		parts := strings.FieldsFunc(body.Target, func(r rune) bool {
+			return r == ',' || r == '，' || r == '\n' || r == '\r' || r == ';' || r == '；' || r == '\t' || r == ' '
+		})
+		if len(parts) == 0 {
+			writeJSON(w, 400, map[string]any{"error": "Token is required"})
+			return
+		}
+		if len(parts) > 1000 {
+			writeJSON(w, 400, map[string]any{"error": "一次最多添加 1000 个 Token"})
+			return
+		}
+		seen := make(map[string]bool, len(parts))
+		targets := make([]string, 0, len(parts))
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			if len(part) > 512 {
+				writeJSON(w, 400, map[string]any{"error": "Token 长度不能超过 512 个字符"})
+				return
+			}
+			target := s.hasher.Hash(part)
+			if !seen[target] {
+				seen[target] = true
+				targets = append(targets, target)
+			}
+		}
+		existing := make(map[string]bool)
+		for _, entry := range s.bans.Snapshot() {
+			if entry.Kind == "token" {
+				existing[entry.Target] = true
+			}
+		}
+		added, updated := 0, 0
+		for _, target := range targets {
+			if err := s.bans.AddToken(target, body.Action, body.Reason, ttl, "manual"); err != nil {
+				writeJSON(w, 500, map[string]any{"error": err.Error(), "added": added, "updated": updated})
+				return
+			}
+			if existing[target] {
+				updated++
+			} else {
+				added++
+			}
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "total": len(targets), "added": added, "updated": updated, "action": body.Action})
+		return
 	default:
-		writeJSON(w, 400, map[string]any{"error": "kind must be ip(token 黑名单已废弃)"})
+		writeJSON(w, 400, map[string]any{"error": "kind must be ip or token"})
 		return
 	}
 }
@@ -707,8 +906,7 @@ func (s *Server) apiBanRemove(w http.ResponseWriter, r *http.Request) {
 	case "ip":
 		err = s.bans.RemoveIP(body.Target)
 	case "token":
-		// 老数据兼容:store 里可能还有 token 行,允许直接删 store
-		err = s.st.RemoveBan("token", body.Target)
+		err = s.bans.RemoveToken(body.Target)
 	default:
 		writeJSON(w, 400, map[string]any{"error": "kind must be ip|token"})
 		return

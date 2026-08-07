@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS bans (
     created_ts INTEGER NOT NULL,
     expires_ts INTEGER,
     created_by TEXT,
+    action     TEXT NOT NULL DEFAULT 'fake', -- fake|deny，IP 固定 fake
     UNIQUE(kind, target)
 );
 CREATE INDEX IF NOT EXISTS idx_bans_target ON bans(kind, target);
@@ -168,6 +169,7 @@ CREATE TABLE IF NOT EXISTS aws_ip_changes (
     old_ip           TEXT,
     new_ip           TEXT,
     lookback_minutes INTEGER NOT NULL DEFAULT 20,
+    failure_ts       INTEGER NOT NULL DEFAULT 0,
     note             TEXT,
     created_ts       INTEGER NOT NULL
 );
@@ -200,6 +202,8 @@ CREATE TABLE IF NOT EXISTS dns_watchers (
     last_ips         TEXT NOT NULL DEFAULT '',
     last_checked_ts  INTEGER NOT NULL DEFAULT 0,
     last_changed_ts  INTEGER NOT NULL DEFAULT 0,
+    pending_failure_ts INTEGER NOT NULL DEFAULT 0,
+    pending_failure_ip TEXT NOT NULL DEFAULT '',
     last_error       TEXT NOT NULL DEFAULT '',
     note             TEXT NOT NULL DEFAULT '',
     created_ts       INTEGER NOT NULL,
@@ -271,6 +275,7 @@ type Ban struct {
 	CreatedTS time.Time
 	ExpiresTS *time.Time
 	CreatedBy string
+	Action    string // fake|deny；IP 封禁固定使用 fake
 }
 
 type Store struct {
@@ -335,9 +340,14 @@ func Open(path string, flushEvery time.Duration, flushSize int) (*Store, error) 
 	_, _ = db.Exec("ALTER TABLE tenants ADD COLUMN report_id TEXT NOT NULL DEFAULT ''")
 	// 触发规则处置动作。旧规则保持 fake，升级不改变现有行为。
 	_, _ = db.Exec("ALTER TABLE detect_rules ADD COLUMN action TEXT NOT NULL DEFAULT 'fake'")
+	// Token 黑名单处置动作。旧封禁记录保持 fake，升级不改变现有行为。
+	_, _ = db.Exec("ALTER TABLE bans ADD COLUMN action TEXT NOT NULL DEFAULT 'fake'")
 	// DNS 追踪 IP 存活时间(老库升级)
 	_, _ = db.Exec("ALTER TABLE dns_watchers ADD COLUMN last_changed_ts INTEGER NOT NULL DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE dns_watchers ADD COLUMN note TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE dns_watchers ADD COLUMN pending_failure_ts INTEGER NOT NULL DEFAULT 0")
+	_, _ = db.Exec("ALTER TABLE dns_watchers ADD COLUMN pending_failure_ip TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec("ALTER TABLE aws_ip_changes ADD COLUMN failure_ts INTEGER NOT NULL DEFAULT 0")
 	// 兼容备注同步功能上线前已经填写的追踪备注，启动时回填对应历史记录。
 	_, _ = db.Exec(`UPDATE aws_ip_changes SET note=(
 		SELECT w.note FROM dns_watchers w
@@ -528,20 +538,24 @@ func (s *Store) AddBan(b Ban) error {
 	if b.Kind != "ip" && b.Kind != "token" {
 		return errors.New("封禁类型必须是 ip 或 token")
 	}
+	if b.Kind == "ip" || b.Action != "deny" {
+		b.Action = "fake"
+	}
 	tags, _ := json.Marshal(b.RuleTags)
 	var exp interface{}
 	if b.ExpiresTS != nil {
 		exp = b.ExpiresTS.UnixMilli()
 	}
-	_, err := s.db.Exec(`INSERT INTO bans (kind,target,reason,rule_tags,created_ts,expires_ts,created_by)
-		VALUES (?,?,?,?,?,?,?)
+	_, err := s.db.Exec(`INSERT INTO bans (kind,target,reason,rule_tags,created_ts,expires_ts,created_by,action)
+		VALUES (?,?,?,?,?,?,?,?)
 		ON CONFLICT(kind,target) DO UPDATE SET
 		  reason=excluded.reason,
 		  rule_tags=excluded.rule_tags,
 		  created_ts=excluded.created_ts,
 		  expires_ts=excluded.expires_ts,
-		  created_by=excluded.created_by`,
-		b.Kind, b.Target, b.Reason, string(tags), b.CreatedTS.UnixMilli(), exp, b.CreatedBy)
+		  created_by=excluded.created_by,
+		  action=excluded.action`,
+		b.Kind, b.Target, b.Reason, string(tags), b.CreatedTS.UnixMilli(), exp, b.CreatedBy, b.Action)
 	return err
 }
 
@@ -552,7 +566,7 @@ func (s *Store) RemoveBan(kind, target string) error {
 
 func (s *Store) ListActiveBans(ctx context.Context) ([]Ban, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,kind,target,reason,rule_tags,created_ts,expires_ts,created_by
+		`SELECT id,kind,target,reason,rule_tags,created_ts,expires_ts,created_by,COALESCE(NULLIF(action,''),'fake')
 		 FROM bans
 		 WHERE expires_ts IS NULL OR expires_ts > ?
 		 ORDER BY created_ts DESC`, time.Now().UnixMilli())
@@ -567,7 +581,7 @@ func (s *Store) ListActiveBans(ctx context.Context) ([]Ban, error) {
 		var exp sql.NullInt64
 		var reason, createdBy sql.NullString
 		var createdMs int64
-		if err := rows.Scan(&b.ID, &b.Kind, &b.Target, &reason, &tags, &createdMs, &exp, &createdBy); err != nil {
+		if err := rows.Scan(&b.ID, &b.Kind, &b.Target, &reason, &tags, &createdMs, &exp, &createdBy, &b.Action); err != nil {
 			return nil, err
 		}
 		b.CreatedTS = time.UnixMilli(createdMs)
@@ -1245,6 +1259,7 @@ type AWSIPChange struct {
 	OldIP           string `json:"old_ip"`
 	NewIP           string `json:"new_ip"`
 	LookbackMinutes int    `json:"lookback_minutes"`
+	FailureTS       int64  `json:"failure_ts"`
 	Note            string `json:"note"`
 	CreatedTS       int64  `json:"created_ts"`
 	SiteCount       int    `json:"site_count"`
@@ -1254,23 +1269,32 @@ type AWSIPChange struct {
 
 // AWSIPChangeSubscriber 是更换动作发生前时间窗内冻结的一行订阅画像。
 type AWSIPChangeSubscriber struct {
-	Tenant        string `json:"tenant"`
-	TokenHash     string `json:"token"`
-	ClientIP      string `json:"client_ip"`
-	UA            string `json:"ua"`
-	PullCount     int    `json:"pull_count"`
-	FirstSeenTS   int64  `json:"first_seen_ts"`
-	LastSeenTS    int64  `json:"last_seen_ts"`
-	CloudProvider string `json:"cloud_provider"`
-	ASN           string `json:"asn"`
-	ASNOrg        string `json:"asn_org"`
-	UAUncommon    bool   `json:"ua_uncommon"`
+	Tenant                string `json:"tenant"`
+	TokenHash             string `json:"token"`
+	ClientIP              string `json:"client_ip"`
+	UA                    string `json:"ua"`
+	PullCount             int    `json:"pull_count"`
+	FirstSeenTS           int64  `json:"first_seen_ts"`
+	LastSeenTS            int64  `json:"last_seen_ts"`
+	CloudProvider         string `json:"cloud_provider"`
+	ASN                   string `json:"asn"`
+	ASNOrg                string `json:"asn_org"`
+	UAUncommon            bool   `json:"ua_uncommon"`
+	SecondsBeforeFailure  int64  `json:"seconds_before_failure"`
+	RecentChangeHits      int    `json:"recent_change_hits"`
+	RecentChangeTotal     int    `json:"recent_change_total"`
+	RepeatedBeforeChanges bool   `json:"repeated_before_changes"`
 }
 
-// AddAWSIPChange 新增换 IP 记录，并在同一事务中冻结动作前 15/20 分钟的订阅者。
+type AWSChangeTokenHistory struct {
+	Hits  int
+	Total int
+}
+
+// AddAWSIPChange 新增换 IP 记录，并在同一事务中按设置的分钟数冻结动作前订阅者。
 func (s *Store) AddAWSIPChange(ctx context.Context, change AWSIPChange) (*AWSIPChange, error) {
-	if change.LookbackMinutes != 15 && change.LookbackMinutes != 20 {
-		return nil, fmt.Errorf("lookback_minutes must be 15 or 20")
+	if change.LookbackMinutes < 1 || change.LookbackMinutes > 120 {
+		return nil, fmt.Errorf("lookback_minutes must be between 1 and 120")
 	}
 	if change.OccurredTS <= 0 {
 		change.OccurredTS = time.Now().UnixMilli()
@@ -1283,9 +1307,9 @@ func (s *Store) AddAWSIPChange(ctx context.Context, change AWSIPChange) (*AWSIPC
 	}
 	defer func() { _ = tx.Rollback() }()
 	res, err := tx.ExecContext(ctx, `INSERT INTO aws_ip_changes
-		(occurred_ts,dns_name,tenant,old_ip,new_ip,lookback_minutes,note,created_ts) VALUES (?,?,?,?,?,?,?,?)`,
+		(occurred_ts,dns_name,tenant,old_ip,new_ip,lookback_minutes,failure_ts,note,created_ts) VALUES (?,?,?,?,?,?,?,?,?)`,
 		change.OccurredTS, change.DNSName, change.Tenant, change.OldIP, change.NewIP,
-		change.LookbackMinutes, change.Note, change.CreatedTS)
+		change.LookbackMinutes, change.FailureTS, change.Note, change.CreatedTS)
 	if err != nil {
 		return nil, err
 	}
@@ -1293,14 +1317,18 @@ func (s *Store) AddAWSIPChange(ctx context.Context, change AWSIPChange) (*AWSIPC
 	if err != nil {
 		return nil, err
 	}
-	windowStart := change.OccurredTS - int64(change.LookbackMinutes)*int64(time.Minute/time.Millisecond)
+	snapshotAnchor := change.OccurredTS
+	if change.FailureTS > 0 && change.FailureTS <= change.OccurredTS {
+		snapshotAnchor = change.FailureTS
+	}
+	windowStart := snapshotAnchor - int64(change.LookbackMinutes)*int64(time.Minute/time.Millisecond)
 	snapshotSQL := `INSERT INTO aws_ip_change_subscribers
 		(change_id,tenant,token_hash,client_ip,ua,pull_count,first_seen_ts,last_seen_ts,cloud_provider,asn,asn_org)
 		SELECT ?, tenant, token_hash, COALESCE(client_ip,''), COALESCE(ua,''), COUNT(*), MIN(ts), MAX(ts),
 		       COALESCE(MAX(NULLIF(cloud_provider,'')),''), COALESCE(MAX(NULLIF(asn,'')),''), COALESCE(MAX(NULLIF(asn_org,'')),'')
 		FROM events
 		WHERE ts>=? AND ts<=? AND token_hash<>''`
-	snapshotArgs := []any{change.ID, windowStart, change.OccurredTS}
+	snapshotArgs := []any{change.ID, windowStart, snapshotAnchor}
 	if change.Tenant != "" {
 		snapshotSQL += " AND tenant=?"
 		snapshotArgs = append(snapshotArgs, change.Tenant)
@@ -1320,13 +1348,13 @@ func (s *Store) AddAWSIPChange(ctx context.Context, change AWSIPChange) (*AWSIPC
 func (s *Store) GetAWSIPChange(ctx context.Context, id int64) (*AWSIPChange, error) {
 	var c AWSIPChange
 	err := s.db.QueryRowContext(ctx, `SELECT c.id,c.occurred_ts,COALESCE(c.dns_name,''),COALESCE(c.tenant,''),COALESCE(c.old_ip,''),COALESCE(c.new_ip,''),
-		c.lookback_minutes,COALESCE(c.note,''),c.created_ts,
+		c.lookback_minutes,COALESCE(c.failure_ts,0),COALESCE(c.note,''),c.created_ts,
 		COUNT(DISTINCT s.tenant),
 		COUNT(DISTINCT s.tenant || char(0) || s.token_hash),
 		COALESCE(SUM(s.pull_count),0)
 		FROM aws_ip_changes c LEFT JOIN aws_ip_change_subscribers s ON s.change_id=c.id
 		WHERE c.id=? GROUP BY c.id`, id).Scan(&c.ID, &c.OccurredTS, &c.DNSName, &c.Tenant, &c.OldIP, &c.NewIP,
-		&c.LookbackMinutes, &c.Note, &c.CreatedTS, &c.SiteCount, &c.SubscriberCount, &c.PullCount)
+		&c.LookbackMinutes, &c.FailureTS, &c.Note, &c.CreatedTS, &c.SiteCount, &c.SubscriberCount, &c.PullCount)
 	if err != nil {
 		return nil, err
 	}
@@ -1339,7 +1367,7 @@ func (s *Store) ListAWSIPChanges(ctx context.Context, limit int) ([]AWSIPChange,
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT c.id,c.occurred_ts,COALESCE(c.dns_name,''),COALESCE(c.tenant,''),COALESCE(c.old_ip,''),COALESCE(c.new_ip,''),
-		c.lookback_minutes,COALESCE(c.note,''),c.created_ts,
+		c.lookback_minutes,COALESCE(c.failure_ts,0),COALESCE(c.note,''),c.created_ts,
 		COUNT(DISTINCT s.tenant),
 		COUNT(DISTINCT s.tenant || char(0) || s.token_hash),
 		COALESCE(SUM(s.pull_count),0)
@@ -1353,7 +1381,7 @@ func (s *Store) ListAWSIPChanges(ctx context.Context, limit int) ([]AWSIPChange,
 	for rows.Next() {
 		var c AWSIPChange
 		if err := rows.Scan(&c.ID, &c.OccurredTS, &c.DNSName, &c.Tenant, &c.OldIP, &c.NewIP, &c.LookbackMinutes,
-			&c.Note, &c.CreatedTS, &c.SiteCount, &c.SubscriberCount, &c.PullCount); err != nil {
+			&c.FailureTS, &c.Note, &c.CreatedTS, &c.SiteCount, &c.SubscriberCount, &c.PullCount); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -1383,6 +1411,35 @@ func (s *Store) ListAWSIPChangeSubscribers(ctx context.Context, changeID int64) 
 	return out, rows.Err()
 }
 
+// AWSIPChangeTokenHistory 返回同一入口最近三次换 IP 中，各“站点 + Token”的出现次数。
+func (s *Store) AWSIPChangeTokenHistory(ctx context.Context, changeID int64) (map[string]AWSChangeTokenHistory, error) {
+	rows, err := s.db.QueryContext(ctx, `WITH target AS (
+		SELECT dns_name,occurred_ts FROM aws_ip_changes WHERE id=? AND COALESCE(dns_name,'')<>''
+	), recent AS (
+		SELECT c.id FROM aws_ip_changes c,target t
+		WHERE c.dns_name=t.dns_name AND (c.occurred_ts<t.occurred_ts OR (c.occurred_ts=t.occurred_ts AND c.id<=?))
+		ORDER BY c.occurred_ts DESC,c.id DESC LIMIT 3
+	)
+	SELECT s.tenant,s.token_hash,COUNT(DISTINCT s.change_id),(SELECT COUNT(*) FROM recent)
+	FROM aws_ip_change_subscribers s
+	WHERE s.change_id IN (SELECT id FROM recent)
+	GROUP BY s.tenant,s.token_hash`, changeID, changeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]AWSChangeTokenHistory{}
+	for rows.Next() {
+		var tenant, token string
+		var h AWSChangeTokenHistory
+		if err := rows.Scan(&tenant, &token, &h.Hits, &h.Total); err != nil {
+			return nil, err
+		}
+		out[tenant+"\x00"+token] = h
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) DeleteAWSIPChange(ctx context.Context, id int64) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM aws_ip_changes WHERE id=?`, id)
 	return err
@@ -1390,20 +1447,22 @@ func (s *Store) DeleteAWSIPChange(ctx context.Context, id int64) error {
 
 // DNSWatcher 持久化一个入口 DNS 监控；Tenant 为空表示所有站点。
 type DNSWatcher struct {
-	ID              int64          `json:"id"`
-	DNSName         string         `json:"dns_name"`
-	Tenant          string         `json:"tenant"`
-	LookbackMinutes int            `json:"lookback_minutes"`
-	Enabled         bool           `json:"enabled"`
-	LastIPs         string         `json:"last_ips"`
-	LastCheckedTS   int64          `json:"last_checked_ts"`
-	LastChangedTS   int64          `json:"last_changed_ts"`
-	AliveSeconds    int64          `json:"alive_seconds"`
-	LastError       string         `json:"last_error"`
-	Note            string         `json:"note"`
-	CreatedTS       int64          `json:"created_ts"`
-	UpdatedTS       int64          `json:"updated_ts"`
-	IPHistory       []DNSIPHistory `json:"ip_history"`
+	ID               int64          `json:"id"`
+	DNSName          string         `json:"dns_name"`
+	Tenant           string         `json:"tenant"`
+	LookbackMinutes  int            `json:"lookback_minutes"`
+	Enabled          bool           `json:"enabled"`
+	LastIPs          string         `json:"last_ips"`
+	LastCheckedTS    int64          `json:"last_checked_ts"`
+	LastChangedTS    int64          `json:"last_changed_ts"`
+	PendingFailureTS int64          `json:"pending_failure_ts"`
+	PendingFailureIP string         `json:"pending_failure_ip"`
+	AliveSeconds     int64          `json:"alive_seconds"`
+	LastError        string         `json:"last_error"`
+	Note             string         `json:"note"`
+	CreatedTS        int64          `json:"created_ts"`
+	UpdatedTS        int64          `json:"updated_ts"`
+	IPHistory        []DNSIPHistory `json:"ip_history"`
 }
 
 // DNSIPHistory 是已结束的一段 IP 存活记录。
@@ -1420,8 +1479,8 @@ func (s *Store) AddDNSWatcher(ctx context.Context, w DNSWatcher) (*DNSWatcher, e
 	if w.DNSName == "" {
 		return nil, fmt.Errorf("dns_name is required")
 	}
-	if w.LookbackMinutes != 15 && w.LookbackMinutes != 20 {
-		return nil, fmt.Errorf("lookback_minutes must be 15 or 20")
+	if w.LookbackMinutes < 1 || w.LookbackMinutes > 120 {
+		return nil, fmt.Errorf("lookback_minutes must be between 1 and 120")
 	}
 	now := time.Now().UnixMilli()
 	enabled := 0
@@ -1449,9 +1508,9 @@ func (s *Store) GetDNSWatcher(ctx context.Context, id int64) (*DNSWatcher, error
 	var w DNSWatcher
 	var enabled int
 	err := s.db.QueryRowContext(ctx, `SELECT id,dns_name,tenant,lookback_minutes,enabled,last_ips,
-		last_checked_ts,last_changed_ts,last_error,note,created_ts,updated_ts FROM dns_watchers WHERE id=?`, id).Scan(
+		last_checked_ts,last_changed_ts,pending_failure_ts,pending_failure_ip,last_error,note,created_ts,updated_ts FROM dns_watchers WHERE id=?`, id).Scan(
 		&w.ID, &w.DNSName, &w.Tenant, &w.LookbackMinutes, &enabled, &w.LastIPs,
-		&w.LastCheckedTS, &w.LastChangedTS, &w.LastError, &w.Note, &w.CreatedTS, &w.UpdatedTS)
+		&w.LastCheckedTS, &w.LastChangedTS, &w.PendingFailureTS, &w.PendingFailureIP, &w.LastError, &w.Note, &w.CreatedTS, &w.UpdatedTS)
 	if err != nil {
 		return nil, err
 	}
@@ -1460,7 +1519,7 @@ func (s *Store) GetDNSWatcher(ctx context.Context, id int64) (*DNSWatcher, error
 }
 
 func (s *Store) ListDNSWatchers(ctx context.Context, enabledOnly bool) ([]DNSWatcher, error) {
-	q := `SELECT id,dns_name,tenant,lookback_minutes,enabled,last_ips,last_checked_ts,last_changed_ts,last_error,note,created_ts,updated_ts
+	q := `SELECT id,dns_name,tenant,lookback_minutes,enabled,last_ips,last_checked_ts,last_changed_ts,pending_failure_ts,pending_failure_ip,last_error,note,created_ts,updated_ts
 		FROM dns_watchers`
 	if enabledOnly {
 		q += " WHERE enabled=1"
@@ -1476,7 +1535,7 @@ func (s *Store) ListDNSWatchers(ctx context.Context, enabledOnly bool) ([]DNSWat
 		var w DNSWatcher
 		var enabled int
 		if err := rows.Scan(&w.ID, &w.DNSName, &w.Tenant, &w.LookbackMinutes, &enabled,
-			&w.LastIPs, &w.LastCheckedTS, &w.LastChangedTS, &w.LastError, &w.Note, &w.CreatedTS, &w.UpdatedTS); err != nil {
+			&w.LastIPs, &w.LastCheckedTS, &w.LastChangedTS, &w.PendingFailureTS, &w.PendingFailureIP, &w.LastError, &w.Note, &w.CreatedTS, &w.UpdatedTS); err != nil {
 			return nil, err
 		}
 		w.Enabled = enabled != 0
@@ -1498,6 +1557,35 @@ func (s *Store) SetDNSWatcherBaseline(ctx context.Context, id int64, ips string,
 	_, err := s.db.ExecContext(ctx, `UPDATE dns_watchers SET last_ips=?,last_error='',last_checked_ts=?,
 		last_changed_ts=?,updated_ts=? WHERE id=?`, ips, checkedTS, checkedTS, time.Now().UnixMilli(), id)
 	return err
+}
+
+// MarkDNSWatcherFailure 保存 AWS 大陆 TCP 探测脚本上报的首次失联时间。
+// 同一轮换 IP 只保留最早一次信号，DNS 完成切换后由 RecordDNSIPTransition 清空。
+func (s *Store) MarkDNSWatcherFailure(ctx context.Context, dnsName, tenant, ip string, failedTS int64) (*DNSWatcher, error) {
+	var id int64
+	var currentIPs string
+	err := s.db.QueryRowContext(ctx, `SELECT id,last_ips FROM dns_watchers WHERE dns_name=? AND tenant=? AND enabled=1`, dnsName, tenant).Scan(&id, &currentIPs)
+	if err != nil {
+		return nil, err
+	}
+	matched := false
+	for _, current := range strings.Split(currentIPs, ",") {
+		if strings.TrimSpace(current) == ip {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return nil, fmt.Errorf("reported IP does not match current DNS IP")
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE dns_watchers SET
+		pending_failure_ts=CASE WHEN pending_failure_ts=0 OR ?<pending_failure_ts THEN ? ELSE pending_failure_ts END,
+		pending_failure_ip=CASE WHEN pending_failure_ts=0 OR ?<pending_failure_ts THEN ? ELSE pending_failure_ip END,
+		updated_ts=? WHERE id=?`, failedTS, failedTS, failedTS, ip, time.Now().UnixMilli(), id)
+	if err != nil {
+		return nil, err
+	}
+	return s.GetDNSWatcher(ctx, id)
 }
 
 // RecordDNSIPTransition 结算上一个 IP 的存活时间、更新当前 IP，并只保留最近 5 条。
@@ -1528,7 +1616,7 @@ func (s *Store) RecordDNSIPTransition(ctx context.Context, watcher DNSWatcher, n
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE dns_watchers SET last_ips=?,last_error='',last_checked_ts=?,
-		last_changed_ts=?,updated_ts=? WHERE id=?`, newIPs, changedTS, changedTS, time.Now().UnixMilli(), watcher.ID); err != nil {
+		last_changed_ts=?,pending_failure_ts=0,pending_failure_ip='',updated_ts=? WHERE id=?`, newIPs, changedTS, changedTS, time.Now().UnixMilli(), watcher.ID); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -1562,6 +1650,22 @@ func (s *Store) SetDNSWatcherEnabled(ctx context.Context, id int64, enabled bool
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE dns_watchers SET enabled=?,updated_ts=? WHERE id=?`,
 		v, time.Now().UnixMilli(), id)
+	return err
+}
+
+func (s *Store) UpdateDNSWatcherLookback(ctx context.Context, id int64, minutes int) error {
+	if minutes < 1 || minutes > 120 {
+		return fmt.Errorf("lookback_minutes must be between 1 and 120")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE dns_watchers SET lookback_minutes=?,updated_ts=? WHERE id=?`,
+		minutes, time.Now().UnixMilli(), id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err == nil && rows == 0 {
+		return sql.ErrNoRows
+	}
 	return err
 }
 

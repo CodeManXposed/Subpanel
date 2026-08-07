@@ -269,6 +269,30 @@ func TestE2EManualBan(t *testing.T) {
 	}
 }
 
+func TestE2ETokenBanFakeAndDeny(t *testing.T) {
+	gw, _, _, bans, cleanup := newE2E(t, false)
+	defer cleanup()
+
+	if err := bans.AddToken("fake-token", "fake", "leaked", time.Hour, "test"); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	gw.ServeHTTP(w, mkSubReq("sub.example.com", "ClashforWindows/0.20", "fake-token", "clash", "8.8.8.8"))
+	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "REAL-SUB-FROM-V2BOARD") {
+		t.Fatalf("fake token response=%d %q", w.Code, w.Body.String())
+	}
+
+	if err := bans.AddToken("deny-token", "deny", "confirmed", 0, "test"); err != nil {
+		t.Fatal(err)
+	}
+	gw.SetIPWhitelist(func(string) bool { return true })
+	w = httptest.NewRecorder()
+	gw.ServeHTTP(w, mkSubReq("sub.example.com", "ClashforWindows/0.20", "deny-token", "clash", "8.8.8.8"))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("deny token should override IP whitelist, got %d %q", w.Code, w.Body.String())
+	}
+}
+
 func TestE2EEventsPersisted(t *testing.T) {
 	gw, _, st, _, cleanup := newE2E(t, false)
 	defer cleanup()

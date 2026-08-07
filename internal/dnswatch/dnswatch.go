@@ -109,6 +109,11 @@ func (m *Manager) checkOne(parent context.Context, watcher store.DNSWatcher) {
 		_ = m.store.UpdateDNSWatcherState(parent, watcher.ID, current, "", now)
 		return
 	}
+	failureTS := watcher.PendingFailureTS
+	if failureTS <= watcher.LastChangedTS || failureTS > now || now-failureTS > int64(2*time.Hour/time.Millisecond) ||
+		(watcher.PendingFailureIP != "" && !containsCSVValue(watcher.LastIPs, watcher.PendingFailureIP)) {
+		failureTS = 0
+	}
 
 	change, err := m.store.AddAWSIPChange(parent, store.AWSIPChange{
 		OccurredTS:      now,
@@ -117,6 +122,7 @@ func (m *Manager) checkOne(parent context.Context, watcher store.DNSWatcher) {
 		OldIP:           watcher.LastIPs,
 		NewIP:           current,
 		LookbackMinutes: watcher.LookbackMinutes,
+		FailureTS:       failureTS,
 		Note:            watcher.Note,
 	})
 	if err != nil {
@@ -130,5 +136,14 @@ func (m *Manager) checkOne(parent context.Context, watcher store.DNSWatcher) {
 		return
 	}
 	m.logger.Warn("检测到入口 DNS IP 变化", "dns", watcher.DNSName, "tenant", watcher.Tenant,
-		"old", watcher.LastIPs, "new", current, "subscribers", change.SubscriberCount)
+		"old", watcher.LastIPs, "new", current, "failure_ts", failureTS, "subscribers", change.SubscriberCount)
+}
+
+func containsCSVValue(csv, value string) bool {
+	for _, item := range strings.Split(csv, ",") {
+		if strings.TrimSpace(item) == value {
+			return true
+		}
+	}
+	return false
 }

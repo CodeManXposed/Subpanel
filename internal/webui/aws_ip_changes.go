@@ -2,10 +2,12 @@ package webui
 
 import (
 	"context"
+	"crypto/hmac"
 	"database/sql"
 	"encoding/json"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +16,62 @@ import (
 	"github.com/huabanmao168/SubPanel/internal/dnswatch"
 	"github.com/huabanmao168/SubPanel/internal/store"
 )
+
+// apiAWSFailureReport 接收 AWS 自动换 IP 脚本的大陆 TCP 首次失联信号。
+// 该时间只作为后续 DNS 变化快照的精准锚点，不会单独制造换 IP 记录。
+func (s *Server) apiAWSFailureReport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	secret, _ := s.st.GetMeta("report_secret")
+	if secret == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "report secret is not configured"})
+		return
+	}
+	if !hmac.Equal([]byte(r.Header.Get("X-Report-Key")), []byte(secret)) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "invalid report key"})
+		return
+	}
+	var body struct {
+		DNSName  string `json:"dns_name"`
+		Tenant   string `json:"tenant"`
+		IP       string `json:"ip"`
+		FailedTS int64  `json:"failed_ts"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "bad json"})
+		return
+	}
+	body.DNSName = dnswatch.NormalizeName(body.DNSName)
+	body.Tenant = strings.TrimSpace(body.Tenant)
+	body.IP = strings.TrimSpace(body.IP)
+	if body.DNSName == "" || net.ParseIP(body.IP) == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "valid dns_name and ip required"})
+		return
+	}
+	now := time.Now().UnixMilli()
+	if body.FailedTS <= 0 {
+		body.FailedTS = now
+	}
+	if body.FailedTS > now+int64(5*time.Minute/time.Millisecond) || body.FailedTS < now-int64(2*time.Hour/time.Millisecond) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "failed_ts must be within the last 2 hours"})
+		return
+	}
+	watcher, err := s.st.MarkDNSWatcherFailure(r.Context(), body.DNSName, body.Tenant, body.IP, body.FailedTS)
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "active DNS watcher not found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "watcher_id": watcher.ID, "failure_ts": watcher.PendingFailureTS,
+		"message": "failure anchor recorded; waiting for DNS change",
+	})
+}
 
 func (s *Server) apiAWSIPChanges(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -56,8 +114,8 @@ func (s *Server) apiAWSIPChangeAdd(w http.ResponseWriter, r *http.Request) {
 	if body.LookbackMinutes == 0 {
 		body.LookbackMinutes = 20
 	}
-	if body.LookbackMinutes != 15 && body.LookbackMinutes != 20 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "lookback_minutes must be 15 or 20"})
+	if body.LookbackMinutes < 1 || body.LookbackMinutes > 120 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "lookback_minutes must be between 1 and 120"})
 		return
 	}
 	if body.OccurredTS <= 0 {
@@ -104,9 +162,35 @@ func (s *Server) apiAWSIPChangeDetail(w http.ResponseWriter, r *http.Request) {
 	if rows == nil {
 		rows = []store.AWSIPChangeSubscriber{}
 	}
+	history, err := s.st.AWSIPChangeTokenHistory(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
 	for i := range rows {
 		rows[i].UAUncommon = !blacklist.IsKnownSubClient(rows[i].UA)
+		anchor := change.FailureTS
+		if anchor <= 0 {
+			anchor = change.OccurredTS
+		}
+		if rows[i].LastSeenTS <= anchor {
+			rows[i].SecondsBeforeFailure = (anchor - rows[i].LastSeenTS) / 1000
+		}
+		if h, ok := history[rows[i].Tenant+"\x00"+rows[i].TokenHash]; ok {
+			rows[i].RecentChangeHits = h.Hits
+			rows[i].RecentChangeTotal = h.Total
+			rows[i].RepeatedBeforeChanges = h.Hits >= 2
+		}
 	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].Tenant != rows[j].Tenant {
+			return rows[i].Tenant < rows[j].Tenant
+		}
+		if rows[i].SecondsBeforeFailure != rows[j].SecondsBeforeFailure {
+			return rows[i].SecondsBeforeFailure < rows[j].SecondsBeforeFailure
+		}
+		return rows[i].LastSeenTS > rows[j].LastSeenTS
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"change": change, "subscribers": rows})
 }
 
@@ -183,8 +267,8 @@ func (s *Server) apiDNSWatcherAdd(w http.ResponseWriter, r *http.Request) {
 	if body.LookbackMinutes == 0 {
 		body.LookbackMinutes = 20
 	}
-	if body.LookbackMinutes != 15 && body.LookbackMinutes != 20 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "lookback_minutes must be 15 or 20"})
+	if body.LookbackMinutes < 1 || body.LookbackMinutes > 120 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "lookback_minutes must be between 1 and 120"})
 		return
 	}
 	if body.Tenant != "" {
@@ -242,6 +326,34 @@ func (s *Server) apiDNSWatcherToggle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) apiDNSWatcherLookback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var body struct {
+		ID      int64 `json:"id"`
+		Minutes int   `json:"minutes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ID <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "valid id required"})
+		return
+	}
+	if body.Minutes < 1 || body.Minutes > 120 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "minutes must be between 1 and 120"})
+		return
+	}
+	if err := s.st.UpdateDNSWatcherLookback(r.Context(), body.ID, body.Minutes); err != nil {
+		if err == sql.ErrNoRows {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "watcher not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "minutes": body.Minutes})
 }
 
 func (s *Server) apiDNSWatcherNote(w http.ResponseWriter, r *http.Request) {

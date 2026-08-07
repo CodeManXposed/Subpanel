@@ -144,6 +144,29 @@ func TestAddAndListBans(t *testing.T) {
 	if len(bs[0].RuleTags) != 1 || bs[0].RuleTags[0] != "x" {
 		t.Errorf("rule tags: %+v", bs[0].RuleTags)
 	}
+	if bs[0].Action != "fake" {
+		t.Errorf("IP ban action should normalize to fake, got %q", bs[0].Action)
+	}
+
+	if err := st.AddBan(Ban{Kind: "token", Target: "leaked-token", Action: "deny", CreatedTS: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	bs, err = st.ListActiveBans(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foundToken bool
+	for _, b := range bs {
+		if b.Kind == "token" && b.Target == "leaked-token" {
+			foundToken = true
+			if b.Action != "deny" {
+				t.Errorf("token action=%q, want deny", b.Action)
+			}
+		}
+	}
+	if !foundToken {
+		t.Error("token ban was not listed")
+	}
 
 	// 过期的不应当被列出
 	past := time.Now().Add(-time.Hour)
@@ -289,6 +312,48 @@ func TestAWSIPChangeSnapshotsPriorWindowByTenant(t *testing.T) {
 	}
 }
 
+func TestAWSIPChangeTokenHistoryCorrelatesSameDNSAndTenant(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	base := time.Now().Add(-30 * time.Minute).Truncate(time.Second)
+	for _, event := range []Event{
+		{TS: base.Add(-time.Minute), Tenant: "sled", TokenHash: "repeat-token", ClientIP: "1.1.1.1", Action: "pass"},
+		{TS: base.Add(24 * time.Minute), Tenant: "sled", TokenHash: "repeat-token", ClientIP: "2.2.2.2", Action: "pass"},
+		{TS: base.Add(24 * time.Minute), Tenant: "rfs", TokenHash: "repeat-token", ClientIP: "3.3.3.3", Action: "pass"},
+		{TS: base.Add(24 * time.Minute), Tenant: "sled", TokenHash: "once-token", ClientIP: "4.4.4.4", Action: "pass"},
+	} {
+		st.SubmitEvent(event)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if _, err := st.AddAWSIPChange(ctx, AWSIPChange{
+		OccurredTS: base.UnixMilli(), DNSName: "entry.example.com", Tenant: "sled",
+		OldIP: "10.0.0.1", NewIP: "10.0.0.2", LookbackMinutes: 5,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := st.AddAWSIPChange(ctx, AWSIPChange{
+		OccurredTS: base.Add(25 * time.Minute).UnixMilli(), DNSName: "entry.example.com", Tenant: "sled",
+		OldIP: "10.0.0.2", NewIP: "10.0.0.3", LookbackMinutes: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	history, err := st.AWSIPChangeTokenHistory(ctx, second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repeated := history["sled\x00repeat-token"]
+	if repeated.Hits != 2 || repeated.Total != 2 {
+		t.Fatalf("same DNS/site token must correlate across changes: %+v", history)
+	}
+	if once := history["sled\x00once-token"]; once.Hits != 1 || once.Total != 2 {
+		t.Fatalf("single appearance must not look repeated: %+v", history)
+	}
+	if _, leaked := history["rfs\x00repeat-token"]; leaked {
+		t.Fatalf("other tenant must not enter site-scoped snapshots: %+v", history)
+	}
+}
+
 func TestDNSWatcherLifecycle(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
@@ -325,12 +390,15 @@ func TestDNSWatcherLifecycle(t *testing.T) {
 	if err := st.UpdateDNSWatcherNote(ctx, w.ID, "新加坡入口"); err != nil {
 		t.Fatal(err)
 	}
+	if err := st.UpdateDNSWatcherLookback(ctx, w.ID, 7); err != nil {
+		t.Fatal(err)
+	}
 	changes, err := st.ListAWSIPChanges(ctx, 10)
 	if err != nil || len(changes) != 1 || changes[0].Note != "新加坡入口" {
 		t.Fatalf("watcher note must sync historical changes: rows=%+v err=%v", changes, err)
 	}
 	rows, err := st.ListDNSWatchers(ctx, false)
-	if err != nil || len(rows) != 1 || rows[0].Enabled || rows[0].LastIPs != "10.0.0.6" || rows[0].LastChangedTS != base+6*60_000 || rows[0].Note != "新加坡入口" {
+	if err != nil || len(rows) != 1 || rows[0].Enabled || rows[0].LastIPs != "10.0.0.6" || rows[0].LastChangedTS != base+6*60_000 || rows[0].Note != "新加坡入口" || rows[0].LookbackMinutes != 7 {
 		t.Fatalf("unexpected persisted watcher: rows=%+v err=%v", rows, err)
 	}
 	history, err := st.ListDNSIPHistory(ctx, w.ID, 5)
@@ -346,6 +414,57 @@ func TestDNSWatcherLifecycle(t *testing.T) {
 	}
 	if err := st.DeleteDNSWatcher(ctx, w.ID); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDNSWatcherFailureKeepsEarliestSignalAndAnchorsSnapshot(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+	w, err := st.AddDNSWatcher(ctx, DNSWatcher{
+		DNSName: "entry.example.com", Tenant: "sled", LookbackMinutes: 20,
+		Enabled: true, LastIPs: "1.2.3.4", LastCheckedTS: now.Add(-time.Minute).UnixMilli(),
+		LastChangedTS: now.Add(-time.Hour).UnixMilli(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failureAt := now.Add(-2 * time.Minute)
+	first, err := st.MarkDNSWatcherFailure(ctx, w.DNSName, w.Tenant, "1.2.3.4", failureAt.UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.MarkDNSWatcherFailure(ctx, w.DNSName, w.Tenant, "1.2.3.4", failureAt.Add(30*time.Second).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	current, _ := st.GetDNSWatcher(ctx, w.ID)
+	if first.PendingFailureTS != failureAt.UnixMilli() || current.PendingFailureTS != failureAt.UnixMilli() {
+		t.Fatalf("first failure signal must win: first=%+v current=%+v", first, current)
+	}
+	if _, err := st.MarkDNSWatcherFailure(ctx, w.DNSName, w.Tenant, "9.9.9.9", failureAt.UnixMilli()); err == nil {
+		t.Fatal("mismatched old IP must be rejected")
+	}
+
+	st.SubmitEvent(Event{TS: failureAt.Add(-30 * time.Second), Tenant: "sled", TokenHash: "likely-trigger", ClientIP: "8.8.8.8", Action: "pass"})
+	st.SubmitEvent(Event{TS: failureAt.Add(30 * time.Second), Tenant: "sled", TokenHash: "after-failure", ClientIP: "8.8.4.4", Action: "pass"})
+	time.Sleep(150 * time.Millisecond)
+	change, err := st.AddAWSIPChange(ctx, AWSIPChange{
+		OccurredTS: now.UnixMilli(), FailureTS: failureAt.UnixMilli(), DNSName: w.DNSName,
+		Tenant: w.Tenant, OldIP: "1.2.3.4", NewIP: "1.2.3.5", LookbackMinutes: 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := st.ListAWSIPChangeSubscribers(ctx, change.ID)
+	if err != nil || len(rows) != 1 || rows[0].TokenHash != "likely-trigger" {
+		t.Fatalf("snapshot must end at failure signal: rows=%+v err=%v", rows, err)
+	}
+	if err := st.RecordDNSIPTransition(ctx, *current, "1.2.3.5", now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	current, _ = st.GetDNSWatcher(ctx, w.ID)
+	if current.PendingFailureTS != 0 || current.PendingFailureIP != "" {
+		t.Fatalf("transition must clear pending failure: %+v", current)
 	}
 }
 

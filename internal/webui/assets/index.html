@@ -29,7 +29,7 @@
     </a>
     <a class="navlink" data-tab="resolved">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
-      已处理
+      拉黑 Token
     </a>
     <div class="sidebar-section">名单</div>
     <a class="navlink" data-tab="ip-bans">
@@ -75,7 +75,7 @@
       <div class="avatar" id="userAvatar">A</div>
       <div>
         <div class="user-name">admin</div>
-        <div class="muted" style="font-size:11px">Sub-Panel v0.1.68</div>
+        <div class="muted" style="font-size:11px">Sub-Panel v0.1.73</div>
       </div>
       <button class="logout-btn" id="logoutBtn" title="退出">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
@@ -206,20 +206,22 @@
         </div>
       </section>
 
-      <!-- 已处理 token -->
+      <!-- 已拉黑 Token -->
       <section id="tab-resolved" class="tab">
         <div class="card">
           <div class="card-header">
-            <h3 class="card-title">已处理 Token</h3>
-            <div class="muted" style="font-size:13px">这些 token 不再出现在请求日志列表里。可点击恢复让它重新可见。</div>
+            <h3 class="card-title">已拉黑 Token</h3>
+            <div class="muted" style="font-size:13px">这里展示正在生效的 Token 黑名单及处置动作；解除后会恢复到正常检测流程。</div>
           </div>
           <div class="datatable" style="margin-top:8px">
             <table>
               <thead><tr>
                 <th>Token</th>
                 <th>机场</th>
-                <th>备注</th>
-                <th>标记时间</th>
+                <th>处置动作</th>
+                <th>原因</th>
+                <th>拉黑时间</th>
+                <th>过期</th>
                 <th style="width:120px">操作</th>
               </tr></thead>
               <tbody id="resolvedTbody"></tbody>
@@ -250,6 +252,25 @@
           </div>
         </div>
         <div class="card">
+          <div class="card-header">
+            <h3>新增 Token 黑名单 <span class="muted" style="font-weight:400;margin-left:8px;font-size:12px">命中后始终按所选动作处置</span></h3>
+          </div>
+          <div class="ban-entry-grid token-ban-entry-grid">
+            <label class="ban-entry-field ban-entry-target"><span>订阅 Token（支持批量）</span><textarea id="banTokenTarget" rows="3" placeholder="粘贴完整 Token；每行一个，或使用逗号分隔"></textarea></label>
+            <label class="ban-entry-field"><span>命中动作</span><select id="banTokenAction"><option value="fake">全投毒 · HTTP 200</option><option value="deny">全拒绝 · HTTP 403</option></select></label>
+            <label class="ban-entry-field"><span>拉黑原因</span><input id="banTokenReason" placeholder="例如：确认泄露"></label>
+            <label class="ban-entry-field"><span>有效期</span><input id="banTokenTTL" placeholder="如 24h，留空为永久"></label>
+            <button class="primary" id="banTokenAddBtn">加入黑名单</button>
+          </div>
+          <p class="muted token-ban-hint">Token 黑名单优先于 IP 白名单；“全投毒”返回可解析的黑洞订阅，“全拒绝”直接返回 HTTP 403。用户重置 UUID 后新 Token 需重新加入。</p>
+        </div>
+        <div class="datatable token-ban-table">
+          <table>
+            <thead><tr><th>Token</th><th>命中动作</th><th>原因</th><th>创建</th><th>过期</th><th>来源</th><th></th></tr></thead>
+            <tbody id="tokenBanTbody"></tbody>
+          </table>
+        </div>
+        <div class="card ip-ban-add-card">
           <div class="card-header">
             <h3>新增 IP 封禁</h3>
           </div>
@@ -444,15 +465,16 @@
         </div>
         <div class="card" style="margin-top:16px">
           <div class="card-header">
-            <h3>已处理用户</h3>
-            <span class="muted" style="font-size:13px">已归档的用户会保留在这里；后续再次触发仍会重新进入上方嫌疑列表。</span>
+            <h3>已拉黑 Token</h3>
+            <span class="muted" style="font-size:13px">拉黑后自动从嫌疑名单移出；若仍有请求会标记为“拉黑后再次触发”。</span>
           </div>
           <div class="datatable" style="margin-top:8px">
             <table>
               <thead><tr>
                 <th>Token</th>
                 <th>机场</th>
-                <th>处理时间</th>
+                <th>处置动作</th>
+                <th>拉黑时间</th>
                 <th style="width:100px">操作</th>
               </tr></thead>
               <tbody id="suspectResolvedTbody"></tbody>
@@ -480,7 +502,7 @@
         <div class="card">
           <div class="card-header">
             <h3>AWS 入口 DNS 自动追踪</h3>
-            <span class="muted" style="font-size:13px">检测到 A 记录变化时，自动冻结变化前 15/20 分钟的订阅者。</span>
+            <span class="muted" style="font-size:13px">TCP 失联信号负责精准定时，DNS 变化负责确认换 IP。</span>
           </div>
           <div class="filter-bar aws-watcher-form">
             <div class="aws-watcher-dns-field">
@@ -495,14 +517,22 @@
             </div>
             <div>
               <label style="display:block;font-size:12px;margin-bottom:4px">向前抓取</label>
-              <select id="awsWatcherLookback">
-                <option value="20" selected>20 分钟</option>
-                <option value="15">15 分钟</option>
-              </select>
+              <div class="aws-lookback-input"><input id="awsWatcherLookback" type="number" min="1" max="120" step="1" value="20" inputmode="numeric"><span>分钟</span></div>
             </div>
             <button class="primary" id="awsWatcherAddBtn">开始追踪</button>
           </div>
-          <p class="muted" style="margin:10px 0 12px">不选站点时，该 DNS 变化会记录全部站点；快照持久保存，不受日志清理影响。</p>
+          <p class="muted" style="margin:10px 0 12px">不选站点时记录全部站点。AWS 脚本检测到大陆 TCP 失联后，应立即调用下方接口；面板会保存首次失联时间，DNS 更新后按该时间冻结快照。</p>
+          <details class="aws-hook-guide">
+            <summary>自动脚本接入 · 精准记录首次失联时间</summary>
+            <div class="aws-hook-guide-body">
+              <p>在自动脚本确认旧 IP 的大陆 TCP 不通后、修改 DNS 之前执行。密钥与“机场管理”中的上报密钥相同。</p>
+              <pre><code>curl -X POST 'https://subpanel.rfspowered.us/hook/aws-failure' \
+  -H 'Content-Type: application/json' \
+  -H 'X-Report-Key: 你的上报密钥' \
+  -d '{"dns_name":"你的入口域名","tenant":"站点名或留空","ip":"即将更换的旧IP"}'</code></pre>
+              <p>返回 <code>failure anchor recorded</code> 即记录成功。重复上报只保留本轮最早的失联时间；上报 IP 与当前 DNS IP 不一致时会拒绝。</p>
+            </div>
+          </details>
           <div id="awsWatcherList" class="aws-watcher-grid"></div>
         </div>
         <div class="card" style="margin-top:16px">
@@ -887,6 +917,46 @@ curl -fsS http://127.0.0.1:19090/healthz</pre>
         <pre id="reportCodePHP" class="mono" style="background:#0f172a;color:#e2e8f0;padding:14px;border-radius:6px;overflow-x:auto;font-size:11.5px;line-height:1.5;white-space:pre-wrap;max-height:360px;overflow-y:auto"></pre>
         <button class="primary" id="reportCodeCopyBtn" style="margin-top:8px">复制代码</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- Token 拉黑 弹窗 -->
+<div class="modal-overlay" id="tokenBlockModal" style="display:none">
+  <div class="modal token-block-modal" style="width:560px">
+    <div class="modal-header">
+      <h3>拉黑 Token</h3>
+      <button class="close-btn" id="tokenBlockClose">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="token-block-summary">
+        <span class="muted">即将拉黑</span>
+        <code id="tokenBlockValue"></code>
+        <button type="button" class="ip-copy-btn copyable" id="tokenBlockCopy" data-copy="">复制</button>
+      </div>
+      <div class="form-row rule-action-field">
+        <label>命中后的处置动作 <span class="req">*</span></label>
+        <select id="tokenBlockAction">
+          <option value="fake">全投毒 · HTTP 200（返回黑洞订阅）</option>
+          <option value="deny">全拒绝 · HTTP 403（直接禁止访问）</option>
+        </select>
+        <p class="hint">Token 黑名单优先于 IP 白名单；一键透传仍可作为紧急回滚。</p>
+      </div>
+      <div class="rule-grid rule-grid-2">
+        <div class="form-row">
+          <label>拉黑原因</label>
+          <input id="tokenBlockReason" placeholder="例如：确认泄露 / 共享订阅">
+        </div>
+        <div class="form-row">
+          <label>有效期</label>
+          <input id="tokenBlockTTL" placeholder="如 24h，留空为永久">
+        </div>
+      </div>
+      <div class="token-block-warning">拉黑成功后，该 Token 会自动归档；解除拉黑时会同时取消归档。</div>
+    </div>
+    <div class="modal-footer">
+      <button id="tokenBlockCancel">取消</button>
+      <button class="danger solid" id="tokenBlockConfirm">确认拉黑</button>
     </div>
   </div>
 </div>

@@ -261,14 +261,28 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	tokenHash := g.hasher.Hash(pr.Token)
 
-	// 2.5) IP 白名单优先级最高:命中即跳过 banlist/黑名单/触发规则,直接透传。
+	// 2.5) Token 黑名单优先于 IP 白名单：明确拉黑的账户不能借白名单 IP 绕过。
+	if banned, action, reason := g.bans.CheckToken(tokenHash); banned {
+		tag := "banlist_token"
+		if reason != "" {
+			tag += ":" + reason
+		}
+		if action == "deny" {
+			g.respondDeny(w, pr, tokenHash, []string{tag}, start)
+		} else {
+			g.respondFake(w, r, pr, tokenHash, []string{tag}, start)
+		}
+		return
+	}
+
+	// 2.6) IP 白名单命中即跳过 IP banlist/黑名单/触发规则,直接透传。
 	// 也不进 detector.Observe(避免影响频率统计)。
 	if g.ipWhitelisted != nil && g.ipWhitelisted(pr.ClientIP) {
 		g.transparentProxyWithLog(w, r, pr, tokenHash, []string{"ip_whitelist"}, "pass", start)
 		return
 	}
 
-	// 3) banlist 检查(仅 IP,命中即投毒。token 黑名单已废弃,v2board 重置即可绕过)
+	// 3) IP banlist 检查（命中即投毒）。
 	if banned, reason := g.bans.CheckIP(pr.ClientIP); banned {
 		g.respondFake(w, r, pr, tokenHash, []string{"banlist_ip:" + reason}, start)
 		return

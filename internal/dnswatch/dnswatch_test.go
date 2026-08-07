@@ -38,6 +38,14 @@ func TestManagerRecordsDNSChangeForSelectedTenant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	failureAt := now.Add(-2 * time.Minute)
+	if _, err := st.MarkDNSWatcherFailure(context.Background(), w.DNSName, w.Tenant, "10.0.0.1", failureAt.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	w, err = st.GetDNSWatcher(context.Background(), w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	m := New(st, slog.New(slog.NewTextHandler(io.Discard, nil)), time.Minute)
 	m.now = func() time.Time { return now }
 	m.resolve = func(context.Context, string) ([]string, error) { return []string{"10.0.0.2"}, nil }
@@ -54,11 +62,14 @@ func TestManagerRecordsDNSChangeForSelectedTenant(t *testing.T) {
 	if change.Note != "新加坡入口" {
 		t.Fatalf("change did not inherit watcher note: %+v", change)
 	}
+	if change.FailureTS != failureAt.UnixMilli() {
+		t.Fatalf("change did not use TCP failure anchor: %+v", change)
+	}
 	if change.SiteCount != 1 || change.SubscriberCount != 1 || change.PullCount != 1 {
 		t.Fatalf("snapshot was not scoped to sled: %+v", change)
 	}
 	updated, err := st.GetDNSWatcher(context.Background(), w.ID)
-	if err != nil || updated.LastIPs != "10.0.0.2" || updated.LastError != "" {
+	if err != nil || updated.LastIPs != "10.0.0.2" || updated.LastError != "" || updated.PendingFailureTS != 0 {
 		t.Fatalf("watcher=%+v err=%v", updated, err)
 	}
 	history, err := st.ListDNSIPHistory(context.Background(), w.ID, 5)
