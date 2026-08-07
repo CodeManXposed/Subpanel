@@ -75,7 +75,7 @@
       <div class="avatar" id="userAvatar">A</div>
       <div>
         <div class="user-name">admin</div>
-        <div class="muted" style="font-size:11px">Sub-Panel v0.1.66</div>
+        <div class="muted" style="font-size:11px">Sub-Panel v0.1.67</div>
       </div>
       <button class="logout-btn" id="logoutBtn" title="退出">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
@@ -330,6 +330,32 @@
 
       <!-- 触发规则 -->
       <section id="tab-detect-rules" class="tab">
+        <div class="card uncommon-rule-card">
+          <div class="uncommon-rule-head">
+            <div>
+              <div class="uncommon-rule-title-row">
+                <span class="uncommon-rule-icon">UA</span>
+                <h3>非常见 UA 自动处置</h3>
+                <span id="uncommonUAState" class="pill empty">加载中</span>
+              </div>
+              <p>请求 UA 未命中内置常规订阅客户端库、且未命中下方 UA 正则白名单时，立即触发本规则。</p>
+            </div>
+            <div class="uncommon-rule-actions">
+              <select id="uncommonUAAction" aria-label="非常见 UA 命中后处置">
+                <option value="fake">投毒订阅 · HTTP 200</option>
+                <option value="deny">禁止访问 · HTTP 403</option>
+              </select>
+              <button id="uncommonUASave">保存处置</button>
+              <button id="uncommonUAToggle" class="primary">加载中</button>
+            </div>
+          </div>
+          <div class="uncommon-rule-facts">
+            <span><small>规则名称</small><strong class="mono">uncommon_ua</strong></span>
+            <span><small>触发方式</small><strong>单次请求立即命中</strong></span>
+            <span><small>白名单</small><strong>Go RE2 正则 · 忽略大小写</strong></span>
+            <span><small>其他规则</small><strong>互不影响</strong></span>
+          </div>
+        </div>
         <div class="card">
           <div class="card-header">
             <h3>触发规则</h3>
@@ -710,13 +736,6 @@
         </div>
       </div>
       <p class="hint" style="margin:8px 0 14px">同一行两个值都 &gt; 0 才生效。“云 IP 单 token 多 UA”只统计同一 token + 同一云厂商 IP，适合识别伪装多种客户端的测活。</p>
-
-      <div class="section-title">即时条件</div>
-      <label class="inline-check rule-uncommon-ua-check">
-        <input type="checkbox" id="ruleFormUncommonUA">
-        请求 UA 未命中常规订阅客户端库、且不在 UA 白名单时触发
-      </label>
-      <p class="hint" style="margin:6px 0 14px">该条件单次请求即可命中；建议处置选择“投毒订阅”。空 UA、浏览器或脚本 UA 均属于非常见 UA。</p>
 
       <details class="advanced">
         <summary>高级条件:云 IP / 地理 / ISP</summary>

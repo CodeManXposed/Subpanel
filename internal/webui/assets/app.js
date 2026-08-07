@@ -1134,11 +1134,15 @@ function ruleActionLabel(action) {
 async function loadRulesTable() {
   const r = await api('/api/detect_rules');
   const tbody = $('#rulesTbody'); tbody.innerHTML = '';
-  if (!Array.isArray(r) || !r.length) {
+  const allRules = Array.isArray(r) ? r : [];
+  const uncommonRule = allRules.find(x => x.name === 'uncommon_ua') || null;
+  renderUncommonUARule(uncommonRule);
+  const normalRules = allRules.filter(x => x.name !== 'uncommon_ua');
+  if (!normalRules.length) {
     tbody.innerHTML = '<tr><td colspan="7" class="empty">暂无规则,点右上角「+ 新增规则」开始</td></tr>';
     return;
   }
-  for (const x of r) {
+  for (const x of normalRules) {
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td class="mono">${escapeHtml(x.name)}</td>
@@ -1155,8 +1159,52 @@ async function loadRulesTable() {
     tbody.appendChild(tr);
   }
   $$('#rulesTbody button').forEach(btn => {
-    btn.addEventListener('click', () => onRuleAction(btn.dataset.act, btn.dataset.name, r));
+    btn.addEventListener('click', () => onRuleAction(btn.dataset.act, btn.dataset.name, normalRules));
   });
+}
+
+function uncommonRuleDefault() {
+  return {
+    original_name: '', name: 'uncommon_ua',
+    desc: '请求 UA 未命中常规订阅客户端库且不在 UA 白名单时自动处置',
+    action: 'fake', enabled: true, sort_order: 45, uncommon_ua: true,
+  };
+}
+
+function renderUncommonUARule(rule) {
+  const state = $('#uncommonUAState');
+  const action = $('#uncommonUAAction');
+  const toggle = $('#uncommonUAToggle');
+  const save = $('#uncommonUASave');
+  if (!state || !action || !toggle || !save) return;
+  const current = rule || uncommonRuleDefault();
+  action.value = current.action === 'deny' ? 'deny' : 'fake';
+  if (rule) {
+    state.className = `pill ${rule.enabled ? 'green' : 'empty'}`;
+    state.textContent = rule.enabled ? '已启用' : '已停用';
+    toggle.textContent = rule.enabled ? '停用规则' : '启用规则';
+    toggle.className = rule.enabled ? 'danger' : 'primary';
+  } else {
+    state.className = 'pill red';
+    state.textContent = '规则缺失';
+    toggle.textContent = '创建并启用';
+    toggle.className = 'primary';
+  }
+  save.disabled = !rule;
+  save.onclick = async () => {
+    const body = { ...rule, original_name: rule.name, action: action.value, uncommon_ua: true };
+    const result = await apiPost('/api/detect_rules/save', body);
+    if (result && result.ok) { toast('非常见 UA 处置已保存', 'success'); loadRulesTable(); }
+    else toast((result && result.error) || '保存失败', 'error');
+  };
+  toggle.onclick = async () => {
+    const body = rule
+      ? { ...rule, original_name: rule.name, enabled: !rule.enabled, uncommon_ua: true }
+      : uncommonRuleDefault();
+    const result = await apiPost('/api/detect_rules/save', body);
+    if (result && result.ok) { toast(rule && rule.enabled ? '规则已停用' : '规则已启用', 'success'); loadRulesTable(); }
+    else toast((result && result.error) || '操作失败', 'error');
+  };
 }
 
 async function onRuleAction(act, name, list) {
@@ -1201,7 +1249,6 @@ function openRuleModal(r) {
   set('ruleFormIdGte',         isEdit ? (r.ip_distinct_tokens_gte || '') : '');
   set('ruleFormCloudUAWin',    isEdit ? (r.cloud_token_distinct_uas_window_sec || '') : '');
   set('ruleFormCloudUAGte',    isEdit ? (r.cloud_token_distinct_uas_gte || '') : '');
-  $('#ruleFormUncommonUA').checked = isEdit ? !!r.uncommon_ua : false;
   set('ruleFormCountryIn',     isEdit ? listToCSV(r.country_in) : '');
   set('ruleFormCountryNotIn',  isEdit ? listToCSV(r.country_not_in) : '');
   set('ruleFormUsageIn',       isEdit ? listToCSV(r.usage_type_in) : '');
@@ -1249,7 +1296,6 @@ $('#ruleFormSave').addEventListener('click', async () => {
     ip_distinct_tokens_gte:            num('ruleFormIdGte'),
     cloud_token_distinct_uas_window_sec: num('ruleFormCloudUAWin'),
     cloud_token_distinct_uas_gte:        num('ruleFormCloudUAGte'),
-    uncommon_ua:                        $('#ruleFormUncommonUA').checked,
     from_cloud_ip:                     $('#ruleFormFromCloud').checked,
     country_in:                        csvToList($('#ruleFormCountryIn').value),
     country_not_in:                    csvToList($('#ruleFormCountryNotIn').value),
