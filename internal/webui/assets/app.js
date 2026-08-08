@@ -621,7 +621,7 @@ async function loadEvTopIP() {
     btn.addEventListener('click', async () => {
       const ip = btn.dataset.ip;
       if (!confirm('封禁 ' + ip + ' ?')) return;
-      const r = await apiPost('/api/bans/add', { kind: 'ip', target: ip, reason: '请求日志页手动封禁' });
+      const r = await apiPost('/api/bans/add', { kind: 'ip', target: ip, action: 'deny', reason: '请求日志页手动 REJECT' });
       if (r && r.ok) { toast('已封禁 ' + ip, 'success'); }
       else { toast((r && r.error) || '封禁失败', 'error'); }
     });
@@ -642,8 +642,10 @@ async function loadBans() {
       continue;
     }
     if (b.Kind !== 'ip') continue;
+    const action = b.Action === 'deny' ? 'deny' : 'fake';
     tr.innerHTML = `
       <td class="mono" title="${escapeHTML(b.Target)}">${escapeHTML(b.Target)}</td>
+      <td><span class="pill ${action}">${action === 'deny' ? 'REJECT · 403' : '投毒 · 200'}</span></td>
       <td>${escapeHTML(b.Reason || '')}</td>
       <td class="mono" title="${escapeHTML((b.RuleTags || []).join(','))}">${escapeHTML((b.RuleTags || []).map(tagLabel).join(','))}</td>
       <td class="mono" style="white-space:nowrap">${escapeHTML(fmtTime(b.CreatedTS))}</td>
@@ -653,7 +655,7 @@ async function loadBans() {
     `;
     ipTbody.appendChild(tr); ipCount++;
   }
-  if (!ipCount) ipTbody.innerHTML = '<tr><td colspan="7" class="empty-state">无封禁 IP</td></tr>';
+  if (!ipCount) ipTbody.innerHTML = '<tr><td colspan="8" class="empty-state">无封禁 IP</td></tr>';
   $$('#ipBanTbody button.danger').forEach(btn => {
     btn.addEventListener('click', async () => {
       if (!confirm('解除 ' + (btn.dataset.kind === 'token' ? 'Token ' : 'IP ') + btn.dataset.target + ' ?')) return;
@@ -669,13 +671,15 @@ $('#banIPAddBtn').addEventListener('click', async () => {
   if (!target) return toast('IP 不能为空', 'error');
   const r = await apiPost('/api/bans/add', {
     kind: 'ip', target,
+    action: $('#banIPAction').value === 'fake' ? 'fake' : 'deny',
     reason: $('#banIPReason').value.trim(),
     ttl: $('#banIPTTL').value.trim(),
   });
   if (r && r.ok) {
     $('#banIPTarget').value = ''; $('#banIPReason').value = ''; $('#banIPTTL').value = '';
     const updated = Number(r.updated || 0);
-    toast(`已新增 ${r.added || 0} 个${updated ? `，更新 ${updated} 个` : ''}`, 'success'); loadBans();
+    const actionText = r.action === 'deny' ? 'REJECT' : '投毒';
+    toast(`已按 ${actionText} 新增 ${r.added || 0} 个${updated ? `，更新 ${updated} 个` : ''}`, 'success'); loadBans();
   } else toast((r && r.error) || '失败', 'error');
 });
 
@@ -858,7 +862,10 @@ function renderIPPolicy(policy) {
   if (!policy) return '';
   const badges = [];
   if (policy.whitelisted) badges.push('<span class="geo-policy-badge allow">IP 白名单 · 优先放行</span>');
-  if (policy.ip_blacklisted) badges.push(`<span class="geo-policy-badge deny" title="${escapeHTML(policy.ip_blacklist_reason || '')}">手工 IP 黑名单${policy.ip_blacklist_reason ? ' · ' + escapeHTML(policy.ip_blacklist_reason) : ''}</span>`);
+  if (policy.ip_blacklisted) {
+    const ipAction = policy.ip_blacklist_action === 'deny' ? 'REJECT · 403' : '投毒 · 200';
+    badges.push(`<span class="geo-policy-badge deny" title="${escapeHTML(policy.ip_blacklist_reason || '')}">手工 IP 黑名单 · ${ipAction}${policy.ip_blacklist_reason ? ' · ' + escapeHTML(policy.ip_blacklist_reason) : ''}</span>`);
+  }
   for (const rawHit of (policy.global_hits || [])) {
     let hit = String(rawHit || '');
     if (hit.startsWith('云厂商 IP · ')) hit = '云厂商 IP · ' + cloudProviderLabel(hit.slice('云厂商 IP · '.length));

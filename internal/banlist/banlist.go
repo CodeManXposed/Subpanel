@@ -12,7 +12,7 @@ import (
 type entry struct {
 	expires time.Time // 零值 = 永久
 	reason  string
-	action  string // fake|deny；IP 固定 fake
+	action  string // fake|deny
 }
 
 type List struct {
@@ -45,7 +45,6 @@ func (l *List) LoadFromStore(ctx context.Context) error {
 		}
 		switch b.Kind {
 		case "ip":
-			e.action = "fake"
 			l.ips[b.Target] = e
 		case "token":
 			l.tokens[b.Target] = e
@@ -61,27 +60,40 @@ func normalizeAction(action string) string {
 	return "fake"
 }
 
-// CheckIP 检查 IP 是否封禁,返回 (banned, reason)。过期会被惰性清理。
+// CheckIP 检查 IP 是否封禁,保留旧签名给只关心命中的调用方。
 func (l *List) CheckIP(ip string) (bool, string) {
+	hit, _, reason := l.CheckIPAction(ip)
+	return hit, reason
+}
+
+// CheckIPAction 检查 IP 黑名单动作,返回 (banned, action, reason)。
+// 过期记录会被惰性清理。
+func (l *List) CheckIPAction(ip string) (bool, string, string) {
 	l.mu.RLock()
 	e, ok := l.ips[ip]
 	l.mu.RUnlock()
 	if !ok {
-		return false, ""
+		return false, "", ""
 	}
 	if !e.expires.IsZero() && time.Now().After(e.expires) {
 		l.mu.Lock()
 		delete(l.ips, ip)
 		l.mu.Unlock()
-		return false, ""
+		return false, "", ""
 	}
-	return true, e.reason
+	return true, normalizeAction(e.action), e.reason
 }
 
-// AddIP 立即在内存生效并落库。
+// AddIP 保留旧调用语义：未指定动作时默认投毒。
 func (l *List) AddIP(ip, reason string, ttl time.Duration, ruleTags []string, createdBy string) error {
+	return l.AddIPWithAction(ip, "fake", reason, ttl, ruleTags, createdBy)
+}
+
+// AddIPWithAction 立即在内存生效并落库。
+func (l *List) AddIPWithAction(ip, action, reason string, ttl time.Duration, ruleTags []string, createdBy string) error {
 	now := time.Now()
-	e := entry{reason: reason, action: "fake"}
+	action = normalizeAction(action)
+	e := entry{reason: reason, action: action}
 	var expPtr *time.Time
 	if ttl > 0 {
 		e.expires = now.Add(ttl)
@@ -98,6 +110,7 @@ func (l *List) AddIP(ip, reason string, ttl time.Duration, ruleTags []string, cr
 		CreatedTS: now,
 		ExpiresTS: expPtr,
 		CreatedBy: createdBy,
+		Action:    action,
 	})
 }
 
@@ -173,7 +186,7 @@ func (l *List) Snapshot() []Entry {
 		if !e.expires.IsZero() && time.Now().After(e.expires) {
 			continue
 		}
-		out = append(out, Entry{Kind: "ip", Target: k, Reason: e.reason, Expires: e.expires, Action: "fake"})
+		out = append(out, Entry{Kind: "ip", Target: k, Reason: e.reason, Expires: e.expires, Action: normalizeAction(e.action)})
 	}
 	for k, e := range l.tokens {
 		if !e.expires.IsZero() && time.Now().After(e.expires) {

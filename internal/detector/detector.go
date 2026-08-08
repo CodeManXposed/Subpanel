@@ -34,6 +34,11 @@ type Detector struct {
 	dynamicUAWhitelist func(ua string) bool
 }
 
+// 一个 IP 在风控最大窗口内只保留有限数量的 Token 维度样本。
+// IP 频率仍会持续计数，因此超过该值的请求仍会命中 IP 限流；只是不会再让
+// 随机生成 Token 的攻击把 tokenFreq / distinct UA 等内存表无限撑大。
+const maxTokenObservationsPerIPWindow = 256
+
 // GeoInfo 给 detector 用的精简版 IP 地理信息。
 // 避免 detector 直接依赖 geoip 包(循环 import 风险),由上层注入。
 type GeoInfo struct {
@@ -126,7 +131,13 @@ func (d *Detector) GCTargets() []interface{ GC() } {
 // Observe 把请求记入计数器(请求落库前调用)。
 // tokenHash 可能为空。ua 参数保留兼容签名,内部不再使用。
 func (d *Detector) Observe(ip, tokenHash, ua string) {
+	d.ipFreq.Inc(ip)
 	if tokenHash != "" {
+		// 默认 IP 频率规则在远低于 256 次时已经触发。达到上限后停止扩张
+		// Token 相关集合，同时保留 IP 频率计数供限流与自动恢复使用。
+		if d.ipFreq.Sum(ip, time.Duration(d.maxWindow.Load())) > maxTokenObservationsPerIPWindow {
+			return
+		}
 		d.tokenFreq.Inc(tokenHash)
 		d.tokenIPSet.Add(tokenHash, ip)
 		d.ipTokenSet.Add(ip, tokenHash)
@@ -134,7 +145,6 @@ func (d *Detector) Observe(ip, tokenHash, ua string) {
 			d.tokenIPUAs.Add(tokenIPUAKey(tokenHash, ip), ua)
 		}
 	}
-	d.ipFreq.Inc(ip)
 }
 
 // Result 检测结果。多条规则同时命中时 deny > rate_limit > fake。

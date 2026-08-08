@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS bans (
     created_ts INTEGER NOT NULL,
     expires_ts INTEGER,
     created_by TEXT,
-    action     TEXT NOT NULL DEFAULT 'fake', -- fake|deny，IP 固定 fake
+    action     TEXT NOT NULL DEFAULT 'fake', -- fake|deny，IP 与 Token 均支持
     UNIQUE(kind, target)
 );
 CREATE INDEX IF NOT EXISTS idx_bans_target ON bans(kind, target);
@@ -76,6 +76,8 @@ CREATE TABLE IF NOT EXISTS incidents (
 );
 CREATE INDEX IF NOT EXISTS idx_incidents_ts ON incidents(ts);
 CREATE INDEX IF NOT EXISTS idx_incidents_severity_ts ON incidents(severity, ts);
+CREATE INDEX IF NOT EXISTS idx_incidents_ip_ts ON incidents(client_ip, ts);
+CREATE INDEX IF NOT EXISTS idx_incidents_tenant_ts ON incidents(tenant, ts);
 
 CREATE TABLE IF NOT EXISTS meta (
     k TEXT PRIMARY KEY,
@@ -193,6 +195,8 @@ CREATE TABLE IF NOT EXISTS aws_ip_change_subscribers (
 );
 CREATE INDEX IF NOT EXISTS idx_aws_change_sub_change_tenant
     ON aws_ip_change_subscribers(change_id, tenant, pull_count DESC);
+CREATE INDEX IF NOT EXISTS idx_aws_change_sub_client_ip
+    ON aws_ip_change_subscribers(client_ip);
 
 CREATE TABLE IF NOT EXISTS dns_watchers (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -276,7 +280,7 @@ type Ban struct {
 	CreatedTS time.Time
 	ExpiresTS *time.Time
 	CreatedBy string
-	Action    string // fake|deny；IP 封禁固定使用 fake
+	Action    string // fake|deny；IP 与 Token 均支持
 }
 
 type Store struct {
@@ -329,6 +333,13 @@ func Open(path string, flushEvery time.Duration, flushSize int) (*Store, error) 
 			_ = db.Close()
 			return nil, fmt.Errorf("geoip index: %w", err)
 		}
+	}
+	// 嫌疑用户与 AWS 取证只分析真正取得或被投毒的订阅。部分索引排除
+	// 403/429 随机 Token，既加速页面，也避免为攻击垃圾建立大型组合索引。
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_events_evidence_tenant_ts_token
+		ON events(tenant,ts,token_hash) WHERE token_hash<>'' AND action IN ('pass','fake')`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("evidence index: %w", err)
 	}
 	// 为升级前的日志补齐“订阅后缀与 UA 是否匹配”。-1 表示未知，不误报。
 	if _, err := db.Exec(clientMatchBackfillSQL()); err != nil {
@@ -554,7 +565,7 @@ func (s *Store) AddBan(b Ban) error {
 	if b.Kind != "ip" && b.Kind != "token" {
 		return errors.New("封禁类型必须是 ip 或 token")
 	}
-	if b.Kind == "ip" || b.Action != "deny" {
+	if b.Action != "deny" {
 		b.Action = "fake"
 	}
 	tags, _ := json.Marshal(b.RuleTags)
@@ -1013,49 +1024,18 @@ func (s *Store) Summary(ctx context.Context, tenant string, since time.Time) (*S
 		tenantClause = " AND tenant=?"
 		args = append(args, tenant)
 	}
-	// 总数
-	if err := s.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM events WHERE ts>=?"+tenantClause, args...).Scan(&out.TotalEvents); err != nil {
-		return nil, err
-	}
-	// 按 action 拆
-	rows, err := s.db.QueryContext(ctx,
-		"SELECT action,COUNT(*) FROM events WHERE ts>=?"+tenantClause+" GROUP BY action", args...)
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var a string
-		var n int64
-		if err := rows.Scan(&a, &n); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		switch a {
-		case "pass":
-			out.PassCount = n
-		case "slow":
-			out.SlowCount = n
-		case "fake":
-			out.FakeCount = n
-		case "deny":
-			out.DenyCount = n
-		case "rate_limit":
-			out.RateLimitCount = n
-		}
-	}
-	rows.Close()
-	// unique
-	if err := s.db.QueryRowContext(ctx,
-		"SELECT COUNT(DISTINCT client_ip) FROM events WHERE ts>=?"+tenantClause, args...).Scan(&out.UniqueIPs); err != nil {
-		return nil, err
-	}
-	if err := s.db.QueryRowContext(ctx,
-		"SELECT COUNT(DISTINCT token_hash) FROM events WHERE ts>=? AND token_hash<>''"+tenantClause, args...).Scan(&out.UniqueTokens); err != nil {
+	// 总量、动作和去重统计合并为一次扫描；旧实现会重复扫描 events 4 次。
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*),
+		COALESCE(SUM(action='pass'),0),COALESCE(SUM(action='slow'),0),
+		COALESCE(SUM(action='fake'),0),COALESCE(SUM(action='deny'),0),
+		COALESCE(SUM(action='rate_limit'),0),COUNT(DISTINCT client_ip),
+		COUNT(DISTINCT NULLIF(token_hash,'')) FROM events WHERE ts>=?`+tenantClause, args...).Scan(
+		&out.TotalEvents, &out.PassCount, &out.SlowCount, &out.FakeCount, &out.DenyCount,
+		&out.RateLimitCount, &out.UniqueIPs, &out.UniqueTokens); err != nil {
 		return nil, err
 	}
 	// top ips
-	rows, err = s.db.QueryContext(ctx,
+	rows, err := s.db.QueryContext(ctx,
 		"SELECT client_ip,COUNT(*) c FROM events WHERE ts>=?"+tenantClause+
 			" GROUP BY client_ip ORDER BY c DESC LIMIT 10", args...)
 	if err != nil {
@@ -1389,7 +1369,7 @@ func (s *Store) AddAWSIPChange(ctx context.Context, change AWSIPChange) (*AWSIPC
 		SELECT ?, tenant, token_hash, COALESCE(client_ip,''), COALESCE(ua,''), COUNT(*), MIN(ts), MAX(ts),
 		       COALESCE(MAX(NULLIF(cloud_provider,'')),''), COALESCE(MAX(NULLIF(asn,'')),''), COALESCE(MAX(NULLIF(asn_org,'')),'')
 		FROM events
-		WHERE ts>=? AND ts<=? AND token_hash<>''`
+		WHERE ts>=? AND ts<=? AND token_hash<>'' AND action IN ('pass','fake')`
 	snapshotArgs := []any{change.ID, windowStart, snapshotAnchor}
 	if change.Tenant != "" {
 		snapshotSQL += " AND tenant=?"
@@ -2586,7 +2566,7 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 		       COALESCE(GROUP_CONCAT(DISTINCT NULLIF(e.cloud_provider,'')),''),
 		       COALESCE(GROUP_CONCAT(DISTINCT CASE WHEN COALESCE(e.cloud_provider,'')<>''
 		              THEN NULLIF(e.asn,'') END),'')
-		FROM events e WHERE e.ts>=? AND e.token_hash<>''`+tenantCond+`
+		FROM events e WHERE e.ts>=? AND e.token_hash<>'' AND e.action IN ('pass','fake')`+tenantCond+`
 		  AND NOT EXISTS (SELECT 1 FROM resolved_tokens rt
 		      WHERE (rt.token=e.token_hash OR e.token_hash IN
 		          (SELECT a2.token FROM token_associations a1 JOIN token_associations a2
@@ -2633,7 +2613,7 @@ func (s *Store) QuerySuspects(tenant string, since time.Time) ([]SuspectRow, err
 		FROM (
 			SELECT e.token_hash, e.tenant, e.client_ip, e.ua,
 			       ROW_NUMBER() OVER (PARTITION BY e.token_hash, e.tenant ORDER BY e.ts DESC, e.id DESC) AS rn
-			FROM events e WHERE e.ts>=? AND e.token_hash<>''`+tenantCond+`
+			FROM events e WHERE e.ts>=? AND e.token_hash<>'' AND e.action IN ('pass','fake')`+tenantCond+`
 			  AND NOT EXISTS (SELECT 1 FROM resolved_tokens rt
 			      WHERE (rt.token=e.token_hash OR e.token_hash IN
 			          (SELECT a2.token FROM token_associations a1 JOIN token_associations a2

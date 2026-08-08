@@ -146,7 +146,26 @@ func TestAddAndListBans(t *testing.T) {
 		t.Errorf("rule tags: %+v", bs[0].RuleTags)
 	}
 	if bs[0].Action != "fake" {
-		t.Errorf("IP ban action should normalize to fake, got %q", bs[0].Action)
+		t.Errorf("IP ban default action should remain fake, got %q", bs[0].Action)
+	}
+	if err := st.AddBan(Ban{Kind: "ip", Target: "5.6.7.8", Action: "deny", CreatedTS: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	bs, err = st.ListActiveBans(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foundRejectIP bool
+	for _, b := range bs {
+		if b.Kind == "ip" && b.Target == "5.6.7.8" {
+			foundRejectIP = true
+			if b.Action != "deny" {
+				t.Errorf("IP reject action=%q, want deny", b.Action)
+			}
+		}
+	}
+	if !foundRejectIP {
+		t.Error("reject IP ban was not listed")
 	}
 
 	if err := st.AddBan(Ban{Kind: "token", Target: "leaked-token", Action: "deny", CreatedTS: time.Now()}); err != nil {

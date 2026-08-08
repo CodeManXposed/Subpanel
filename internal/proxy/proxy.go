@@ -48,6 +48,7 @@ type Gateway struct {
 	requests atomic.Uint64
 	logger   *slog.Logger
 	guard    *upstreamGuard
+	abuseLog *abuseLogSampler
 
 	// 可选:GeoIP 查询,用于把地区、ASN 与云厂商信息落进请求日志。
 	geoLookup func(ip string) NetworkInfo
@@ -125,10 +126,11 @@ func NewGateway(
 	_ = autoBan
 	g := &Gateway{
 		cfg: cfg, hasher: hasher, st: st, bans: bans, det: det,
-		faker:  fk,
-		rng:    rand.New(rand.NewSource(time.Now().UnixNano())),
-		logger: logger,
-		guard:  newUpstreamGuard(cfg.RateLimit),
+		faker:    fk,
+		rng:      rand.New(rand.NewSource(time.Now().UnixNano())),
+		logger:   logger,
+		guard:    newUpstreamGuard(cfg.RateLimit),
+		abuseLog: newAbuseLogSampler(10*time.Second, 10000),
 	}
 	if err := g.Reload(cfg.Tenants); err != nil {
 		return nil, err
@@ -285,9 +287,17 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3) IP banlist 检查（命中即投毒）。
-	if banned, reason := g.bans.CheckIP(pr.ClientIP); banned {
-		g.respondFake(w, r, pr, tokenHash, []string{"banlist_ip:" + reason}, start)
+	// 3) IP banlist 检查：按记录动作投毒或直接 403，均在访问上游前执行。
+	if banned, action, reason := g.bans.CheckIPAction(pr.ClientIP); banned {
+		tag := "banlist_ip"
+		if reason != "" {
+			tag += ":" + reason
+		}
+		if action == "deny" {
+			g.respondDeny(w, pr, tokenHash, []string{tag}, start)
+		} else {
+			g.respondFake(w, r, pr, tokenHash, []string{tag}, start)
+		}
 		return
 	}
 
@@ -322,14 +332,18 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 6) 记 incident(如有命中)
 	if res.Hit {
-		g.st.SubmitIncident(store.Incident{
-			TS:        time.Now(),
-			Tenant:    pr.Tenant.Name,
-			ClientIP:  pr.ClientIP,
-			TokenHash: tokenHash,
-			RuleTags:  res.Tags,
-			Note:      res.Note,
-		})
+		// 429 攻击流量按 IP 采样 incident；否则攻击者虽打不到源站，仍可
+		// 通过 incidents 表制造百万行写放大。
+		if res.Action != "rate_limit" || g.abuseLog.Allow("incident_rate_limit", pr.ClientIP, start) {
+			g.st.SubmitIncident(store.Incident{
+				TS:        time.Now(),
+				Tenant:    pr.Tenant.Name,
+				ClientIP:  pr.ClientIP,
+				TokenHash: tokenHash,
+				RuleTags:  res.Tags,
+				Note:      res.Note,
+			})
+		}
 	}
 	if res.Hit && g.cfg.Detector.ObserveOnly {
 		tags := append(append([]string(nil), res.Tags...), "observe_only")
@@ -370,7 +384,9 @@ func (g *Gateway) respondRateLimit(w http.ResponseWriter, pr *parser.Request, to
 	const body = "Too Many Requests\n"
 	w.WriteHeader(http.StatusTooManyRequests)
 	_, _ = io.WriteString(w, body)
-	g.logEvent(pr, tokenHash, "rate_limit", http.StatusTooManyRequests, tags, 0, int64(len(body)), start)
+	if g.abuseLog.Allow("rate_limit", pr.ClientIP, start) {
+		g.logEvent(pr, tokenHash, "rate_limit", http.StatusTooManyRequests, tags, 0, int64(len(body)), start)
+	}
 }
 
 func (g *Gateway) respondDeny(w http.ResponseWriter, pr *parser.Request, tokenHash string, tags []string, start time.Time) {
@@ -379,7 +395,20 @@ func (g *Gateway) respondDeny(w http.ResponseWriter, pr *parser.Request, tokenHa
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusForbidden)
 	_, _ = io.WriteString(w, body)
-	g.logEvent(pr, tokenHash, "deny", http.StatusForbidden, tags, 0, int64(len(body)), start)
+	// 手工 REJECT IP 在 CC 场景下可能每秒数千次；全部拦截，但同 IP 每 10 秒
+	// 最多落一条明细，避免攻击者改为打满 SQLite。Token/规则 deny 仍完整记录。
+	if !hasTagPrefix(tags, "banlist_ip") || g.abuseLog.Allow("ip_reject", pr.ClientIP, start) {
+		g.logEvent(pr, tokenHash, "deny", http.StatusForbidden, tags, 0, int64(len(body)), start)
+	}
+}
+
+func hasTagPrefix(tags []string, prefix string) bool {
+	for _, tag := range tags {
+		if tag == prefix || strings.HasPrefix(tag, prefix+":") {
+			return true
+		}
+	}
+	return false
 }
 
 // 带日志的反代
@@ -575,6 +604,47 @@ type upstreamGuard struct {
 	perIPMax      int
 	perIPActive   map[string]int
 	upstreamSlots chan struct{}
+}
+
+// abuseLogSampler 只控制高频拦截事件的日志落库，不影响请求拦截。
+// 容量封顶，避免分布式随机 IP 反过来撑爆采样器自身。
+type abuseLogSampler struct {
+	mu       sync.Mutex
+	interval time.Duration
+	maxKeys  int
+	last     map[string]time.Time
+	lastGC   time.Time
+}
+
+func newAbuseLogSampler(interval time.Duration, maxKeys int) *abuseLogSampler {
+	return &abuseLogSampler{interval: interval, maxKeys: maxKeys, last: make(map[string]time.Time), lastGC: time.Now()}
+}
+
+func (s *abuseLogSampler) Allow(action, ip string, now time.Time) bool {
+	key := action + "\x00" + ip
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if now.Sub(s.lastGC) >= time.Minute {
+		cutoff := now.Add(-2 * s.interval)
+		for k, ts := range s.last {
+			if ts.Before(cutoff) {
+				delete(s.last, k)
+			}
+		}
+		s.lastGC = now
+	}
+	if prev, ok := s.last[key]; ok {
+		if now.Sub(prev) < s.interval {
+			return false
+		}
+		s.last[key] = now
+		return true
+	}
+	if len(s.last) >= s.maxKeys {
+		return false
+	}
+	s.last[key] = now
+	return true
 }
 
 func newUpstreamGuard(cfg config.RateLimitCfg) *upstreamGuard {

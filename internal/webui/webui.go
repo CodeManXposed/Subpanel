@@ -785,6 +785,13 @@ func (s *Server) apiBanAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	switch body.Kind {
 	case "ip":
+		if body.Action == "" {
+			body.Action = "fake"
+		}
+		if body.Action != "fake" && body.Action != "deny" {
+			writeJSON(w, 400, map[string]any{"error": "action must be fake or deny"})
+			return
+		}
 		parts := strings.FieldsFunc(body.Target, func(r rune) bool {
 			return r == ',' || r == '，' || r == '/' || r == '\n' || r == '\r' || r == ';' || r == '；' || r == '\t'
 		})
@@ -824,7 +831,7 @@ func (s *Server) apiBanAdd(w http.ResponseWriter, r *http.Request) {
 		}
 		added, updated := 0, 0
 		for _, target := range targets {
-			if err := s.bans.AddIP(target, body.Reason, ttl, nil, "manual"); err != nil {
+			if err := s.bans.AddIPWithAction(target, body.Action, body.Reason, ttl, nil, "manual"); err != nil {
 				writeJSON(w, 500, map[string]any{"error": err.Error(), "added": added, "updated": updated})
 				return
 			}
@@ -834,7 +841,7 @@ func (s *Server) apiBanAdd(w http.ResponseWriter, r *http.Request) {
 				added++
 			}
 		}
-		writeJSON(w, 200, map[string]any{"ok": true, "total": len(targets), "added": added, "updated": updated})
+		writeJSON(w, 200, map[string]any{"ok": true, "total": len(targets), "added": added, "updated": updated, "action": body.Action})
 		return
 	case "token":
 		if body.Action == "" {
@@ -1320,6 +1327,7 @@ type ipPolicyStatus struct {
 	Whitelisted       bool     `json:"whitelisted"`
 	IPBlacklisted     bool     `json:"ip_blacklisted"`
 	IPBlacklistReason string   `json:"ip_blacklist_reason,omitempty"`
+	IPBlacklistAction string   `json:"ip_blacklist_action,omitempty"`
 	GlobalHits        []string `json:"global_hits"`
 }
 
@@ -1329,7 +1337,7 @@ func (s *Server) ipPolicyStatus(ip string, info *geoip.Info) ipPolicyStatus {
 		out.Whitelisted = s.rules.IPWhitelisted(ip)
 	}
 	if s.bans != nil {
-		out.IPBlacklisted, out.IPBlacklistReason = s.bans.CheckIP(ip)
+		out.IPBlacklisted, out.IPBlacklistAction, out.IPBlacklistReason = s.bans.CheckIPAction(ip)
 	}
 	if s.bl == nil || info == nil {
 		return out

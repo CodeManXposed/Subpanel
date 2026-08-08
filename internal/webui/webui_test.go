@@ -466,7 +466,7 @@ func TestBanAddRemoveViaAPI(t *testing.T) {
 	cookie := w.Result().Cookies()[0]
 
 	// 加封禁
-	body = strings.NewReader(`{"kind":"ip","target":"1.2.3.4","reason":"manual","ttl":"1h"}`)
+	body = strings.NewReader(`{"kind":"ip","target":"1.2.3.4","action":"deny","reason":"manual","ttl":"1h"}`)
 	req = httptest.NewRequest("POST", "/api/bans/add", body)
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(cookie)
@@ -475,8 +475,8 @@ func TestBanAddRemoveViaAPI(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("ban add: %d body=%s", w.Code, w.Body.String())
 	}
-	if banned, _ := bans.CheckIP("1.2.3.4"); !banned {
-		t.Error("ip should be banned in memory")
+	if banned, action, _ := bans.CheckIPAction("1.2.3.4"); !banned || action != "deny" {
+		t.Errorf("ip should be rejected in memory, banned=%v action=%q", banned, action)
 	}
 
 	// 删

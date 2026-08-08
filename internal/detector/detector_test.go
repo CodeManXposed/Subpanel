@@ -130,3 +130,30 @@ func TestRateLimitActionAndPrecedence(t *testing.T) {
 		t.Fatalf("result=%+v, want rate_limit with 10m retry", got)
 	}
 }
+
+func TestObserveCapsRandomTokensPerIPWithoutStoppingIPFrequency(t *testing.T) {
+	cfg := &config.DetectorCfg{Rules: []config.Rule{{
+		Name: "ip_flood", Action: "rate_limit",
+		When: config.When{IPFreq: &config.Cond{Window: config.Duration(time.Hour), GTE: 20}},
+	}}}
+	d, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const ip = "104.28.198.10"
+	for i := 0; i < maxTokenObservationsPerIPWindow+5000; i++ {
+		d.Observe(ip, fmt.Sprintf("random-token-%d", i), "script/1.0")
+	}
+	if got := d.ipTokenSet.Count(ip, time.Hour); got != maxTokenObservationsPerIPWindow {
+		t.Fatalf("tracked random tokens=%d, want capped at %d", got, maxTokenObservationsPerIPWindow)
+	}
+	if got := d.ipFreq.Sum(ip, time.Hour); got != maxTokenObservationsPerIPWindow+5000 {
+		t.Fatalf("IP frequency=%d, want all requests retained", got)
+	}
+	if got := d.tokenFreq.Sum("random-token-5000", time.Hour); got != 0 {
+		t.Fatalf("late random token should not allocate tracking state, got count=%d", got)
+	}
+	if got := d.Evaluate(ip, "random-token-5000", "script/1.0"); !got.Hit || got.Action != "rate_limit" {
+		t.Fatalf("IP flood must remain rate-limited after token cap: %+v", got)
+	}
+}

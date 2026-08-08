@@ -1607,7 +1607,7 @@ details.advanced[open] > summary {
 
 .ban-entry-grid {
   display: grid;
-  grid-template-columns: minmax(340px, 1.5fr) minmax(180px, .8fr) minmax(170px, .65fr) auto;
+  grid-template-columns: minmax(300px, 1.4fr) minmax(210px, .8fr) minmax(160px, .7fr) minmax(150px, .6fr) auto;
   gap: 10px;
   align-items: end;
 }
@@ -1623,6 +1623,7 @@ details.advanced[open] > summary {
   font-weight: 500;
 }
 .ban-entry-field input,
+.ban-entry-field select,
 .ban-entry-field textarea {
   width: 100%;
 }

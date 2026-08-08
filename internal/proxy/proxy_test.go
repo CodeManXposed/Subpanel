@@ -254,6 +254,26 @@ func TestUpstreamGuardRejectsWithoutQueueing(t *testing.T) {
 	}
 }
 
+func TestAbuseLogSamplerBoundsRepeatedAndDistributedKeys(t *testing.T) {
+	s := newAbuseLogSampler(10*time.Second, 2)
+	now := time.Now()
+	if !s.Allow("ip_reject", "1.1.1.1", now) {
+		t.Fatal("first event should be logged")
+	}
+	if s.Allow("ip_reject", "1.1.1.1", now.Add(time.Second)) {
+		t.Fatal("repeated event inside sample window should be suppressed")
+	}
+	if !s.Allow("ip_reject", "2.2.2.2", now) {
+		t.Fatal("second key should fit")
+	}
+	if s.Allow("ip_reject", "3.3.3.3", now) {
+		t.Fatal("sampler must reject new keys after capacity is reached")
+	}
+	if !s.Allow("ip_reject", "1.1.1.1", now.Add(11*time.Second)) {
+		t.Fatal("existing key should be logged after sample window")
+	}
+}
+
 func TestE2EHighTokenFreqRedDenyAndBan(t *testing.T) {
 	gw, _, _, bans, cleanup := newE2E(t, false)
 	defer cleanup()
@@ -323,6 +343,35 @@ func TestE2EManualBan(t *testing.T) {
 	// banlist 命中也走投毒(200)
 	if w.Code != 200 {
 		t.Errorf("expected 200 (poisoned) for banned IP, got %d", w.Code)
+	}
+}
+
+func TestE2EIPRejectNeverReachesUpstream(t *testing.T) {
+	gw, _, _, bans, cleanup := newE2E(t, false)
+	defer cleanup()
+
+	var upstreamHits atomic.Int64
+	protectedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer protectedUpstream.Close()
+	tenants := gw.Tenants()
+	tenants[0].Upstream = protectedUpstream.URL
+	if err := gw.Reload(tenants); err != nil {
+		t.Fatal(err)
+	}
+	if err := bans.AddIPWithAction("7.7.7.8", "deny", "scanner", time.Hour, nil, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	gw.ServeHTTP(w, mkSubReq("sub.example.com", "ClashforWindows/0.20", "t", "clash", "7.7.7.8"))
+	if w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != "Forbidden" {
+		t.Fatalf("IP reject response=%d %q", w.Code, w.Body.String())
+	}
+	if got := upstreamHits.Load(); got != 0 {
+		t.Fatalf("rejected IP reached upstream %d times", got)
 	}
 }
 

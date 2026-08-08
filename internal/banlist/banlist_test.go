@@ -62,3 +62,20 @@ func TestExpiredTokenBan(t *testing.T) {
 		t.Error("expired token should not be loaded")
 	}
 }
+
+func TestIPRejectActionAndReload(t *testing.T) {
+	l, st := newTestList(t)
+	if err := l.AddIPWithAction("1.2.3.4", "deny", "scanner", time.Hour, nil, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if hit, action, reason := l.CheckIPAction("1.2.3.4"); !hit || action != "deny" || reason != "scanner" {
+		t.Fatalf("IP action check=(%v,%q,%q)", hit, action, reason)
+	}
+	reloaded := New(st)
+	if err := reloaded.LoadFromStore(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if hit, action, _ := reloaded.CheckIPAction("1.2.3.4"); !hit || action != "deny" {
+		t.Fatalf("reloaded IP action=(%v,%q)", hit, action)
+	}
+}
