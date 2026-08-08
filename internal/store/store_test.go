@@ -489,6 +489,110 @@ func TestListAWSSuspectSummariesGroupsEntrySiteAndToken(t *testing.T) {
 	}
 }
 
+func TestAnalyzePanelTimelineSeparatesStableAndPrewallTokens(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	base := time.Now().Add(-6 * time.Hour).Truncate(time.Second)
+	changes := []time.Time{base.Add(time.Hour), base.Add(2 * time.Hour), base.Add(3 * time.Hour)}
+	events := []Event{
+		{TS: base.Add(10 * time.Minute), Tenant: "sled", TokenHash: "mixed-token", ClientIP: "1.1.1.1", Action: "pass", Status: 200},
+		{TS: base.Add(20 * time.Minute), Tenant: "sled", TokenHash: "normal-only", ClientIP: "1.1.1.2", Action: "pass", Status: 200},
+	}
+	for i, at := range changes {
+		events = append(events,
+			Event{TS: at.Add(-time.Minute), Tenant: "sled", TokenHash: "mixed-token", ClientIP: fmt.Sprintf("2.2.2.%d", i+1), UA: "clash", Action: "pass", Status: 200},
+			Event{TS: at.Add(-2 * time.Minute), Tenant: "sled", TokenHash: "wall-only", ClientIP: fmt.Sprintf("3.3.3.%d", i+1), UA: "script", Action: "pass", Status: 200},
+		)
+		if i == 0 {
+			events = append(events, Event{TS: at.Add(-3 * time.Minute), Tenant: "sled", TokenHash: "weak-token", ClientIP: "4.4.4.4", Action: "fake", Status: 200})
+		}
+	}
+	for _, event := range events {
+		st.SubmitEvent(event)
+	}
+	time.Sleep(400 * time.Millisecond)
+	for i, at := range changes {
+		if _, err := st.AddAWSIPChange(ctx, AWSIPChange{
+			OccurredTS: at.UnixMilli(), DNSName: "analysis.example.com", Tenant: "sled",
+			OldIP: "10.0.0.1", NewIP: fmt.Sprintf("10.0.0.%d", i+2), LookbackMinutes: 5, Note: "测试入口",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := st.AnalyzePanelTimeline(ctx, PanelAnalysisFilter{
+		StartTS: base.UnixMilli(), EndTS: base.Add(4 * time.Hour).UnixMilli(), DNSName: "analysis.example.com", Tenant: "sled",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Summary.TokenCount != 4 || got.Summary.RealTokenCount != 3 || got.Summary.WallEventCount != 3 || got.Summary.PrewallTokenCount != 3 {
+		t.Fatalf("unexpected analysis summary: %+v", got.Summary)
+	}
+	byToken := map[string]PanelAnalysisRow{}
+	for _, row := range got.Rows {
+		byToken[row.TokenHash] = row
+	}
+	wall := byToken["wall-only"]
+	if wall.Classification != "wall_only" || wall.ChangeHits != 3 || wall.EligibleChanges != 3 || wall.NormalPulls != 0 {
+		t.Fatalf("wall-only token not identified: %+v", wall)
+	}
+	mixed := byToken["mixed-token"]
+	if mixed.Classification != "repeated" || mixed.ChangeHits != 3 || mixed.NormalPulls != 1 || mixed.RealPulls != 4 {
+		t.Fatalf("mixed repeated token not identified: %+v", mixed)
+	}
+	weak := byToken["weak-token"]
+	if weak.Classification != "weak" || weak.ChangeHits != 1 || weak.NormalPulls != 0 {
+		t.Fatalf("weak token not identified: %+v", weak)
+	}
+}
+
+func TestAnalyzePanelTimelineStrictTenantAndLookback(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	anchor := time.Now().Add(-time.Hour).Truncate(time.Second)
+	for _, event := range []Event{
+		{TS: anchor.Add(-30 * time.Second), Tenant: "rfs", TokenHash: "rfs-near", Action: "pass", Status: 200},
+		{TS: anchor.Add(-4 * time.Minute), Tenant: "rfs", TokenHash: "rfs-old", Action: "pass", Status: 200},
+		{TS: anchor.Add(-20 * time.Second), Tenant: "sled", TokenHash: "sled-near", Action: "pass", Status: 200},
+	} {
+		st.SubmitEvent(event)
+	}
+	time.Sleep(400 * time.Millisecond)
+	if _, err := st.AddAWSIPChange(ctx, AWSIPChange{
+		OccurredTS: anchor.UnixMilli(), DNSName: "global.example.com", Tenant: "",
+		OldIP: "10.0.0.1", NewIP: "10.0.0.2", LookbackMinutes: 5,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	narrow, err := st.AnalyzePanelTimeline(ctx, PanelAnalysisFilter{
+		StartTS: anchor.Add(-10 * time.Minute).UnixMilli(), EndTS: anchor.Add(time.Minute).UnixMilli(),
+		DNSName: "global.example.com", Tenant: "rfs", LookbackMinutes: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(narrow.Rows) != 1 || narrow.Rows[0].Tenant != "rfs" || narrow.Rows[0].TokenHash != "rfs-near" {
+		t.Fatalf("tenant/window leaked rows: %+v", narrow.Rows)
+	}
+
+	wide, err := st.AnalyzePanelTimeline(ctx, PanelAnalysisFilter{
+		StartTS: anchor.Add(-10 * time.Minute).UnixMilli(), EndTS: anchor.Add(time.Minute).UnixMilli(),
+		DNSName: "global.example.com", Tenant: "rfs", LookbackMinutes: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wide.Rows) != 2 {
+		t.Fatalf("five-minute window rows=%+v", wide.Rows)
+	}
+	for _, row := range wide.Rows {
+		if row.Tenant != "rfs" || row.TokenHash == "sled-near" {
+			t.Fatalf("cross-tenant row leaked: %+v", row)
+		}
+	}
+}
+
 func TestDNSWatcherLifecycle(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()

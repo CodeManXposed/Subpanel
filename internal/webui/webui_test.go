@@ -57,7 +57,7 @@ func setup(t *testing.T) (*Server, *store.Store, *banlist.List) {
 	cm := cloudip.NewMatcher()
 	rulesMgr := rules.NewManager(st)
 	_ = rulesMgr.Reload()
-	srv := NewServer(cfg, st, bans, hasher, cm, nil, rulesMgr, nil, nil, nil, logger)
+	srv := NewServer(cfg, st, bans, hasher, cm, nil, rulesMgr, nil, nil, nil, "0.1.86-test", logger)
 	return srv, st, bans
 }
 
@@ -83,6 +83,62 @@ func TestLoginRequired(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if w.Code != 401 {
 		t.Errorf("want 401, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestRenderedPagesUseRuntimeVersion(t *testing.T) {
+	srv, _, _ := setup(t)
+	h := srv.Handler()
+
+	loginReq := httptest.NewRequest(http.MethodGet, "/login", nil)
+	loginRec := httptest.NewRecorder()
+	h.ServeHTTP(loginRec, loginReq)
+	if loginRec.Code != http.StatusOK || !strings.Contains(loginRec.Body.String(), "v0.1.86-test") || strings.Contains(loginRec.Body.String(), "{{VERSION}}") {
+		t.Fatalf("login runtime version not rendered: code=%d", loginRec.Code)
+	}
+	if got := loginRec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("login cache control=%q", got)
+	}
+
+	cookie := login(t, h)
+	indexReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	indexReq.AddCookie(cookie)
+	indexRec := httptest.NewRecorder()
+	h.ServeHTTP(indexRec, indexReq)
+	if indexRec.Code != http.StatusOK || !strings.Contains(indexRec.Body.String(), "Sub-Panel v0.1.86-test") {
+		t.Fatalf("index runtime version not rendered: code=%d", indexRec.Code)
+	}
+}
+
+func TestPanelAnalysisToggleAndEmptyQuery(t *testing.T) {
+	srv, _, _ := setup(t)
+	h := srv.Handler()
+	cookie := login(t, h)
+
+	post := httptest.NewRequest(http.MethodPost, "/api/panel-analysis/settings", strings.NewReader(`{"enabled":true}`))
+	post.Header.Set("Content-Type", "application/json")
+	post.AddCookie(cookie)
+	postRec := httptest.NewRecorder()
+	h.ServeHTTP(postRec, post)
+	if postRec.Code != http.StatusOK {
+		t.Fatalf("enable analysis: %d %s", postRec.Code, postRec.Body.String())
+	}
+
+	now := time.Now()
+	url := fmt.Sprintf("/api/panel-analysis?start_ts=%d&end_ts=%d", now.Add(-time.Hour).UnixMilli(), now.UnixMilli())
+	get := httptest.NewRequest(http.MethodGet, url, nil)
+	get.AddCookie(cookie)
+	getRec := httptest.NewRecorder()
+	h.ServeHTTP(getRec, get)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("query analysis: %d %s", getRec.Code, getRec.Body.String())
+	}
+	var payload struct {
+		Enabled bool                     `json:"enabled"`
+		Rows    []store.PanelAnalysisRow `json:"rows"`
+	}
+	if err := json.Unmarshal(getRec.Body.Bytes(), &payload); err != nil || !payload.Enabled || len(payload.Rows) != 0 {
+		t.Fatalf("unexpected analysis response: %+v err=%v", payload, err)
 	}
 }
 

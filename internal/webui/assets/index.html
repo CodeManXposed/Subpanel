@@ -50,6 +50,10 @@
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/><path d="M8 11h6M11 8v6"/></svg>
       嫌疑用户（By AWS）
     </a>
+    <a class="navlink" data-tab="panel-analysis">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m7 16 4-5 4 3 5-8"/><circle cx="11" cy="11" r="1"/><circle cx="15" cy="14" r="1"/></svg>
+      面板强检测
+    </a>
     <a class="navlink" data-tab="resolved">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16v13H4z"/><path d="M8 7V5a4 4 0 0 1 8 0v2"/><path d="m9 14 2 2 4-4"/></svg>
       Token 黑名单
@@ -79,7 +83,7 @@
       <div class="avatar" id="userAvatar">A</div>
       <div>
         <div class="user-name">admin</div>
-        <div class="muted" style="font-size:11px">Sub-Panel v0.1.82</div>
+        <div class="muted" style="font-size:11px">Sub-Panel v{{VERSION}}</div>
       </div>
       <button class="logout-btn" id="logoutBtn" title="退出">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
@@ -544,6 +548,61 @@
           </div>
         </div>
         <div id="awsSuspectList" class="aws-suspect-list"></div>
+      </section>
+
+      <!-- 单面板稳定期 / 墙前时序分析 -->
+      <section id="tab-panel-analysis" class="tab">
+        <div class="card panel-analysis-hero">
+          <div class="panel-analysis-heading">
+            <div>
+              <h3>面板强检测</h3>
+              <p class="muted">对比入口稳定期与最近最多 50 次 AWS 墙前窗口。只在墙前反复出现、正常期从未拉取的 Token 会直接标红。</p>
+            </div>
+            <label class="panel-analysis-switch">
+              <input id="panelAnalysisToggle" type="checkbox">
+              <span></span>
+              <b id="panelAnalysisToggleText">未开启</b>
+            </label>
+          </div>
+          <div id="panelAnalysisDisabled" class="panel-analysis-disabled">
+            开启后才会执行重型时序聚合；关闭时不产生额外查询负担。现有请求日志和 AWS 墙前快照可直接用于分析。
+          </div>
+          <div id="panelAnalysisControls" class="panel-analysis-controls" hidden>
+            <div class="panel-analysis-control-row panel-analysis-scope-row">
+              <label><span>分析开始</span><input id="panelAnalysisStart" type="datetime-local"></label>
+              <label><span>分析结束</span><input id="panelAnalysisEnd" type="datetime-local"></label>
+              <label><span>墙前窗口</span><select id="panelAnalysisLookback"><option value="1">1 分钟</option><option value="3">3 分钟</option><option value="5">5 分钟</option><option value="10">10 分钟</option><option value="15">15 分钟</option><option value="20" selected>20 分钟</option><option value="30">30 分钟</option><option value="60">1 小时</option><option value="120">2 小时</option></select></label>
+              <label><span>站点</span><select id="panelAnalysisTenant"><option value="">全部站点</option></select></label>
+              <label class="panel-analysis-dns"><span>入口 DNS</span><select id="panelAnalysisDNS"><option value="">全部入口</option></select></label>
+            </div>
+            <div class="panel-analysis-control-row panel-analysis-query-row">
+              <label><span>结论</span><select id="panelAnalysisClass"><option value="all">全部结论</option><option value="wall_only">墙前专用</option><option value="repeated">重复墙前出现</option><option value="weak">证据不足</option><option value="mixed">混合行为</option></select></label>
+              <label class="panel-analysis-search"><span>搜索结果</span><input id="panelAnalysisSearch" placeholder="Token / IP / UA / ASN / 备注"></label>
+              <button id="panelAnalysisRun" class="primary">开始分析</button>
+            </div>
+          </div>
+        </div>
+        <div id="panelAnalysisResult" hidden>
+          <div id="panelAnalysisStats" class="panel-analysis-stats"></div>
+          <div class="card panel-analysis-legend">
+            <span class="pill red">墙前专用</span><span>至少命中 2 次不同失联事件，稳定期拉取为 0</span>
+            <span class="pill orange">重复墙前</span><span>至少命中 3 次，但稳定期也有活动</span>
+            <span class="pill tag">证据不足</span><span>只命中 1 次且稳定期没有活动</span>
+            <span class="pill pass">混合行为</span><span>稳定期与墙前都出现，暂不直接判定</span>
+          </div>
+          <div class="card panel-analysis-table-card">
+            <div class="card-header">
+              <div><h3>墙前候选 Token</h3><span id="panelAnalysisMeta" class="muted"></span></div>
+            </div>
+            <div class="datatable">
+              <table class="panel-analysis-table">
+                <thead><tr><th>Token / 结论</th><th>入口 / 站点</th><th>墙前命中</th><th>稳定期 / 真实</th><th>最近网络</th><th>首次 / 最近</th><th>操作</th></tr></thead>
+                <tbody id="panelAnalysisTbody"></tbody>
+              </table>
+            </div>
+            <div id="panelAnalysisPager" class="panel-analysis-pager"></div>
+          </div>
+        </div>
       </section>
 
       <!-- AWS 入口 DNS 更换追踪 -->

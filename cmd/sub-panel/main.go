@@ -37,7 +37,7 @@ import (
 	"github.com/huabanmao168/SubPanel/internal/webui"
 )
 
-var Version = "0.1.85"
+var Version = "0.1.86"
 
 func main() {
 	if len(os.Args) >= 2 {
@@ -266,7 +266,7 @@ func main() {
 	}
 
 	// admin server (先创建 ui,subMux 也要用它的 ReportHandler)
-	ui := webui.NewServer(cfg, st, bans, hasher, cloudMatcher, cloudFetcher, rulesMgr, gw, det, bl, logger)
+	ui := webui.NewServer(cfg, st, bans, hasher, cloudMatcher, cloudFetcher, rulesMgr, gw, det, bl, Version, logger)
 
 	// 反代 server
 	subMux := http.NewServeMux()

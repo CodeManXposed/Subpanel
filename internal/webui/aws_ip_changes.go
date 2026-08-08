@@ -95,40 +95,124 @@ func (s *Server) apiAWSSuspects(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 		return
 	}
-	rows, err := s.st.ListAWSSuspectSummaries(r.Context())
+	rows, err := s.cachedAWSSuspects(r.Context())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	s.annotateAWSSuspectWhitelist(rows)
 	q := r.URL.Query()
 	dnsName := strings.TrimSpace(q.Get("dns_name"))
 	tenant := strings.TrimSpace(q.Get("tenant"))
 	token := strings.TrimSpace(q.Get("token"))
+	search := strings.ToLower(strings.TrimSpace(q.Get("search")))
+	minHits, _ := strconv.Atoi(q.Get("min_hits"))
+	uaMode := strings.TrimSpace(q.Get("ua"))
 	includeDetails := q.Get("details") == "1"
 	out := make([]store.AWSSuspectSummary, 0, len(rows))
 	for i := range rows {
-		if dnsName != "" && rows[i].DNSName != dnsName {
+		row := rows[i]
+		if dnsName != "" && row.DNSName != dnsName {
 			continue
 		}
-		if tenant != "" && rows[i].Tenant != tenant {
+		if tenant != "" && row.Tenant != tenant {
 			continue
 		}
-		if token != "" && rows[i].TokenHash != token {
+		if token != "" && row.TokenHash != token {
 			continue
 		}
+		if row.ChangeHits < minHits || (uaMode == "uncommon" && !row.HasUncommonUA) || (uaMode == "known" && row.HasUncommonUA) {
+			continue
+		}
+		if search != "" && !awsSuspectMatches(row, search) {
+			continue
+		}
+		if !includeDetails {
+			row.Occurrences = nil
+		}
+		out = append(out, row)
+	}
+	sortMode := q.Get("sort")
+	sort.SliceStable(out, func(i, j int) bool {
+		switch sortMode {
+		case "pulls":
+			return out[i].PullCount > out[j].PullCount
+		case "recent":
+			return out[i].LastSeenTS > out[j].LastSeenTS
+		case "closest":
+			return out[i].ClosestSeconds < out[j].ClosestSeconds
+		default:
+			if out[i].ChangeHits != out[j].ChangeHits {
+				return out[i].ChangeHits > out[j].ChangeHits
+			}
+			return out[i].PullCount > out[j].PullCount
+		}
+	})
+	if q.Get("paged") == "1" {
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		if limit <= 0 || limit > 1000 {
+			limit = 250
+		}
+		offset, _ := strconv.Atoi(q.Get("offset"))
+		if offset < 0 {
+			offset = 0
+		}
+		total := len(out)
+		if offset > total {
+			offset = total
+		}
+		end := offset + limit
+		if end > total {
+			end = total
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"rows": out[offset:end], "total": total, "offset": offset, "limit": limit})
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func awsSuspectMatches(row store.AWSSuspectSummary, search string) bool {
+	if strings.Contains(strings.ToLower(strings.Join([]string{row.TokenHash, row.DNSName, row.EntryNote, row.Tenant}, "\n")), search) {
+		return true
+	}
+	for _, ua := range row.UAs {
+		if strings.Contains(strings.ToLower(ua), search) {
+			return true
+		}
+	}
+	for _, ip := range row.IPs {
+		if strings.Contains(strings.ToLower(strings.Join([]string{ip.IP, ip.CloudProvider, ip.ASN, ip.ASNOrg}, "\n")), search) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) cachedAWSSuspects(ctx context.Context) ([]store.AWSSuspectSummary, error) {
+	s.awsMu.Lock()
+	if time.Now().Before(s.awsExpiry) && s.awsRows != nil {
+		rows := append([]store.AWSSuspectSummary(nil), s.awsRows...)
+		s.awsMu.Unlock()
+		return rows, nil
+	}
+	s.awsMu.Unlock()
+	rows, err := s.st.ListAWSSuspectSummaries(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.annotateAWSSuspectWhitelist(rows)
+	for i := range rows {
 		for _, ua := range rows[i].UAs {
 			if !blacklist.IsKnownSubClient(ua) {
 				rows[i].HasUncommonUA = true
 				break
 			}
 		}
-		if !includeDetails {
-			rows[i].Occurrences = nil
-		}
-		out = append(out, rows[i])
 	}
-	writeJSON(w, http.StatusOK, out)
+	s.awsMu.Lock()
+	s.awsRows = rows
+	s.awsExpiry = time.Now().Add(20 * time.Second)
+	s.awsMu.Unlock()
+	return append([]store.AWSSuspectSummary(nil), rows...), nil
 }
 
 func (s *Server) annotateAWSSuspectWhitelist(rows []store.AWSSuspectSummary) {
@@ -185,6 +269,7 @@ func (s *Server) apiAWSIPChangeAdd(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	s.invalidateRiskCaches()
 	writeJSON(w, http.StatusOK, change)
 }
 
@@ -266,6 +351,7 @@ func (s *Server) apiAWSIPChangeRemove(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	s.invalidateRiskCaches()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -434,6 +520,7 @@ func (s *Server) apiDNSWatcherNote(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	s.invalidateRiskCaches()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

@@ -3,6 +3,8 @@ package webui
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -104,6 +106,16 @@ func (s *Server) apiSuspects(w http.ResponseWriter, r *http.Request) {
 		dur = 168 * time.Hour
 	}
 	since := time.Now().Add(-dur)
+	cacheKey := tenant + "\x00" + dur.String()
+	s.suspectMu.Lock()
+	cached, cacheHit := s.suspects[cacheKey]
+	if cacheHit && time.Now().Before(cached.expires) {
+		rows := append([]store.SuspectRow(nil), cached.rows...)
+		s.suspectMu.Unlock()
+		s.writeFilteredSuspects(w, r, rows)
+		return
+	}
+	s.suspectMu.Unlock()
 
 	rows, err := s.st.QuerySuspects(tenant, since)
 	if err != nil {
@@ -111,10 +123,106 @@ func (s *Server) apiSuspects(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]any{"error": "query error"})
 		return
 	}
+	s.suspectMu.Lock()
+	s.suspects[cacheKey] = suspectCacheEntry{rows: rows, expires: time.Now().Add(15 * time.Second)}
+	s.suspectMu.Unlock()
+	s.writeFilteredSuspects(w, r, rows)
+}
+
+func (s *Server) writeFilteredSuspects(w http.ResponseWriter, r *http.Request, rows []store.SuspectRow) {
 	if rows == nil {
 		rows = []store.SuspectRow{}
 	}
-	writeJSON(w, 200, rows)
+	q := r.URL.Query()
+	search := strings.ToLower(strings.TrimSpace(q.Get("search")))
+	cloudMode := q.Get("cloud")
+	provider := strings.ToLower(strings.TrimSpace(q.Get("provider")))
+	asn := strings.ToUpper(strings.TrimSpace(q.Get("asn")))
+	filtered := make([]store.SuspectRow, 0, len(rows))
+	for _, row := range rows {
+		if (cloudMode == "yes" || cloudMode == "only") && row.CloudPullCount == 0 {
+			continue
+		}
+		if cloudMode == "no" && row.CloudPullCount > 0 {
+			continue
+		}
+		if provider != "" && !containsFoldExact(row.CloudProviders, provider) {
+			continue
+		}
+		if asn != "" {
+			matched := false
+			for _, value := range row.CloudASNs {
+				if strings.EqualFold(strings.Split(value, "|")[0], asn) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+		if search != "" {
+			haystack := strings.ToLower(strings.Join(append([]string{row.Token, row.Email, row.LastIP, row.LastUA}, append(row.CloudProviders, row.CloudASNs...)...), "\n"))
+			if !strings.Contains(haystack, search) {
+				continue
+			}
+		}
+		filtered = append(filtered, row)
+	}
+	sortMode := q.Get("sort")
+	sort.SliceStable(filtered, func(i, j int) bool {
+		a, b := filtered[i], filtered[j]
+		if a.ReTriggered != b.ReTriggered {
+			return a.ReTriggered
+		}
+		switch sortMode {
+		case "pull":
+			return a.PullCount > b.PullCount
+		case "uas":
+			return a.DistinctUAs > b.DistinctUAs
+		case "usage":
+			ra, rb := float64(2), float64(2)
+			if a.TrafficTotal > 0 {
+				ra = float64(a.TrafficUsed) / float64(a.TrafficTotal)
+			}
+			if b.TrafficTotal > 0 {
+				rb = float64(b.TrafficUsed) / float64(b.TrafficTotal)
+			}
+			return ra < rb
+		default:
+			return a.DistinctIPs > b.DistinctIPs || (a.DistinctIPs == b.DistinctIPs && a.PullCount > b.PullCount)
+		}
+	})
+	if q.Get("paged") == "1" {
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		if limit <= 0 || limit > 1000 {
+			limit = 300
+		}
+		offset, _ := strconv.Atoi(q.Get("offset"))
+		if offset < 0 {
+			offset = 0
+		}
+		total := len(filtered)
+		if offset > total {
+			offset = total
+		}
+		end := offset + limit
+		if end > total {
+			end = total
+		}
+		writeJSON(w, 200, map[string]any{"rows": filtered[offset:end], "total": total, "limit": limit, "offset": offset})
+		return
+	}
+	writeJSON(w, 200, filtered)
+}
+
+func containsFoldExact(values []string, target string) bool {
+	for _, value := range values {
+		if strings.EqualFold(value, target) {
+			return true
+		}
+	}
+	return false
 }
 
 // GET /api/user-reports?tenant=xxx — 原始上报列表(需登录)

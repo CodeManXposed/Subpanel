@@ -48,10 +48,48 @@ type Server struct {
 	gw        *proxy.Gateway
 	det       *detector.Detector
 	bl        *blacklist.Manager
+	version   string
 	hmacKey   []byte
 	sessionMu sync.RWMutex
 	sessions  map[string]session
 	logger    *slog.Logger
+	summaryMu sync.Mutex
+	summaries map[string]summaryCacheEntry
+	awsMu     sync.Mutex
+	awsRows   []store.AWSSuspectSummary
+	awsExpiry time.Time
+	suspectMu sync.Mutex
+	suspects  map[string]suspectCacheEntry
+	panelMu   sync.Mutex
+	panels    map[string]panelAnalysisCacheEntry
+}
+
+type summaryCacheEntry struct {
+	value   *store.Stats
+	expires time.Time
+}
+
+type suspectCacheEntry struct {
+	rows    []store.SuspectRow
+	expires time.Time
+}
+
+type panelAnalysisCacheEntry struct {
+	value   *store.PanelAnalysisResult
+	expires time.Time
+}
+
+func (s *Server) invalidateRiskCaches() {
+	s.suspectMu.Lock()
+	s.suspects = map[string]suspectCacheEntry{}
+	s.suspectMu.Unlock()
+	s.awsMu.Lock()
+	s.awsRows = nil
+	s.awsExpiry = time.Time{}
+	s.awsMu.Unlock()
+	s.panelMu.Lock()
+	s.panels = map[string]panelAnalysisCacheEntry{}
+	s.panelMu.Unlock()
 }
 
 type session struct {
@@ -62,26 +100,34 @@ type session struct {
 func NewServer(cfg *config.Config, st *store.Store, bans *banlist.List, hasher *token.Hasher,
 	cloud *cloudip.Matcher, fetcher *cloudip.Fetcher,
 	rulesMgr *rules.Manager, gw *proxy.Gateway, det *detector.Detector,
-	bl *blacklist.Manager, logger *slog.Logger) *Server {
+	bl *blacklist.Manager, version string, logger *slog.Logger) *Server {
 	key := []byte(cfg.Admin.SessionKey)
 	if len(key) == 0 {
 		key = make([]byte, 32)
 		_, _ = rand.Read(key)
 	}
+	version = strings.TrimPrefix(strings.TrimSpace(version), "v")
+	if version == "" {
+		version = "dev"
+	}
 	return &Server{
-		cfg:      cfg,
-		st:       st,
-		bans:     bans,
-		hasher:   hasher,
-		cloud:    cloud,
-		fetcher:  fetcher,
-		rules:    rulesMgr,
-		gw:       gw,
-		det:      det,
-		bl:       bl,
-		hmacKey:  key,
-		sessions: map[string]session{},
-		logger:   logger,
+		cfg:       cfg,
+		st:        st,
+		bans:      bans,
+		hasher:    hasher,
+		cloud:     cloud,
+		fetcher:   fetcher,
+		rules:     rulesMgr,
+		gw:        gw,
+		det:       det,
+		bl:        bl,
+		version:   version,
+		hmacKey:   key,
+		sessions:  map[string]session{},
+		summaries: map[string]summaryCacheEntry{},
+		suspects:  map[string]suspectCacheEntry{},
+		panels:    map[string]panelAnalysisCacheEntry{},
+		logger:    logger,
 	}
 }
 
@@ -90,7 +136,12 @@ func (s *Server) Handler() http.Handler {
 
 	// 静态资源
 	sub, _ := fs.Sub(assets, "assets")
-	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(sub))))
+	staticHandler := http.StripPrefix("/static/", http.FileServer(http.FS(sub)))
+	mux.Handle("/static/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 内嵌资源随二进制升级；强制浏览器重验证，避免 HTML 与旧 JS/CSS 混用。
+		w.Header().Set("Cache-Control", "no-cache, max-age=0, must-revalidate")
+		staticHandler.ServeHTTP(w, r)
+	}))
 
 	// 公开
 	mux.HandleFunc("/login", s.loginPage)
@@ -118,6 +169,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/aws-ip-changes/detail", s.auth(http.HandlerFunc(s.apiAWSIPChangeDetail)))
 	mux.Handle("/api/aws-ip-changes/remove", s.auth(http.HandlerFunc(s.apiAWSIPChangeRemove)))
 	mux.Handle("/api/aws-suspects", s.auth(http.HandlerFunc(s.apiAWSSuspects)))
+	mux.Handle("/api/panel-analysis", s.auth(http.HandlerFunc(s.apiPanelAnalysis)))
+	mux.Handle("/api/panel-analysis/settings", s.auth(http.HandlerFunc(s.apiPanelAnalysisSettings)))
 	mux.Handle("/api/dns-watchers", s.auth(http.HandlerFunc(s.apiDNSWatchers)))
 	mux.Handle("/api/dns-watchers/add", s.auth(http.HandlerFunc(s.apiDNSWatcherAdd)))
 	mux.Handle("/api/dns-watchers/toggle", s.auth(http.HandlerFunc(s.apiDNSWatcherToggle)))
@@ -290,7 +343,16 @@ func (s *Server) apiSummary(w http.ResponseWriter, r *http.Request) {
 	if err != nil || dur <= 0 {
 		dur = 7 * 24 * time.Hour
 	}
-	st, err := s.st.Summary(r.Context(), tenant, time.Now().Add(-dur))
+	cacheKey := tenant + "\x00" + dur.String()
+	now := time.Now()
+	s.summaryMu.Lock()
+	if cached, ok := s.summaries[cacheKey]; ok && now.Before(cached.expires) {
+		s.summaryMu.Unlock()
+		writeJSON(w, 200, cached.value)
+		return
+	}
+	s.summaryMu.Unlock()
+	st, err := s.st.Summary(r.Context(), tenant, now.Add(-dur))
 	if err != nil {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
@@ -320,6 +382,16 @@ func (s *Server) apiSummary(w http.ResponseWriter, r *http.Request) {
 		}
 		st.TopIPs[i].Whitelisted = s.rules != nil && s.rules.IPWhitelisted(ip)
 	}
+	// 顶部切换和重复刷新很容易在数秒内请求同一组 COUNT DISTINCT；短缓存
+	// 保持监控近实时，同时避免大表被连续重复扫描。
+	s.summaryMu.Lock()
+	s.summaries[cacheKey] = summaryCacheEntry{value: st, expires: time.Now().Add(10 * time.Second)}
+	for key, value := range s.summaries {
+		if time.Now().After(value.expires) {
+			delete(s.summaries, key)
+		}
+	}
+	s.summaryMu.Unlock()
 	writeJSON(w, 200, st)
 }
 
@@ -606,6 +678,7 @@ func (s *Server) apiTokenBlockAdd(w http.ResponseWriter, r *http.Request) {
 	if target != body.Token {
 		_ = s.st.RemoveFocusToken(r.Context(), target)
 	}
+	s.invalidateRiskCaches()
 	writeJSON(w, 200, map[string]any{"ok": true, "action": body.Action})
 }
 
@@ -635,6 +708,7 @@ func (s *Server) apiTokenBlockRemove(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
 	}
+	s.invalidateRiskCaches()
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
@@ -666,6 +740,7 @@ func (s *Server) apiFocusAdd(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
 	}
+	s.invalidateRiskCaches()
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
@@ -685,6 +760,7 @@ func (s *Server) apiFocusRemove(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
 	}
+	s.invalidateRiskCaches()
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
@@ -1375,7 +1451,8 @@ func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write(b)
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write([]byte(strings.ReplaceAll(string(b), "{{VERSION}}", s.version)))
 }
 
 func (s *Server) indexPage(w http.ResponseWriter, r *http.Request) {
@@ -1389,7 +1466,8 @@ func (s *Server) indexPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write(b)
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write([]byte(strings.ReplaceAll(string(b), "{{VERSION}}", s.version)))
 }
 
 // ---------- helpers ----------

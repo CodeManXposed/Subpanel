@@ -177,6 +177,8 @@ CREATE TABLE IF NOT EXISTS aws_ip_changes (
     created_ts       INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_aws_ip_changes_ts ON aws_ip_changes(occurred_ts DESC);
+CREATE INDEX IF NOT EXISTS idx_aws_ip_changes_dns_tenant_ts
+    ON aws_ip_changes(dns_name,tenant,occurred_ts DESC,id DESC);
 
 CREATE TABLE IF NOT EXISTS aws_ip_change_subscribers (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -305,6 +307,12 @@ func Open(path string, flushEvery time.Duration, flushSize int) (*Store, error) 
 	db.SetMaxOpenConns(8)
 	db.SetMaxIdleConns(4)
 	db.SetConnMaxLifetime(time.Hour)
+	// 数据量增大后让热点索引留在 SQLite 页缓存，并允许只读页 mmap。
+	// 上限合计约 96 MiB，适合当前 1 GiB 机器且明显减少重复统计的磁盘 I/O。
+	if _, err := db.Exec(`PRAGMA cache_size=-32768; PRAGMA mmap_size=67108864; PRAGMA temp_store=MEMORY`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("sqlite performance pragmas: %w", err)
+	}
 	if _, err := db.Exec(schema); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
@@ -1331,6 +1339,261 @@ type AWSSuspectSummary struct {
 	ClosestSeconds int64                  `json:"closest_seconds"`
 	HasUncommonUA  bool                   `json:"has_uncommon_ua"`
 	Occurrences    []AWSSuspectOccurrence `json:"occurrences"`
+}
+
+// PanelAnalysisFilter 控制“面板强检测”的时间线范围。只分析有效订阅请求
+// (pass/fake)，并使用指定范围内每个监控入口最近最多 50 次墙前快照。
+type PanelAnalysisFilter struct {
+	StartTS         int64
+	EndTS           int64
+	DNSName         string
+	Tenant          string
+	LookbackMinutes int
+}
+
+type PanelAnalysisSummary struct {
+	RequestCount      int64 `json:"request_count"`
+	TokenCount        int64 `json:"token_count"`
+	RealTokenCount    int64 `json:"real_token_count"`
+	WallEventCount    int   `json:"wall_event_count"`
+	PrewallTokenCount int   `json:"prewall_token_count"`
+	WallOnlyCount     int   `json:"wall_only_count"`
+	RepeatedCount     int   `json:"repeated_count"`
+	WeakCount         int   `json:"weak_count"`
+}
+
+type PanelAnalysisRow struct {
+	DNSName         string `json:"dns_name"`
+	EntryNote       string `json:"entry_note"`
+	Tenant          string `json:"tenant"`
+	TokenHash       string `json:"token"`
+	Account         string `json:"account"`
+	TotalPulls      int64  `json:"total_pulls"`
+	RealPulls       int64  `json:"real_pulls"`
+	NormalPulls     int64  `json:"normal_pulls"`
+	PrewallPulls    int64  `json:"prewall_pulls"`
+	ChangeHits      int    `json:"change_hits"`
+	EligibleChanges int    `json:"eligible_changes"`
+	FirstSeenTS     int64  `json:"first_seen_ts"`
+	LastSeenTS      int64  `json:"last_seen_ts"`
+	LastIP          string `json:"last_ip"`
+	LastUA          string `json:"last_ua"`
+	LastASN         string `json:"last_asn"`
+	LastASNOrg      string `json:"last_asn_org"`
+	CloudProvider   string `json:"cloud_provider"`
+	Classification  string `json:"classification"`
+	Blocked         bool   `json:"blocked"`
+	BlockAction     string `json:"block_action"`
+	Focused         bool   `json:"focused"`
+}
+
+type PanelAnalysisResult struct {
+	Summary PanelAnalysisSummary `json:"summary"`
+	Rows    []PanelAnalysisRow   `json:"rows"`
+}
+
+type panelAnalysisChange struct {
+	ID            int64
+	DNSName       string
+	WatcherTenant string
+	EntryNote     string
+	AnchorTS      int64
+}
+
+// AnalyzePanelTimeline 对比入口稳定期与墙前窗口。墙前候选直接使用已经冻结的
+// 快照，正常期统计只扫描这些候选 Token，避免随日志量线性返回整库数据。
+func (s *Store) AnalyzePanelTimeline(ctx context.Context, f PanelAnalysisFilter) (*PanelAnalysisResult, error) {
+	if f.StartTS <= 0 || f.EndTS <= f.StartTS {
+		return nil, errors.New("invalid analysis time range")
+	}
+	if f.LookbackMinutes == 0 {
+		f.LookbackMinutes = 20
+	}
+	if f.LookbackMinutes < 1 || f.LookbackMinutes > 120 {
+		return nil, errors.New("lookback minutes must be between 1 and 120")
+	}
+	const anchor = `(CASE WHEN failure_ts>0 AND failure_ts<=occurred_ts THEN failure_ts ELSE occurred_ts END)`
+	where := " WHERE COALESCE(dns_name,'')<>'' AND " + anchor + ">=? AND " + anchor + "<=?"
+	args := []any{f.StartTS, f.EndTS}
+	if f.DNSName != "" {
+		where += " AND dns_name=?"
+		args = append(args, f.DNSName)
+	}
+	if f.Tenant != "" {
+		where += " AND (COALESCE(tenant,'')='' OR tenant=?)"
+		args = append(args, f.Tenant)
+	}
+	rankPartition := "dns_name,COALESCE(tenant,'')"
+	if f.Tenant != "" {
+		// A global watcher and a site-specific watcher may monitor the same DNS.
+		// Once a site is selected they form one evidence stream, capped at the
+		// requested site's latest 50 changes instead of 50 changes per watcher.
+		rankPartition = "dns_name"
+	}
+	ranked := `WITH ranked AS (
+		SELECT id,dns_name,COALESCE(tenant,'') watcher_tenant,COALESCE(note,'') entry_note,` + anchor + ` anchor_ts,
+		ROW_NUMBER() OVER (PARTITION BY ` + rankPartition + ` ORDER BY ` + anchor + ` DESC,id DESC) rn
+		FROM aws_ip_changes` + where + `), selected AS (
+		SELECT id,dns_name,watcher_tenant,entry_note,anchor_ts FROM ranked WHERE rn<=50
+	)`
+
+	changeRows, err := s.db.QueryContext(ctx, ranked+`
+		SELECT id,dns_name,watcher_tenant,entry_note,anchor_ts FROM selected ORDER BY anchor_ts DESC,id DESC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	var changes []panelAnalysisChange
+	for changeRows.Next() {
+		var c panelAnalysisChange
+		if err := changeRows.Scan(&c.ID, &c.DNSName, &c.WatcherTenant, &c.EntryNote, &c.AnchorTS); err != nil {
+			_ = changeRows.Close()
+			return nil, err
+		}
+		changes = append(changes, c)
+	}
+	if err := changeRows.Close(); err != nil {
+		return nil, err
+	}
+
+	result := &PanelAnalysisResult{Rows: []PanelAnalysisRow{}}
+	statsSQL := `SELECT COUNT(*),COUNT(DISTINCT tenant||char(0)||token_hash),
+		COUNT(DISTINCT CASE WHEN action='pass' AND status BETWEEN 200 AND 299 THEN tenant||char(0)||token_hash END)
+		FROM events WHERE ts>=? AND ts<=? AND token_hash<>'' AND action IN ('pass','fake')`
+	statsArgs := []any{f.StartTS, f.EndTS}
+	if f.Tenant != "" {
+		statsSQL += " AND tenant=?"
+		statsArgs = append(statsArgs, f.Tenant)
+	}
+	if err := s.db.QueryRowContext(ctx, statsSQL, statsArgs...).Scan(
+		&result.Summary.RequestCount, &result.Summary.TokenCount, &result.Summary.RealTokenCount); err != nil {
+		return nil, err
+	}
+	result.Summary.WallEventCount = len(changes)
+	if len(changes) == 0 {
+		return result, nil
+	}
+
+	queryArgs := append([]any(nil), args...)
+	queryArgs = append(queryArgs, int64(f.LookbackMinutes)*int64(time.Minute/time.Millisecond))
+	prewallTenantFilter := ""
+	if f.Tenant != "" {
+		prewallTenantFilter = " AND e.tenant=?"
+		queryArgs = append(queryArgs, f.Tenant)
+	}
+	queryArgs = append(queryArgs, f.StartTS, f.EndTS)
+	tenantEventFilter := ""
+	if f.Tenant != "" {
+		tenantEventFilter = " AND e.tenant=?"
+		queryArgs = append(queryArgs, f.Tenant)
+	}
+	q := ranked + `, pw_rows AS (
+		SELECT c.id change_id,c.dns_name,c.entry_note,c.anchor_ts,e.tenant,e.token_hash,
+		       COALESCE(e.client_ip,'') client_ip,COALESCE(e.ua,'') ua,1 pull_count,e.ts first_seen_ts,e.ts last_seen_ts,
+		       COALESCE(e.cloud_provider,'') cloud_provider,COALESCE(e.asn,'') asn,COALESCE(e.asn_org,'') asn_org,
+		       ROW_NUMBER() OVER (PARTITION BY c.dns_name,e.tenant,e.token_hash ORDER BY e.ts DESC,e.id DESC) latest_rn
+		FROM selected c JOIN events e ON e.ts>=c.anchor_ts-? AND e.ts<=c.anchor_ts
+		WHERE e.token_hash<>'' AND e.action IN ('pass','fake')
+		  AND (c.watcher_tenant='' OR c.watcher_tenant=e.tenant)` + prewallTenantFilter + `
+	), pw AS (
+		SELECT dns_name,MAX(entry_note) entry_note,tenant,token_hash,COUNT(DISTINCT change_id) change_hits,
+		       SUM(pull_count) prewall_pulls,MIN(first_seen_ts) pw_first,MAX(last_seen_ts) pw_last
+		FROM pw_rows GROUP BY dns_name,tenant,token_hash
+	), keys AS (SELECT DISTINCT tenant,token_hash FROM pw), event_stats AS (
+		SELECT e.tenant,e.token_hash,COUNT(*) total_pulls,
+		       SUM(CASE WHEN e.action='pass' AND e.status BETWEEN 200 AND 299 THEN 1 ELSE 0 END) real_pulls,
+		       MIN(e.ts) first_seen,MAX(e.ts) last_seen
+		FROM events e JOIN keys k ON k.tenant=e.tenant AND k.token_hash=e.token_hash
+		WHERE e.ts>=? AND e.ts<=? AND e.action IN ('pass','fake')` + tenantEventFilter + `
+		GROUP BY e.tenant,e.token_hash
+	), latest AS (
+		SELECT dns_name,tenant,token_hash,client_ip,ua,cloud_provider,asn,asn_org FROM pw_rows WHERE latest_rn=1
+	)
+	SELECT p.dns_name,p.entry_note,p.tenant,p.token_hash,
+	       COALESCE((SELECT email FROM token_associations ta WHERE ta.tenant=p.tenant AND ta.token=p.token_hash LIMIT 1),''),
+	       COALESCE(es.total_pulls,0),COALESCE(es.real_pulls,0),p.prewall_pulls,p.change_hits,
+	       COALESCE(es.first_seen,p.pw_first),COALESCE(es.last_seen,p.pw_last),
+	       COALESCE(l.client_ip,''),COALESCE(l.ua,''),COALESCE(l.asn,''),COALESCE(l.asn_org,''),COALESCE(l.cloud_provider,''),
+	       EXISTS(SELECT 1 FROM bans b WHERE b.kind='token' AND b.target=p.token_hash AND (b.expires_ts IS NULL OR b.expires_ts>?)),
+	       COALESCE((SELECT action FROM bans b WHERE b.kind='token' AND b.target=p.token_hash AND (b.expires_ts IS NULL OR b.expires_ts>?) LIMIT 1),''),
+	       EXISTS(SELECT 1 FROM focus_tokens ft WHERE ft.token=p.token_hash AND (ft.tenant='' OR ft.tenant=p.tenant))
+	FROM pw p LEFT JOIN event_stats es ON es.tenant=p.tenant AND es.token_hash=p.token_hash
+	LEFT JOIN latest l ON l.dns_name=p.dns_name AND l.tenant=p.tenant AND l.token_hash=p.token_hash
+	ORDER BY p.change_hits DESC,p.prewall_pulls DESC,es.last_seen DESC`
+	nowMS := time.Now().UnixMilli()
+	queryArgs = append(queryArgs, nowMS, nowMS)
+	rows, err := s.db.QueryContext(ctx, q, queryArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var row PanelAnalysisRow
+		var blocked, focused int
+		if err := rows.Scan(&row.DNSName, &row.EntryNote, &row.Tenant, &row.TokenHash, &row.Account,
+			&row.TotalPulls, &row.RealPulls, &row.PrewallPulls, &row.ChangeHits, &row.FirstSeenTS, &row.LastSeenTS,
+			&row.LastIP, &row.LastUA, &row.LastASN, &row.LastASNOrg, &row.CloudProvider,
+			&blocked, &row.BlockAction, &focused); err != nil {
+			return nil, err
+		}
+		row.Blocked, row.Focused = blocked != 0, focused != 0
+		row.NormalPulls = row.TotalPulls - row.PrewallPulls
+		if row.NormalPulls < 0 {
+			row.NormalPulls = 0
+		}
+		seenChanges := map[int64]bool{}
+		for _, c := range changes {
+			if c.DNSName != row.DNSName || (c.WatcherTenant != "" && c.WatcherTenant != row.Tenant) || c.AnchorTS < row.FirstSeenTS {
+				continue
+			}
+			seenChanges[c.ID] = true
+		}
+		row.EligibleChanges = len(seenChanges)
+		if row.EligibleChanges < row.ChangeHits {
+			row.EligibleChanges = row.ChangeHits
+		}
+		if row.ChangeHits >= 3 {
+			result.Summary.RepeatedCount++
+		}
+		switch {
+		case row.ChangeHits >= 2 && row.NormalPulls == 0:
+			row.Classification = "wall_only"
+			result.Summary.WallOnlyCount++
+		case row.ChangeHits >= 3:
+			row.Classification = "repeated"
+		case row.ChangeHits == 1 && row.NormalPulls == 0:
+			row.Classification = "weak"
+			result.Summary.WeakCount++
+		default:
+			row.Classification = "mixed"
+		}
+		result.Rows = append(result.Rows, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	result.Summary.PrewallTokenCount = len(result.Rows)
+	sort.SliceStable(result.Rows, func(i, j int) bool {
+		rank := func(c string) int {
+			switch c {
+			case "wall_only":
+				return 4
+			case "repeated":
+				return 3
+			case "weak":
+				return 2
+			default:
+				return 1
+			}
+		}
+		if rank(result.Rows[i].Classification) != rank(result.Rows[j].Classification) {
+			return rank(result.Rows[i].Classification) > rank(result.Rows[j].Classification)
+		}
+		if result.Rows[i].ChangeHits != result.Rows[j].ChangeHits {
+			return result.Rows[i].ChangeHits > result.Rows[j].ChangeHits
+		}
+		return result.Rows[i].LastSeenTS > result.Rows[j].LastSeenTS
+	})
+	return result, nil
 }
 
 // AddAWSIPChange 新增换 IP 记录，并在同一事务中按设置的分钟数冻结动作前订阅者。

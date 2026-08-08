@@ -156,6 +156,7 @@ const TAB_TITLES = {
   'detect-rules': '触发规则',
   'suspects': '嫌疑用户',
   'aws-suspects': '嫌疑用户（By AWS）',
+  'panel-analysis': '面板强检测',
   'aws-ip-changes': 'AWS 换IP追踪',
   'tenants': '机场管理',
   'settings': '设置',
@@ -171,6 +172,7 @@ const TAB_LOADERS = {
   'detect-rules': () => { loadRulesTable(); loadUAWhitelist(); },
   'suspects': () => loadSuspects(),
   'aws-suspects': () => loadAWSSuspects(),
+  'panel-analysis': () => loadPanelAnalysisPage(),
   'aws-ip-changes': () => loadAWSIPChanges(),
   'tenants': () => loadTenantsTable(),
   'settings': () => { loadSettings(); loadCDNSettings(); loadPassthrough(); loadReportSecret(); },
@@ -577,6 +579,7 @@ $('#tokenBlockConfirm')?.addEventListener('click', async e => {
   if (source === 'events') loadEvents(false);
   if (source === 'suspects' || source === 'focus') loadSuspects();
   if (source === 'aws-suspects') loadAWSSuspects();
+  if (source === 'panel-analysis') runPanelAnalysis(panelAnalysisOffset);
   if (document.querySelector('.navlink.active')?.dataset.tab === 'resolved') loadResolved();
 });
 
@@ -1637,13 +1640,23 @@ function fmtBytes(b) {
   return v.toFixed(i > 1 ? 1 : 0) + ' ' + units[i];
 }
 
+let suspectLoadLimit = 500;
+let suspectSearchTimer = null;
+
 async function loadSuspects() {
   const q = new URLSearchParams({
     tenant: state.tenant,
     window: $('#suspectWindow').value || '168h',
+    paged: '1', limit: String(suspectLoadLimit),
+    search: $('#suspectSearch').value.trim(),
+    cloud: $('#suspectCloud').value,
+    provider: $('#suspectProvider').value,
+    asn: $('#suspectASN').value.trim(),
+    sort: $('#suspectSort').value,
   });
-  const rows = await api('/api/suspects?' + q);
-  window._suspectsData = rows || [];
+  const page = await api('/api/suspects?' + q);
+  window._suspectsData = (page && page.rows) || [];
+  window._suspectsTotal = Number(page && page.total || window._suspectsData.length);
   renderSuspects();
   await Promise.all([loadSuspectResolved(), loadSuspectFocus()]);
 }
@@ -1749,6 +1762,13 @@ function renderSuspects() {
   }
   for (const r of rows) {
     list.appendChild(renderSuspectCard(r));
+  }
+  if (window._suspectsTotal > window._suspectsData.length) {
+    const more = document.createElement('div');
+    more.className = 'card aws-suspect-load-more';
+    more.innerHTML = `<span>已按当前条件加载 ${window._suspectsData.length}/${window._suspectsTotal} 个用户</span><button id="suspectLoadMore">继续加载 ${Math.min(500, window._suspectsTotal - window._suspectsData.length)} 个</button>`;
+    list.appendChild(more);
+    $('#suspectLoadMore')?.addEventListener('click', () => { suspectLoadLimit += 500; loadSuspects(); });
   }
   bindCopyHandlers(list);
 }
@@ -1883,12 +1903,13 @@ async function toggleSuspectDetail(card, r) {
   bindCopyHandlers(box);
 }
 
-$('#suspectWindow').addEventListener('change', () => loadSuspects());
-$('#suspectSort').addEventListener('change', () => renderSuspects());
-$('#suspectSearch').addEventListener('input', () => renderSuspects());
-$('#suspectCloud').addEventListener('change', () => renderSuspects());
-$('#suspectProvider').addEventListener('change', () => renderSuspects());
-$('#suspectASN').addEventListener('input', () => renderSuspects());
+function resetSuspectServerView() { suspectLoadLimit = 500; loadSuspects(); }
+$('#suspectWindow').addEventListener('change', resetSuspectServerView);
+$('#suspectSort').addEventListener('change', resetSuspectServerView);
+$('#suspectSearch').addEventListener('input', () => { clearTimeout(suspectSearchTimer); suspectSearchTimer = setTimeout(resetSuspectServerView, 350); });
+$('#suspectCloud').addEventListener('change', resetSuspectServerView);
+$('#suspectProvider').addEventListener('change', resetSuspectServerView);
+$('#suspectASN').addEventListener('input', () => { clearTimeout(suspectSearchTimer); suspectSearchTimer = setTimeout(resetSuspectServerView, 350); });
 
 // 嫌疑卡片 Token 拉黑 / 重点关注：事件委托
 $('#suspectsList').addEventListener('click', async (e) => {
@@ -1950,6 +1971,187 @@ $('#suspectResolvedTbody').addEventListener('click', async (e) => {
 });
 
 // ════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════
+// 面板强检测：稳定期 / 墙前时序分析
+// ════════════════════════════════════════════════════
+
+let panelAnalysisOffset = 0;
+const panelAnalysisLimit = 100;
+let panelAnalysisSearchTimer = null;
+let panelAnalysisWatchers = [];
+
+function toLocalDateTimeInput(date) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function setPanelAnalysisEnabled(enabled) {
+  $('#panelAnalysisToggle').checked = Boolean(enabled);
+  $('#panelAnalysisToggleText').textContent = enabled ? '已开启' : '未开启';
+  $('#panelAnalysisControls').hidden = !enabled;
+  $('#panelAnalysisDisabled').hidden = enabled;
+  if (!enabled) $('#panelAnalysisResult').hidden = true;
+}
+
+async function loadPanelAnalysisPage() {
+  const start = $('#panelAnalysisStart');
+  const end = $('#panelAnalysisEnd');
+  if (!start.value || !end.value) {
+    const now = new Date();
+    end.value = toLocalDateTimeInput(now);
+    start.value = toLocalDateTimeInput(new Date(now.getTime() - 7 * 24 * 3600 * 1000));
+  }
+  const [settings, watchers, tenants] = await Promise.all([
+    api('/api/panel-analysis/settings'), api('/api/dns-watchers'), api('/api/tenants'),
+  ]);
+  const tenantSelect = $('#panelAnalysisTenant');
+  const oldTenant = tenantSelect.value;
+  panelAnalysisWatchers = watchers || [];
+  tenantSelect.innerHTML = '<option value="">全部站点</option>' + (tenants || []).filter(x => x.enabled !== false)
+    .map(x => `<option value="${escapeHTML(x.name)}">${escapeHTML(x.name)}</option>`).join('');
+  tenantSelect.value = (tenants || []).some(x => x.name === oldTenant) ? oldTenant : '';
+  renderPanelAnalysisDNSOptions();
+  setPanelAnalysisEnabled(Boolean(settings && settings.enabled));
+  if (settings && settings.enabled) await runPanelAnalysis(0);
+}
+
+function renderPanelAnalysisDNSOptions() {
+  const dnsSelect = $('#panelAnalysisDNS');
+  const tenant = $('#panelAnalysisTenant').value;
+  const oldDNS = dnsSelect.value;
+  const dnsMeta = new Map();
+  for (const watcher of panelAnalysisWatchers) {
+    const watcherTenant = watcher.tenant || '';
+    if (tenant && watcherTenant && watcherTenant !== tenant) continue;
+    const current = dnsMeta.get(watcher.dns_name);
+    if (!current || (watcher.note && !current.note)) dnsMeta.set(watcher.dns_name, { note: watcher.note || '', tenant: watcherTenant });
+  }
+  dnsSelect.innerHTML = '<option value="">全部入口</option>' + [...dnsMeta.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([dns, meta]) => `<option value="${escapeHTML(dns)}">${escapeHTML(meta.note ? meta.note + ' · ' + dns : dns)}</option>`).join('');
+  dnsSelect.value = dnsMeta.has(oldDNS) ? oldDNS : '';
+}
+
+function panelAnalysisClassInfo(value) {
+  const map = {
+    wall_only: ['墙前专用', 'red'],
+    repeated: ['重复墙前出现', 'orange'],
+    weak: ['证据不足', 'tag'],
+    mixed: ['混合行为', 'pass'],
+  };
+  return map[value] || ['待观察', 'tag'];
+}
+
+async function runPanelAnalysis(offset = 0) {
+  if (!$('#panelAnalysisToggle').checked) return;
+  const startTS = new Date($('#panelAnalysisStart').value).getTime();
+  const endTS = new Date($('#panelAnalysisEnd').value).getTime();
+  if (!Number.isFinite(startTS) || !Number.isFinite(endTS) || endTS <= startTS) {
+    toast('请选择正确的开始和结束时间', 'error');
+    return;
+  }
+  panelAnalysisOffset = Math.max(0, Number(offset) || 0);
+  const params = new URLSearchParams({
+    start_ts: String(startTS), end_ts: String(endTS),
+    dns_name: $('#panelAnalysisDNS').value,
+    tenant: $('#panelAnalysisTenant').value,
+    lookback_minutes: $('#panelAnalysisLookback').value,
+    classification: $('#panelAnalysisClass').value,
+    search: $('#panelAnalysisSearch').value.trim(),
+    limit: String(panelAnalysisLimit), offset: String(panelAnalysisOffset),
+  });
+  const btn = $('#panelAnalysisRun');
+  btn.classList.add('loading');
+  btn.disabled = true;
+  $('#panelAnalysisResult').hidden = false;
+  $('#panelAnalysisTbody').innerHTML = '<tr><td colspan="7" class="empty-state">正在对比稳定期与墙前快照...</td></tr>';
+  const data = await api('/api/panel-analysis?' + params);
+  btn.classList.remove('loading');
+  btn.disabled = false;
+  if (!data || data.enabled === false) {
+    setPanelAnalysisEnabled(false);
+    return;
+  }
+  renderPanelAnalysis(data);
+}
+
+function renderPanelAnalysis(data) {
+  const summary = data.summary || {};
+  $('#panelAnalysisStats').innerHTML = `
+    <div><small>订阅请求</small><strong>${Number(summary.request_count || 0).toLocaleString()}</strong></div>
+    <div><small>独立 Token</small><strong>${Number(summary.token_count || 0).toLocaleString()}</strong></div>
+    <div><small>取得真实订阅</small><strong>${Number(summary.real_token_count || 0).toLocaleString()}</strong></div>
+    <div><small>被墙记录</small><strong>${summary.wall_event_count || 0}</strong></div>
+    <div class="danger"><small>墙前专用</small><strong>${summary.wall_only_count || 0}</strong></div>
+    <div class="warning"><small>重复墙前</small><strong>${summary.repeated_count || 0}</strong></div>`;
+  const rows = data.rows || [];
+  const tbody = $('#panelAnalysisTbody');
+  tbody.innerHTML = '';
+  const scopeTenant = $('#panelAnalysisTenant').value || '全部站点';
+  const scopeDNS = $('#panelAnalysisDNS').selectedOptions[0]?.textContent || '全部入口';
+  const lookback = $('#panelAnalysisLookback').selectedOptions[0]?.textContent || '20 分钟';
+  $('#panelAnalysisMeta').textContent = `${scopeTenant} · ${scopeDNS} · 墙前 ${lookback} · 匹配 ${data.total || 0} 个 · 查询 ${data.elapsed_ms || 0} ms`;
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">该范围没有符合条件的墙前候选 Token</td></tr>';
+  }
+  for (const row of rows) {
+    const [label, pill] = panelAnalysisClassInfo(row.classification);
+    const network = [cloudProviderLabel(row.cloud_provider), row.last_asn, row.last_asn_org].filter(Boolean).join(' · ') || '-';
+    const tr = document.createElement('tr');
+    tr.className = `panel-analysis-row ${row.classification || 'mixed'}`;
+    tr.innerHTML = `
+      <td data-label="Token / 结论"><div class="panel-analysis-token"><div class="aws-copy-wrap"><span class="mono aws-cell-value" title="${escapeHTML(row.token)}">${escapeHTML(row.token)}</span><button class="ip-copy-btn copyable" data-copy="${escapeHTML(row.token)}">复制</button></div><div><span class="pill ${pill}">${label}</span>${row.blocked ? `<span class="pill red">已拉黑 · ${row.block_action === 'deny' ? '拒绝' : '投毒'}</span>` : ''}${row.focused ? '<span class="pill orange">重点关注</span>' : ''}</div>${row.account ? `<small class="muted mono" title="关联账户">${escapeHTML(row.account)}</small>` : ''}</div></td>
+      <td data-label="入口 / 站点"><div class="panel-analysis-scope-cell"><div><span class="panel-analysis-field-label">入口</span><strong title="${escapeHTML(row.entry_note || row.dns_name)}">${escapeHTML(row.entry_note || '未备注')}</strong></div><small class="muted mono" title="${escapeHTML(row.dns_name)}">${escapeHTML(row.dns_name)}</small><div><span class="panel-analysis-field-label site">站点</span><b>${escapeHTML(row.tenant || '全部站点')}</b></div></div></td>
+      <td data-label="墙前命中"><strong class="panel-analysis-hit">${row.change_hits || 0}/${row.eligible_changes || 0}</strong><small>墙前拉取 ${row.prewall_pulls || 0}</small></td>
+      <td data-label="稳定期 / 真实"><strong>${row.normal_pulls || 0} 次稳定期</strong><small>真实订阅 ${row.real_pulls || 0} / 总拉取 ${row.total_pulls || 0}</small></td>
+      <td data-label="最近网络"><div class="mono panel-analysis-ellipsis" title="${escapeHTML(row.last_ip || '-')}">${escapeHTML(row.last_ip || '-')}</div><small class="panel-analysis-ellipsis" title="${escapeHTML(row.last_ua || '(空 UA)')}">${escapeHTML(row.last_ua || '(空 UA)')}</small><small class="panel-analysis-ellipsis" title="${escapeHTML(network)}">${escapeHTML(network)}</small></td>
+      <td data-label="首次 / 最近"><small>${escapeHTML(fmtTime(new Date(row.first_seen_ts)))}</small><strong>${escapeHTML(fmtTime(new Date(row.last_seen_ts)))}</strong></td>
+      <td data-label="操作"><div class="panel-analysis-actions"><button class="danger solid panel-analysis-block" data-token="${escapeHTML(row.token)}" data-tenant="${escapeHTML(row.tenant || '')}" ${row.blocked ? 'disabled' : ''}>${row.blocked ? '已拉黑' : '拉黑 Token'}</button><button class="panel-analysis-focus" data-token="${escapeHTML(row.token)}" data-tenant="${escapeHTML(row.tenant || '')}" ${row.focused ? 'disabled' : ''}>${row.focused ? '已关注' : '重点关注'}</button></div></td>`;
+    tbody.appendChild(tr);
+  }
+  bindCopyHandlers(tbody);
+  const total = Number(data.total || 0);
+  const prevDisabled = panelAnalysisOffset <= 0;
+  const nextDisabled = panelAnalysisOffset + panelAnalysisLimit >= total;
+  $('#panelAnalysisPager').innerHTML = `<span>第 ${total ? Math.floor(panelAnalysisOffset / panelAnalysisLimit) + 1 : 0} 页 · 共 ${total} 个</span><div><button id="panelAnalysisPrev" ${prevDisabled ? 'disabled' : ''}>上一页</button><button id="panelAnalysisNext" ${nextDisabled ? 'disabled' : ''}>下一页</button></div>`;
+  $('#panelAnalysisPrev')?.addEventListener('click', () => runPanelAnalysis(panelAnalysisOffset - panelAnalysisLimit));
+  $('#panelAnalysisNext')?.addEventListener('click', () => runPanelAnalysis(panelAnalysisOffset + panelAnalysisLimit));
+}
+
+$('#panelAnalysisToggle')?.addEventListener('change', async e => {
+  const enabled = e.target.checked;
+  const result = await apiPost('/api/panel-analysis/settings', { enabled });
+  if (!result || !result.ok) {
+    e.target.checked = !enabled;
+    return toast((result && result.error) || '保存失败', 'error');
+  }
+  setPanelAnalysisEnabled(enabled);
+  toast(enabled ? '面板强检测已开启' : '面板强检测已关闭', enabled ? 'success' : 'warning');
+  if (enabled) runPanelAnalysis(0);
+});
+$('#panelAnalysisRun')?.addEventListener('click', () => runPanelAnalysis(0));
+['panelAnalysisDNS', 'panelAnalysisClass', 'panelAnalysisLookback'].forEach(id => {
+  $('#' + id)?.addEventListener('change', () => runPanelAnalysis(0));
+});
+$('#panelAnalysisTenant')?.addEventListener('change', () => {
+  renderPanelAnalysisDNSOptions();
+  runPanelAnalysis(0);
+});
+$('#panelAnalysisSearch')?.addEventListener('input', () => {
+  clearTimeout(panelAnalysisSearchTimer);
+  panelAnalysisSearchTimer = setTimeout(() => runPanelAnalysis(0), 350);
+});
+$('#panelAnalysisTbody')?.addEventListener('click', async e => {
+  const block = e.target.closest('.panel-analysis-block');
+  if (block) return openTokenBlockModal(block.dataset.token, block.dataset.tenant || '', 'panel-analysis');
+  const focus = e.target.closest('.panel-analysis-focus');
+  if (!focus) return;
+  const result = await apiPost('/api/focus/add', { token: focus.dataset.token, tenant: focus.dataset.tenant || '' });
+  if (result && result.ok) {
+    toast('已加入重点关注', 'success');
+    runPanelAnalysis(panelAnalysisOffset);
+  } else toast((result && result.error) || '操作失败', 'error');
+});
+
 // AWS 墙前嫌疑用户 IP 筛选
 // ════════════════════════════════════════════════════
 
@@ -1957,15 +2159,28 @@ let awsSuspectRows = [];
 let awsSuspectBlocked = new Set();
 let awsSuspectFocused = new Set();
 let awsSuspectVisibleLimit = 250;
+let awsSuspectTotal = 0;
+let awsSuspectSearchTimer = null;
 
 async function loadAWSSuspects() {
   const list = $('#awsSuspectList');
   if (!list) return;
   list.innerHTML = '<div class="empty-state">正在聚合最近的 AWS 墙前快照...</div>';
-  const [rows, blocks, focused] = await Promise.all([
-    api('/api/aws-suspects'), api('/api/token-blocks'), api('/api/focus'),
+  const params = new URLSearchParams({
+    paged: '1', limit: '1000',
+    dns_name: $('#awsSuspectDNS').value,
+    tenant: $('#awsSuspectTenant').value,
+    search: $('#awsSuspectSearch').value.trim(),
+    min_hits: $('#awsSuspectHits').value || '0',
+    ua: $('#awsSuspectUA').value,
+    sort: $('#awsSuspectSort').value,
+  });
+  const [page, blocks, focused, watchers, tenantsData] = await Promise.all([
+    api('/api/aws-suspects?' + params), api('/api/token-blocks'), api('/api/focus'),
+    api('/api/dns-watchers'), api('/api/tenants'),
   ]);
-  awsSuspectRows = rows || [];
+  awsSuspectRows = (page && page.rows) || [];
+  awsSuspectTotal = Number(page && page.total || awsSuspectRows.length);
   awsSuspectVisibleLimit = 250;
   awsSuspectBlocked = new Set((blocks || []).map(x => x.token));
   awsSuspectFocused = new Set((focused || []).map(x => x.token));
@@ -1975,11 +2190,8 @@ async function loadAWSSuspects() {
   const oldDNS = dnsSel.value;
   const oldTenant = tenantSel.value;
   const dnsMeta = new Map();
-  const tenants = new Set();
-  for (const row of awsSuspectRows) {
-    if (!dnsMeta.has(row.dns_name)) dnsMeta.set(row.dns_name, row.entry_note || '');
-    tenants.add(row.tenant || '-');
-  }
+  const tenants = new Set((tenantsData || []).filter(x => x.enabled !== false).map(x => x.name || '-'));
+  for (const watcher of (watchers || [])) if (!dnsMeta.has(watcher.dns_name)) dnsMeta.set(watcher.dns_name, watcher.note || '');
   dnsSel.innerHTML = '<option value="">全部入口 DNS</option>' + [...dnsMeta.entries()]
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([dns, note]) => `<option value="${escapeHTML(dns)}">${escapeHTML(note ? note + ' · ' + dns : dns)}</option>`).join('');
@@ -2031,7 +2243,7 @@ function renderAWSSuspects() {
   $('#awsSuspectStats').innerHTML = `
     <span><small>入口</small><strong>${entries.size}</strong></span>
     <span><small>站点</small><strong>${sites.size}</strong></span>
-    <span><small>Token</small><strong>${matchedRows.length}</strong></span>
+    <span><small>Token</small><strong>${awsSuspectTotal}</strong></span>
     <span><small>独立 IP</small><strong>${uniqueIPs.size}</strong></span>`;
   if (!matchedRows.length) {
     list.innerHTML = '<div class="card empty-state">没有符合当前条件的 AWS 墙前订阅者</div>';
@@ -2109,12 +2321,15 @@ function renderAWSSuspectDetail(row) {
 
 function resetAWSSuspectView() {
   awsSuspectVisibleLimit = 250;
-  renderAWSSuspects();
+  loadAWSSuspects();
 }
 ['awsSuspectDNS', 'awsSuspectTenant', 'awsSuspectHits', 'awsSuspectUA', 'awsSuspectSort'].forEach(id => {
   $('#' + id)?.addEventListener('change', resetAWSSuspectView);
 });
-$('#awsSuspectSearch')?.addEventListener('input', resetAWSSuspectView);
+$('#awsSuspectSearch')?.addEventListener('input', () => {
+  clearTimeout(awsSuspectSearchTimer);
+  awsSuspectSearchTimer = setTimeout(resetAWSSuspectView, 350);
+});
 $('#awsSuspectRefreshBtn')?.addEventListener('click', loadAWSSuspects);
 $('#awsSuspectList')?.addEventListener('click', async e => {
   const detailBtn = e.target.closest('.aws-suspect-detail-toggle');
