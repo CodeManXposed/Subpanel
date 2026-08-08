@@ -1,6 +1,6 @@
 // Sub-Panel web UI
 
-const state = { tenant: '', window: '24h' };
+const state = { tenant: '', window: '168h' };
 
 const $ = sel => document.querySelector(sel);
 const $$ = sel => Array.from(document.querySelectorAll(sel));
@@ -33,6 +33,7 @@ const ACTION_CN = {
   pass: '放行',
   fake: '投毒',
   deny: '拒绝',
+  rate_limit: '限流',
   block_path: '路径拦截',
   fake_failed: '投毒失败',
 };
@@ -54,6 +55,9 @@ const TAG_PREFIX_CN = {
   'path_not_match': '路径不匹配',
   // 上游
   'upstream_bad':   '上游异常',
+  'global_rate_limit': '全局速率保护',
+  'upstream_concurrency_limit': '源站并发保护',
+  'ip_upstream_concurrency': '单 IP 并发保护',
   // 触发规则
   'token_freq':           '单 token 频次',
   'ip_freq':              '单 IP 频次',
@@ -145,11 +149,13 @@ async function apiPost(path, body) {
 const TAB_TITLES = {
   'dashboard': '概览',
   'events': '请求日志',
-  'resolved': '已拉黑 Token',
-  'ip-bans': '黑名单',
+  'resolved': 'Token 黑名单',
+  'ip-bans': 'IP / 全局黑名单',
   'ip-whitelist': 'IP 白名单',
   'cloud-ip': 'GeoIP 库',
+  'detect-rules': '触发规则',
   'suspects': '嫌疑用户',
+  'aws-suspects': '嫌疑用户（By AWS）',
   'aws-ip-changes': 'AWS 换IP追踪',
   'tenants': '机场管理',
   'settings': '设置',
@@ -164,6 +170,7 @@ const TAB_LOADERS = {
   'cloud-ip': () => loadGeoIPInfo(),
   'detect-rules': () => { loadRulesTable(); loadUAWhitelist(); },
   'suspects': () => loadSuspects(),
+  'aws-suspects': () => loadAWSSuspects(),
   'aws-ip-changes': () => loadAWSIPChanges(),
   'tenants': () => loadTenantsTable(),
   'settings': () => { loadSettings(); loadCDNSettings(); loadPassthrough(); loadReportSecret(); },
@@ -242,6 +249,7 @@ async function loadSummary() {
     ['pass', '放行', s.pass],
     ['fake', '投毒', s.fake],
     ['deny', '拒绝', s.deny],
+    ['rate-limit', '限流 429', s.rate_limit],
     ['', '独立 IP', s.unique_ips],
     ['', '独立 订阅', s.unique_tokens],
   ];
@@ -255,9 +263,8 @@ async function loadSummary() {
   const ipTbody = $('#topIPs tbody'); ipTbody.innerHTML = '';
   (s.top_ips || []).forEach(k => {
     const tr = document.createElement('tr');
-    const region = k.region || '<span class="muted">未知</span>';
     const isp = k.isp ? escapeHTML(k.isp) : '<span class="muted">未知</span>';
-    tr.innerHTML = `<td class="mono">${escapeHTML(k.key)}</td><td>${k.region ? escapeHTML(k.region) : '<span class="muted">未知</span>'}</td><td>${isp}</td><td style="text-align:right" class="mono">${k.count}</td>`;
+    tr.innerHTML = `<td><div class="dashboard-ip-cell"><span class="mono" title="${escapeHTML(k.key)}">${escapeHTML(k.key)}</span>${k.whitelisted ? '<span class="dashboard-whitelist-pill" title="命中当前 IP 白名单，实际请求优先放行">白名单</span>' : ''}</div></td><td title="${escapeHTML(k.region || '未知')}">${k.region ? escapeHTML(k.region) : '<span class="muted">未知</span>'}</td><td title="${escapeHTML(k.isp || '未知')}">${isp}</td><td style="text-align:right" class="mono">${k.count}</td>`;
     ipTbody.appendChild(tr);
   });
   const tokTbody = $('#topTokens tbody'); tokTbody.innerHTML = '';
@@ -265,7 +272,7 @@ async function loadSummary() {
     const tr = document.createElement('tr');
     const site = String(k.tenant || '-').toLowerCase();
     const shown = `(${site})${k.key || ''}`;
-    tr.innerHTML = `<td class="mono"><span>${escapeHTML(shown)}</span><button type="button" class="ip-copy-btn copyable" data-copy="${escapeHTML(k.key || '')}" title="只复制原始 Token">复制</button></td><td style="text-align:right" class="mono">${k.count}</td>`;
+    tr.innerHTML = `<td><div class="dashboard-token-cell"><span class="mono" title="${escapeHTML(shown)}">${escapeHTML(shown)}</span><button type="button" class="ip-copy-btn copyable" data-copy="${escapeHTML(k.key || '')}" title="只复制原始 Token">复制</button></div></td><td style="text-align:right" class="mono">${k.count}</td>`;
     tokTbody.appendChild(tr);
   });
   bindCopyHandlers(tokTbody);
@@ -568,7 +575,8 @@ $('#tokenBlockConfirm')?.addEventListener('click', async e => {
   closeTokenBlockModal();
   toast(action === 'deny' ? 'Token 已拉黑：全拒绝' : 'Token 已拉黑：全投毒', 'success');
   if (source === 'events') loadEvents(false);
-  if (source === 'suspects') loadSuspects();
+  if (source === 'suspects' || source === 'focus') loadSuspects();
+  if (source === 'aws-suspects') loadAWSSuspects();
   if (document.querySelector('.navlink.active')?.dataset.tab === 'resolved') loadResolved();
 });
 
@@ -626,23 +634,11 @@ async function loadBans() {
   const bs = await api('/api/bans');
   if (!bs) return;
   const ipTbody = $('#ipBanTbody'); ipTbody.innerHTML = '';
-  const tokenTbody = $('#tokenBanTbody'); tokenTbody.innerHTML = '';
-  let ipCount = 0, tokenCount = 0;
+  let ipCount = 0;
   for (const b of bs || []) {
     const exp = b.ExpiresTS ? fmtTime(b.ExpiresTS) : '<span style="color:var(--danger)">永久</span>';
     const tr = document.createElement('tr');
     if (b.Kind === 'token') {
-      const action = b.Action === 'deny' ? 'deny' : 'fake';
-      tr.innerHTML = `
-        <td class="mono" data-label="Token"><div class="token-ban-value-wrap"><span class="token-ban-value" title="${escapeHTML(b.Target)}">${escapeHTML(b.Target)}</span><button type="button" class="ip-copy-btn copyable" data-copy="${escapeHTML(b.Target)}">复制</button></div></td>
-        <td data-label="动作"><span class="pill ${action}">${action === 'deny' ? '全拒绝 · 403' : '全投毒 · 200'}</span></td>
-        <td data-label="原因">${escapeHTML(b.Reason || '')}</td>
-        <td class="mono" data-label="创建" style="white-space:nowrap">${escapeHTML(fmtTime(b.CreatedTS))}</td>
-        <td class="mono" data-label="过期" style="white-space:nowrap">${exp}</td>
-        <td data-label="来源"><span class="pill ${b.CreatedBy === 'auto' ? 'red' : ''}">${b.CreatedBy === 'auto' ? '自动' : (b.CreatedBy === 'manual' ? '手动' : escapeHTML(b.CreatedBy))}</span></td>
-        <td data-label="操作"><button class="danger" data-kind="token" data-target="${escapeHTML(b.Target)}">解除</button></td>
-      `;
-      tokenTbody.appendChild(tr); tokenCount++;
       continue;
     }
     if (b.Kind !== 'ip') continue;
@@ -658,9 +654,7 @@ async function loadBans() {
     ipTbody.appendChild(tr); ipCount++;
   }
   if (!ipCount) ipTbody.innerHTML = '<tr><td colspan="7" class="empty-state">无封禁 IP</td></tr>';
-  if (!tokenCount) tokenTbody.innerHTML = '<tr><td colspan="7" class="empty-state">暂无拉黑 Token</td></tr>';
-  bindCopyHandlers(tokenTbody);
-  $$('#ipBanTbody button.danger, #tokenBanTbody button.danger').forEach(btn => {
+  $$('#ipBanTbody button.danger').forEach(btn => {
     btn.addEventListener('click', async () => {
       if (!confirm('解除 ' + (btn.dataset.kind === 'token' ? 'Token ' : 'IP ') + btn.dataset.target + ' ?')) return;
       const r = await apiPost('/api/bans/remove', { kind: btn.dataset.kind, target: btn.dataset.target });
@@ -701,7 +695,7 @@ $('#banTokenAddBtn').addEventListener('click', async () => {
     const updated = Number(r.updated || 0);
     const actionText = action === 'deny' ? '全拒绝' : '全投毒';
     toast(`已${actionText}拉黑 ${r.added || 0} 个${updated ? `，更新 ${updated} 个` : ''}`, 'success');
-    loadBans();
+    loadResolved();
   } else toast((r && r.error) || '失败', 'error');
 });
 
@@ -860,14 +854,28 @@ async function loadGeoIPInfo() {
   }
 }
 
-function renderGeoInfo(info) {
+function renderIPPolicy(policy) {
+  if (!policy) return '';
+  const badges = [];
+  if (policy.whitelisted) badges.push('<span class="geo-policy-badge allow">IP 白名单 · 优先放行</span>');
+  if (policy.ip_blacklisted) badges.push(`<span class="geo-policy-badge deny" title="${escapeHTML(policy.ip_blacklist_reason || '')}">手工 IP 黑名单${policy.ip_blacklist_reason ? ' · ' + escapeHTML(policy.ip_blacklist_reason) : ''}</span>`);
+  for (const rawHit of (policy.global_hits || [])) {
+    let hit = String(rawHit || '');
+    if (hit.startsWith('云厂商 IP · ')) hit = '云厂商 IP · ' + cloudProviderLabel(hit.slice('云厂商 IP · '.length));
+    badges.push(`<span class="geo-policy-badge warn">全局黑名单 · ${escapeHTML(hit)}</span>`);
+  }
+  if (!badges.length) return '<div class="geo-policy-strip clear"><span>策略状态</span><strong>未命中 IP 黑名单、IP 白名单或已开启的全局 IP 拦截</strong></div>';
+  return `<div class="geo-policy-strip${policy.whitelisted ? ' whitelisted' : ''}"><span>策略状态</span><div>${badges.join('')}</div>${policy.whitelisted && (policy.ip_blacklisted || (policy.global_hits || []).length) ? '<small>白名单优先级更高，当前 IP 实际放行</small>' : ''}</div>`;
+}
+
+function renderGeoInfo(info, policy) {
   // 字段空的不显示,保持精简
   const rows = [
     ['国家', info.country, info.iso_code ? ` (${info.iso_code})` : ''],
     ['省市区', [info.province, info.city, info.district].filter(Boolean).join(' / ')],
     ['ISP', info.isp],
 	['用途', info.usage_type ? `${usageLabel(info.usage_type)} (${info.usage_type})${info.usage_type_source === 'inferred' ? ' · 推断' : ''}` : ''],
-	['云厂商', info.cloud_provider],
+	['云厂商', info.cloud_provider ? cloudProviderLabel(info.cloud_provider) : ''],
 	['ASN', info.asn],
 	['ASN 组织', info.asn_org],
     ['经纬度', (info.lon && info.lat) ? `${info.lon}, ${info.lat}` : ''],
@@ -884,10 +892,10 @@ function renderGeoInfo(info) {
   // 云厂商单独标红/橙
   if (info.cloud_provider) {
     html = `<div style="margin-bottom:10px;padding:8px 12px;background:#fff7ed;border-left:3px solid #f97316;border-radius:4px">
-      命中云厂商 IP · <strong>${escapeHTML(info.cloud_provider)}</strong>
+      命中云厂商 IP · <strong>${escapeHTML(cloudProviderLabel(info.cloud_provider))}</strong>
     </div>` + html;
   }
-  return html;
+  return renderIPPolicy(policy) + html;
 }
 
 $('#cloudCheckBtn').addEventListener('click', async () => {
@@ -897,10 +905,10 @@ $('#cloudCheckBtn').addEventListener('click', async () => {
   const el = $('#geoipResult');
   if (!r) { el.innerHTML = '<span class="muted">请求失败</span>'; return; }
   if (!r.found) {
-    el.innerHTML = `<span class="muted">未找到 ${escapeHTML(ip)} 的记录(IP 不在 xdb 库内或格式错误)</span>`;
+    el.innerHTML = renderIPPolicy(r.policy) + `<div class="muted geo-not-found">未找到 ${escapeHTML(ip)} 的 GeoIP 记录（IP 不在 xdb 库内或格式错误）</div>`;
     return;
   }
-  el.innerHTML = renderGeoInfo(r.info);
+  el.innerHTML = renderGeoInfo(r.info, r.policy);
 });
 $('#cloudCheckIP').addEventListener('keydown', e => {
   if (e.key === 'Enter') $('#cloudCheckBtn').click();
@@ -1313,7 +1321,13 @@ function ruleSummary(r) {
 }
 
 function ruleActionLabel(action) {
-  return action === 'deny' ? '禁止访问 · 403' : '投毒订阅 · 200';
+  if (action === 'deny') return '禁止访问 · 403';
+  if (action === 'rate_limit') return '请求限流 · 429';
+  return '投毒订阅 · 200';
+}
+
+function ruleActionClass(action) {
+  return action === 'deny' || action === 'rate_limit' ? action.replace('_', '-') : 'fake';
 }
 
 async function loadRulesTable() {
@@ -1330,17 +1344,17 @@ async function loadRulesTable() {
   for (const x of normalRules) {
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td class="mono">${escapeHtml(x.name)}</td>
-      <td>${escapeHtml(x.desc || '-')}</td>
-      <td class="rule-summary">${ruleSummary(x)}</td>
-      <td><span class="pill ${x.action === 'deny' ? 'deny' : 'fake'}">${ruleActionLabel(x.action)}</span></td>
-      <td>${x.enabled ? '✓' : '<span style="color:#9ca3af">×</span>'}</td>
-      <td class="mono" style="color:#6b7280">${fmtTs(x.updated_ts)}</td>
-      <td>
+      <td data-label="名称"><span class="mono rule-name" title="${escapeHtml(x.name)}">${escapeHtml(x.name)}</span></td>
+      <td data-label="描述"><span class="rule-desc" title="${escapeHtml(x.desc || '-')}">${escapeHtml(x.desc || '-')}</span></td>
+      <td data-label="条件摘要" class="rule-summary">${ruleSummary(x)}</td>
+      <td data-label="命中后处置"><span class="rule-action-pill ${ruleActionClass(x.action)}">${ruleActionLabel(x.action)}</span></td>
+      <td data-label="状态"><span class="rule-state-pill ${x.enabled ? 'on' : 'off'}">${x.enabled ? '已启用' : '已停用'}</span></td>
+      <td data-label="更新时间"><span class="mono rule-time">${fmtTs(x.updated_ts)}</span></td>
+      <td data-label="操作"><div class="rule-row-actions">
         <button data-act="edit"   data-name="${escapeHtml(x.name)}">编辑</button>
         <button data-act="toggle" data-name="${escapeHtml(x.name)}">${x.enabled ? '禁用' : '启用'}</button>
         <button data-act="delete" data-name="${escapeHtml(x.name)}" class="danger">删除</button>
-      </td>`;
+      </div></td>`;
     tbody.appendChild(tr);
   }
   $$('#rulesTbody button').forEach(btn => {
@@ -1363,7 +1377,7 @@ function renderUncommonUARule(rule) {
   const save = $('#uncommonUASave');
   if (!state || !action || !toggle || !save) return;
   const current = rule || uncommonRuleDefault();
-  action.value = current.action === 'deny' ? 'deny' : 'fake';
+  action.value = ['fake', 'deny', 'rate_limit'].includes(current.action) ? current.action : 'fake';
   if (rule) {
     state.className = `pill ${rule.enabled ? 'green' : 'empty'}`;
     state.textContent = rule.enabled ? '已启用' : '已停用';
@@ -1673,7 +1687,10 @@ async function loadSuspectFocus() {
       <td class="mono">${escapeHTML(fmtTime(new Date(r.focused_ts)))}</td>
       <td><span class="pill red">重点关注对象行为 ${r.activity_count || 0}</span>${r.last_activity_ts ? `<div class="mono muted" style="margin-top:4px">${escapeHTML(fmtTime(new Date(r.last_activity_ts)))}</div>` : ''}</td>
       <td class="mono" style="max-width:300px;word-break:break-all">${escapeHTML(latest)}</td>
-      <td><button class="danger suspect-focus-remove" data-token="${escapeHTML(r.token)}">取消关注</button></td>`;
+      <td><div class="focus-row-actions">
+        <button class="danger solid suspect-focus-block" data-token="${escapeHTML(r.token)}" data-tenant="${escapeHTML(r.tenant || '')}">拉黑 Token</button>
+        <button class="danger suspect-focus-remove" data-token="${escapeHTML(r.token)}">取消关注</button>
+      </div></td>`;
     tbody.appendChild(tr);
   }
   bindCopyHandlers(tbody);
@@ -1904,6 +1921,11 @@ $('#suspectsList').addEventListener('click', async (e) => {
 });
 
 $('#suspectFocusTbody').addEventListener('click', async (e) => {
+  const blockBtn = e.target.closest('.suspect-focus-block');
+  if (blockBtn) {
+    openTokenBlockModal(blockBtn.dataset.token, blockBtn.dataset.tenant || '', 'focus');
+    return;
+  }
   const btn = e.target.closest('.suspect-focus-remove');
   if (!btn) return;
   if (!confirm('取消关注后，该用户将回到普通嫌疑用户列表，确定？')) return;
@@ -1918,6 +1940,217 @@ $('#suspectResolvedTbody').addEventListener('click', async (e) => {
   const r = await apiPost('/api/token-blocks/remove', { token: btn.dataset.token });
   if (r && r.ok) loadSuspects();
   else alert('解除失败:' + (r && r.error ? r.error : '未知错误'));
+});
+
+// ════════════════════════════════════════════════════
+// AWS 墙前嫌疑用户 IP 筛选
+// ════════════════════════════════════════════════════
+
+let awsSuspectRows = [];
+let awsSuspectBlocked = new Set();
+let awsSuspectFocused = new Set();
+let awsSuspectVisibleLimit = 250;
+
+async function loadAWSSuspects() {
+  const list = $('#awsSuspectList');
+  if (!list) return;
+  list.innerHTML = '<div class="empty-state">正在聚合最近的 AWS 墙前快照...</div>';
+  const [rows, blocks, focused] = await Promise.all([
+    api('/api/aws-suspects'), api('/api/token-blocks'), api('/api/focus'),
+  ]);
+  awsSuspectRows = rows || [];
+  awsSuspectVisibleLimit = 250;
+  awsSuspectBlocked = new Set((blocks || []).map(x => x.token));
+  awsSuspectFocused = new Set((focused || []).map(x => x.token));
+
+  const dnsSel = $('#awsSuspectDNS');
+  const tenantSel = $('#awsSuspectTenant');
+  const oldDNS = dnsSel.value;
+  const oldTenant = tenantSel.value;
+  const dnsMeta = new Map();
+  const tenants = new Set();
+  for (const row of awsSuspectRows) {
+    if (!dnsMeta.has(row.dns_name)) dnsMeta.set(row.dns_name, row.entry_note || '');
+    tenants.add(row.tenant || '-');
+  }
+  dnsSel.innerHTML = '<option value="">全部入口 DNS</option>' + [...dnsMeta.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([dns, note]) => `<option value="${escapeHTML(dns)}">${escapeHTML(note ? note + ' · ' + dns : dns)}</option>`).join('');
+  tenantSel.innerHTML = '<option value="">全部站点</option>' + [...tenants].sort()
+    .map(tenant => `<option value="${escapeHTML(tenant)}">${escapeHTML(tenant)}</option>`).join('');
+  dnsSel.value = dnsMeta.has(oldDNS) ? oldDNS : '';
+  tenantSel.value = tenants.has(oldTenant) ? oldTenant : '';
+  renderAWSSuspects();
+}
+
+function renderAWSSuspects() {
+  const list = $('#awsSuspectList');
+  if (!list) return;
+  const dns = $('#awsSuspectDNS').value;
+  const tenant = $('#awsSuspectTenant').value;
+  const search = $('#awsSuspectSearch').value.trim().toLowerCase();
+  const minHits = Number($('#awsSuspectHits').value || 0);
+  const uaMode = $('#awsSuspectUA').value;
+  const sortMode = $('#awsSuspectSort').value;
+  let rows = awsSuspectRows.filter(row => {
+    if (dns && row.dns_name !== dns) return false;
+    if (tenant && (row.tenant || '-') !== tenant) return false;
+    if ((row.change_hits || 0) < minHits) return false;
+    if (uaMode === 'uncommon' && !row.has_uncommon_ua) return false;
+    if (uaMode === 'known' && row.has_uncommon_ua) return false;
+    if (search) {
+      const hit = String(row.token || '').toLowerCase().includes(search) ||
+        (row.ips || []).some(ip => String(ip.ip || '').toLowerCase().includes(search));
+      if (!hit) return false;
+    }
+    return true;
+  });
+  rows.sort((a, b) => {
+    if (sortMode === 'pulls') return (b.pull_count || 0) - (a.pull_count || 0) || (b.last_seen_ts || 0) - (a.last_seen_ts || 0);
+    if (sortMode === 'recent') return (b.last_seen_ts || 0) - (a.last_seen_ts || 0);
+    if (sortMode === 'closest') return (a.closest_seconds || 0) - (b.closest_seconds || 0) || (b.change_hits || 0) - (a.change_hits || 0);
+    return (b.change_hits || 0) - (a.change_hits || 0) || (b.pull_count || 0) - (a.pull_count || 0);
+  });
+
+  const matchedRows = rows;
+  const uniqueIPs = new Set();
+  const entries = new Set();
+  const sites = new Set();
+  for (const row of matchedRows) {
+    entries.add(row.dns_name);
+    sites.add(row.tenant || '-');
+    for (const ip of (row.ips || [])) uniqueIPs.add(ip.ip);
+  }
+  $('#awsSuspectStats').innerHTML = `
+    <span><small>入口</small><strong>${entries.size}</strong></span>
+    <span><small>站点</small><strong>${sites.size}</strong></span>
+    <span><small>Token</small><strong>${matchedRows.length}</strong></span>
+    <span><small>独立 IP</small><strong>${uniqueIPs.size}</strong></span>`;
+  if (!matchedRows.length) {
+    list.innerHTML = '<div class="card empty-state">没有符合当前条件的 AWS 墙前订阅者</div>';
+    return;
+  }
+  rows = matchedRows.slice(0, awsSuspectVisibleLimit);
+  const hiddenCount = matchedRows.length - rows.length;
+
+  const ipTokenMap = new Map();
+  for (const row of awsSuspectRows) {
+    for (const ip of (row.ips || [])) {
+      if (!ipTokenMap.has(ip.ip)) ipTokenMap.set(ip.ip, new Set());
+      ipTokenMap.get(ip.ip).add(row.token);
+    }
+  }
+  const grouped = new Map();
+  for (const row of rows) {
+    if (!grouped.has(row.dns_name)) grouped.set(row.dns_name, new Map());
+    const siteMap = grouped.get(row.dns_name);
+    const site = row.tenant || '-';
+    if (!siteMap.has(site)) siteMap.set(site, []);
+    siteMap.get(site).push(row);
+  }
+
+  let html = '';
+  for (const [entry, siteMap] of grouped) {
+    const entryRows = [...siteMap.values()].flat();
+    const note = entryRows.find(x => x.entry_note)?.entry_note || '';
+    const entryChanges = Math.max(...entryRows.map(x => Number(x.change_total || 0)));
+    html += `<details class="card aws-suspect-entry" open><summary>
+      <span class="pill red">AWS 墙前</span><strong class="mono">${escapeHTML(entry)}</strong>
+      ${note ? `<span class="pill tag">${escapeHTML(note)}</span>` : ''}
+      <span class="aws-suspect-entry-meta">${siteMap.size} 个站点 · ${entryRows.length} 个 Token · 最近 ${entryChanges} 次记录</span>
+    </summary><div class="aws-suspect-entry-body">`;
+    for (const [site, siteRows] of siteMap) {
+      const siteIPs = new Set(siteRows.flatMap(x => (x.ips || []).map(ip => ip.ip))).size;
+      html += `<details class="aws-suspect-site" open><summary><strong>站点：${escapeHTML(site)}</strong><span>${siteRows.length} 个 Token · ${siteIPs} 个 IP</span></summary>
+        <div class="datatable"><table class="aws-suspect-table"><thead><tr><th>Token / 风险</th><th>订阅者 IP</th><th>UA / 网络</th><th>行为</th><th>操作</th></tr></thead><tbody>`;
+      for (const row of siteRows) {
+        const ips = row.ips || [];
+        const ipHTML = ips.slice(0, 3).map(ip => {
+          const related = ipTokenMap.get(ip.ip)?.size || 1;
+          const network = [cloudProviderLabel(ip.cloud_provider), ip.asn, ip.asn_org].filter(Boolean).join(' · ');
+          return `<div class="aws-suspect-ip-line"><span class="mono" title="${escapeHTML(network || ip.ip)}">${escapeHTML(ip.ip)}</span><button type="button" class="ip-copy-btn copyable" data-copy="${escapeHTML(ip.ip)}">复制</button>${ip.whitelisted ? '<span class="aws-ip-whitelisted" title="该 IP 命中当前 IP 白名单，实际请求会优先放行">白名单</span>' : ''}${related > 1 ? `<span class="aws-ip-related" title="该 IP 在当前 AWS 墙前记录中由 ${related} 个不同 Token 使用">共享 ${related} Token</span>` : ''}</div>`;
+        }).join('');
+        const ua = (row.uas || [])[0] || '(空 UA)';
+        const network = ips[0] ? [cloudProviderLabel(ips[0].cloud_provider), ips[0].asn, ips[0].asn_org].filter(Boolean).join(' · ') : '-';
+        const hitsClass = (row.change_hits || 0) >= 5 ? 'red' : ((row.change_hits || 0) >= 2 ? 'orange' : 'tag');
+        const riskClass = (row.change_hits || 0) >= 5 ? 'risk-high' : ((row.change_hits || 0) >= 2 ? 'risk-medium' : 'risk-low');
+        const blocked = awsSuspectBlocked.has(row.token);
+        const focused = awsSuspectFocused.has(row.token);
+        html += `<tr class="aws-suspect-main-row ${riskClass}">
+          <td data-label="Token / 风险"><div class="aws-token-identity"><div class="aws-copy-wrap"><span class="mono aws-cell-value" title="${escapeHTML(row.token)}">${escapeHTML(row.token)}</span><button type="button" class="ip-copy-btn copyable" data-copy="${escapeHTML(row.token)}">复制</button></div><div class="aws-token-signals"><span class="pill ${hitsClass}" title="该入口与站点最近最多 50 次换 IP 记录中的独立命中次数">墙前命中 ${row.change_hits || 0}/${row.change_total || 0}</span>${row.has_uncommon_ua ? '<span class="pill orange">非常见 UA</span>' : ''}${blocked ? '<span class="pill red">已在黑名单</span>' : ''}</div></div></td>
+          <td data-label="订阅者 IP"><div class="aws-suspect-ip-list">${ipHTML}${ips.length > 3 ? `<span class="muted">另有 ${ips.length - 3} 个，展开查看</span>` : ''}</div></td>
+          <td data-label="UA / 网络"><div class="aws-suspect-ellipsis" title="${escapeHTML((row.uas || []).join('\n') || '(空 UA)')}"><span class="mono">${escapeHTML(ua)}</span>${(row.uas || []).length > 1 ? `<span class="muted">等 ${(row.uas || []).length} 种</span>` : ''}</div><div class="muted aws-suspect-network" title="${escapeHTML(network)}">${escapeHTML(network)}</div></td>
+          <td data-label="行为"><div class="aws-suspect-activity"><span><small>拉取</small><strong>${row.pull_count || 0}</strong></span><span><small>最近</small><b class="mono">${escapeHTML(fmtTime(new Date(row.last_seen_ts)))}</b></span><span><small>距失联</small><strong>${escapeHTML(fmtBeforeFailure(row.closest_seconds || 0))}</strong></span></div></td>
+          <td data-label="操作"><div class="aws-suspect-actions"><button class="danger solid aws-suspect-block aws-token-block-primary" data-token="${escapeHTML(row.token)}" data-tenant="${escapeHTML(row.tenant || '')}" ${blocked ? 'disabled' : ''}>${blocked ? '已加入 Token 黑名单' : '加入 Token 黑名单'}</button><div><button class="aws-suspect-detail-toggle" data-dns="${escapeHTML(row.dns_name)}" data-token="${escapeHTML(row.token)}" data-tenant="${escapeHTML(row.tenant || '')}">查看详情</button><button class="aws-suspect-focus" data-token="${escapeHTML(row.token)}" data-tenant="${escapeHTML(row.tenant || '')}" ${focused ? 'disabled' : ''}>${focused ? '已关注' : '重点关注'}</button></div></div></td>
+        </tr><tr class="aws-suspect-detail-row" style="display:none"><td colspan="5"><div class="muted">展开后加载该 Token 的墙前取证明细</div></td></tr>`;
+      }
+      html += '</tbody></table></div></details>';
+    }
+    html += '</div></details>';
+  }
+  if (hiddenCount > 0) html += `<div class="card aws-suspect-load-more"><span>已显示 ${rows.length}/${matchedRows.length} 个 Token</span><button id="awsSuspectLoadMore">继续加载 ${Math.min(250, hiddenCount)} 个</button></div>`;
+  list.innerHTML = html;
+  bindCopyHandlers(list);
+}
+
+function renderAWSSuspectDetail(row) {
+  const ips = row.ips || [];
+  const ipList = ips.map(ip => `<div class="aws-suspect-detail-ip"><span class="aws-suspect-detail-ip-name"><span class="mono">${escapeHTML(ip.ip)}</span>${ip.whitelisted ? '<span class="aws-ip-whitelisted" title="该 IP 命中当前 IP 白名单，实际请求会优先放行">白名单</span>' : ''}</span><span>${escapeHTML([cloudProviderLabel(ip.cloud_provider), ip.asn, ip.asn_org].filter(Boolean).join(' · ') || '-')}</span><strong>${ip.pull_count || 0} 次</strong></div>`).join('');
+  const occurrences = (row.occurrences || []).map(item => `<tr><td class="mono">${escapeHTML(fmtTime(new Date(item.failure_ts || item.occurred_ts)))}</td><td class="mono">${escapeHTML(item.client_ip || '-')}</td><td class="mono aws-suspect-detail-ua" title="${escapeHTML(item.ua || '(空 UA)')}">${escapeHTML(item.ua || '(空 UA)')}</td><td><strong>${escapeHTML(fmtBeforeFailure(item.seconds_before_failure || 0))}</strong></td><td>${item.pull_count || 0}</td></tr>`).join('');
+  return `<div class="aws-suspect-detail-grid"><div><h4>关联 IP（${ips.length}）</h4>${ipList || '<span class="muted">无 IP</span>'}</div><div><h4>墙前取证明细</h4><div class="datatable"><table><thead><tr><th>失联/换 IP 时间</th><th>订阅者 IP</th><th>UA</th><th>距离</th><th>拉取</th></tr></thead><tbody>${occurrences}</tbody></table></div></div></div>`;
+}
+
+function resetAWSSuspectView() {
+  awsSuspectVisibleLimit = 250;
+  renderAWSSuspects();
+}
+['awsSuspectDNS', 'awsSuspectTenant', 'awsSuspectHits', 'awsSuspectUA', 'awsSuspectSort'].forEach(id => {
+  $('#' + id)?.addEventListener('change', resetAWSSuspectView);
+});
+$('#awsSuspectSearch')?.addEventListener('input', resetAWSSuspectView);
+$('#awsSuspectRefreshBtn')?.addEventListener('click', loadAWSSuspects);
+$('#awsSuspectList')?.addEventListener('click', async e => {
+  const detailBtn = e.target.closest('.aws-suspect-detail-toggle');
+  if (detailBtn) {
+    const detailRow = detailBtn.closest('tr')?.nextElementSibling;
+    if (!detailRow) return;
+    if (detailRow.style.display !== 'none') {
+      detailRow.style.display = 'none';
+      return;
+    }
+    detailRow.style.display = '';
+    if (!detailRow.dataset.loaded) {
+      const cell = detailRow.querySelector('td');
+      cell.innerHTML = '<div class="muted">正在加载取证明细...</div>';
+      const q = new URLSearchParams({ dns_name: detailBtn.dataset.dns, tenant: detailBtn.dataset.tenant || '', token: detailBtn.dataset.token, details: '1' });
+      const detail = await api('/api/aws-suspects?' + q);
+      if (detail && detail[0]) {
+        cell.innerHTML = renderAWSSuspectDetail(detail[0]);
+        detailRow.dataset.loaded = '1';
+      } else {
+        cell.innerHTML = '<div class="empty-state">未找到该 Token 的取证明细</div>';
+      }
+    }
+    return;
+  }
+  const moreBtn = e.target.closest('#awsSuspectLoadMore');
+  if (moreBtn) {
+    awsSuspectVisibleLimit += 250;
+    renderAWSSuspects();
+    return;
+  }
+  const focusBtn = e.target.closest('.aws-suspect-focus');
+  if (focusBtn && !focusBtn.disabled) {
+    const r = await apiPost('/api/focus/add', { token: focusBtn.dataset.token, tenant: focusBtn.dataset.tenant || '', note: 'AWS 墙前筛选' });
+    if (r && r.ok) {
+      awsSuspectFocused.add(focusBtn.dataset.token);
+      toast('已加入重点关注', 'success');
+      renderAWSSuspects();
+    }
+    return;
+  }
+  const blockBtn = e.target.closest('.aws-suspect-block');
+  if (blockBtn && !blockBtn.disabled) openTokenBlockModal(blockBtn.dataset.token, blockBtn.dataset.tenant || '', 'aws-suspects');
 });
 
 // ════════════════════════════════════════════════════
@@ -2107,8 +2340,8 @@ async function toggleAWSChangeDetail(card, id) {
       const network = [cloudProviderLabel(row.cloud_provider), row.asn, row.asn_org].filter(Boolean).join(' · ') || '-';
       const proximityClass = preciseAnchor && row.seconds_before_failure <= 60 ? 'aws-subscriber-row-hot' : (preciseAnchor && row.seconds_before_failure <= 300 ? 'aws-subscriber-row-warm' : '');
       const repeatedClass = row.repeated_before_changes ? 'aws-subscriber-row-repeat' : '';
-      const repeatedLabel = row.repeated_before_changes
-        ? `<span class="pill red" title="同一入口、同一站点最近 ${row.recent_change_total} 次换 IP 中出现 ${row.recent_change_hits} 次">${row.recent_change_hits === row.recent_change_total ? `连续 ${row.recent_change_hits} 次` : `换IP ${row.recent_change_hits}/${row.recent_change_total}`}</span>`
+      const repeatedLabel = row.recent_change_total
+        ? `<span class="pill ${row.repeated_before_changes ? 'red' : 'tag'}" title="该 DNS 监控任务过去最多 50 次换 IP 记录中，同站点 Token 在墙前窗口出现 ${row.recent_change_hits} 次">墙前命中 ${row.recent_change_hits}/${row.recent_change_total}</span>`
         : '';
       html += `<tr data-offset="${Number(row.seconds_before_failure) || 0}" class="${row.ua_uncommon ? 'aws-subscriber-row-uncommon' : ''} ${proximityClass} ${repeatedClass}">
         <td class="mono aws-subscriber-token" data-label="Token"><div class="aws-copy-wrap"><span class="aws-cell-value" title="${escapeHTML(row.token)}">${escapeHTML(row.token)}</span><button type="button" class="ip-copy-btn copyable" data-copy="${escapeHTML(row.token)}">复制</button></div></td>

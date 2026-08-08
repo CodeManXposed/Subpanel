@@ -137,12 +137,13 @@ func (d *Detector) Observe(ip, tokenHash, ua string) {
 	d.ipFreq.Inc(ip)
 }
 
-// Result 检测结果。多条规则同时命中时 deny 优先于 fake。
+// Result 检测结果。多条规则同时命中时 deny > rate_limit > fake。
 type Result struct {
-	Hit    bool
-	Action string   // fake|deny
-	Tags   []string // 命中的规则名
-	Note   string
+	Hit        bool
+	Action     string        // fake|deny|rate_limit
+	RetryAfter time.Duration // rate_limit 时建议客户端多久后重试
+	Tags       []string      // 命中的规则名
+	Note       string
 }
 
 // Whitelisted IP 白名单 — 完全跳过所有规则。
@@ -165,9 +166,11 @@ func (d *Detector) Evaluate(ip, tokenHash, ua string) Result {
 		return Result{}
 	}
 	var (
-		tags   []string
-		notes  []string
-		action = "fake"
+		tags       []string
+		notes      []string
+		action     = "fake"
+		actionRank = 0
+		retryAfter time.Duration
 	)
 	rules := d.cfg.Rules
 	if snap := d.rulesSnap.Load(); snap != nil {
@@ -179,14 +182,42 @@ func (d *Detector) Evaluate(ip, tokenHash, ua string) Result {
 			continue
 		}
 		tags = append(tags, r.Name)
-		if strings.EqualFold(strings.TrimSpace(r.Action), "deny") {
-			action = "deny"
+		ruleAction := strings.ToLower(strings.TrimSpace(r.Action))
+		rank := 0
+		switch ruleAction {
+		case "deny":
+			rank = 2
+		case "rate_limit":
+			rank = 1
+			if window := ruleMaxWindow(r); window > retryAfter {
+				retryAfter = window
+			}
+		default:
+			ruleAction = "fake"
+		}
+		if rank > actionRank {
+			action = ruleAction
+			actionRank = rank
 		}
 		if note != "" {
 			notes = append(notes, note)
 		}
 	}
-	return Result{Hit: len(tags) > 0, Action: action, Tags: tags, Note: strings.Join(notes, "; ")}
+	if action == "rate_limit" && retryAfter <= 0 {
+		retryAfter = time.Minute
+	}
+	return Result{Hit: len(tags) > 0, Action: action, RetryAfter: retryAfter, Tags: tags, Note: strings.Join(notes, "; ")}
+}
+
+func ruleMaxWindow(r config.Rule) time.Duration {
+	var out time.Duration
+	w := r.When
+	for _, c := range []*config.Cond{w.TokenFreq, w.IPFreq, w.TokenDistinctIPs, w.IPDistinctTokens, w.CloudTokenDistinctUAs} {
+		if c != nil && c.Window.Std() > out {
+			out = c.Window.Std()
+		}
+	}
+	return out
 }
 
 func (d *Detector) matchRule(r config.Rule, ip, tokenHash, ua string) (bool, string) {

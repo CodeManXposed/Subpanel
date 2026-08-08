@@ -21,8 +21,9 @@ type Config struct {
 	Tenants      []Tenant `yaml:"tenants"`
 	// Paths 全局订阅路径已弃用,改为每租户独立 subscribe_path。
 	// 保留字段用于解析旧配置时给个明确报错提示(见 validate)。
-	Paths    Paths       `yaml:"paths,omitempty"`
-	Detector DetectorCfg `yaml:"detector"`
+	Paths     Paths        `yaml:"paths,omitempty"`
+	Detector  DetectorCfg  `yaml:"detector"`
+	RateLimit RateLimitCfg `yaml:"rate_limit"`
 	// Actions 已废弃:命中规则即投毒,无等级映射。yaml 老配置里的 actions 节会被忽略。
 	Faker FakerCfg `yaml:"faker"`
 	Admin AdminCfg `yaml:"admin"`
@@ -78,10 +79,20 @@ type DetectorCfg struct {
 	Whitelist   Whitelist           `yaml:"whitelist"`
 }
 
+// RateLimitCfg 是访问 PHP 源站前的硬保护层。它独立于可编辑触发规则，
+// 即使攻击者分散 IP 或不断生成新 Token，也不能无限堆积上游请求。
+type RateLimitCfg struct {
+	GlobalRPS             int `yaml:"global_rps"`
+	GlobalBurst           int `yaml:"global_burst"`
+	UpstreamMaxConcurrent int `yaml:"upstream_max_concurrent"`
+	PerIPMaxConcurrent    int `yaml:"per_ip_max_concurrent"`
+	RetryAfterSeconds     int `yaml:"retry_after_seconds"`
+}
+
 type Rule struct {
 	Name   string `yaml:"name"`
 	Desc   string `yaml:"desc"`
-	Action string `yaml:"action"` // fake(投毒，默认) | deny(HTTP 403)
+	Action string `yaml:"action"` // fake(投毒，默认) | deny(HTTP 403) | rate_limit(HTTP 429，不访问上游)
 	When   When   `yaml:"when"`
 	// Severity 已废弃。yaml 里的 severity 字段会被忽略。
 }
@@ -219,6 +230,21 @@ func (c *Config) validate() error {
 // validAction / ActionsCfg 已删除:命中规则统一投毒,无 action 概念。
 
 func (c *Config) applyDefaults() {
+	if c.RateLimit.GlobalRPS <= 0 {
+		c.RateLimit.GlobalRPS = 200
+	}
+	if c.RateLimit.GlobalBurst <= 0 {
+		c.RateLimit.GlobalBurst = c.RateLimit.GlobalRPS * 2
+	}
+	if c.RateLimit.UpstreamMaxConcurrent <= 0 {
+		c.RateLimit.UpstreamMaxConcurrent = 64
+	}
+	if c.RateLimit.PerIPMaxConcurrent <= 0 {
+		c.RateLimit.PerIPMaxConcurrent = 3
+	}
+	if c.RateLimit.RetryAfterSeconds <= 0 {
+		c.RateLimit.RetryAfterSeconds = 60
+	}
 	if c.GeoIP.ASNPath == "" && c.GeoIP.XDBPath != "" {
 		c.GeoIP.ASNPath = filepath.Join(filepath.Dir(c.GeoIP.XDBPath), "ip2asn-v4.tsv.gz")
 	}

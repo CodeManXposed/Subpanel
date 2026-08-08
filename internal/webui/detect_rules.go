@@ -27,7 +27,7 @@ import (
 type detectRuleAPI struct {
 	Name   string `json:"name"`
 	Desc   string `json:"desc"`
-	Action string `json:"action"` // fake|deny
+	Action string `json:"action"` // fake|deny|rate_limit
 	// Severity 已废弃,API 不再返回也不再接收。
 	Enabled   bool `json:"enabled"`
 	SortOrder int  `json:"sort_order"`
@@ -101,8 +101,11 @@ func rowToAPI(r store.DetectRuleRow) (*detectRuleAPI, error) {
 }
 
 func ruleAction(action string) string {
-	if strings.EqualFold(strings.TrimSpace(action), "deny") {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "deny":
 		return "deny"
+	case "rate_limit":
+		return "rate_limit"
 	}
 	return "fake"
 }
@@ -215,8 +218,8 @@ func (s *Server) apiDetectRuleSave(w http.ResponseWriter, r *http.Request) {
 	if body.Action == "" {
 		body.Action = "fake"
 	}
-	if body.Action != "fake" && body.Action != "deny" {
-		writeJSON(w, 400, map[string]any{"error": "处置动作只能是 fake 或 deny"})
+	if body.Action != "fake" && body.Action != "deny" && body.Action != "rate_limit" {
+		writeJSON(w, 400, map[string]any{"error": "处置动作只能是 fake、deny 或 rate_limit"})
 		return
 	}
 	when, err := apiToWhen(&body.detectRuleAPI)

@@ -89,6 +89,59 @@ func (s *Server) apiAWSIPChanges(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rows)
 }
 
+// apiAWSSuspects 汇总最近最多 50 次 AWS 换 IP 快照中的入口/站点/Token 关联。
+func (s *Server) apiAWSSuspects(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	rows, err := s.st.ListAWSSuspectSummaries(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	s.annotateAWSSuspectWhitelist(rows)
+	q := r.URL.Query()
+	dnsName := strings.TrimSpace(q.Get("dns_name"))
+	tenant := strings.TrimSpace(q.Get("tenant"))
+	token := strings.TrimSpace(q.Get("token"))
+	includeDetails := q.Get("details") == "1"
+	out := make([]store.AWSSuspectSummary, 0, len(rows))
+	for i := range rows {
+		if dnsName != "" && rows[i].DNSName != dnsName {
+			continue
+		}
+		if tenant != "" && rows[i].Tenant != tenant {
+			continue
+		}
+		if token != "" && rows[i].TokenHash != token {
+			continue
+		}
+		for _, ua := range rows[i].UAs {
+			if !blacklist.IsKnownSubClient(ua) {
+				rows[i].HasUncommonUA = true
+				break
+			}
+		}
+		if !includeDetails {
+			rows[i].Occurrences = nil
+		}
+		out = append(out, rows[i])
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) annotateAWSSuspectWhitelist(rows []store.AWSSuspectSummary) {
+	if s.rules == nil {
+		return
+	}
+	for i := range rows {
+		for j := range rows[i].IPs {
+			rows[i].IPs[j].Whitelisted = s.rules.IPWhitelisted(rows[i].IPs[j].IP)
+		}
+	}
+}
+
 func (s *Server) apiAWSIPChangeAdd(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
@@ -185,6 +238,9 @@ func (s *Server) apiAWSIPChangeDetail(w http.ResponseWriter, r *http.Request) {
 	sort.SliceStable(rows, func(i, j int) bool {
 		if rows[i].Tenant != rows[j].Tenant {
 			return rows[i].Tenant < rows[j].Tenant
+		}
+		if rows[i].RecentChangeHits != rows[j].RecentChangeHits {
+			return rows[i].RecentChangeHits > rows[j].RecentChangeHits
 		}
 		if rows[i].SecondsBeforeFailure != rows[j].SecondsBeforeFailure {
 			return rows[i].SecondsBeforeFailure < rows[j].SecondsBeforeFailure

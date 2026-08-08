@@ -114,3 +114,19 @@ func TestDenyActionWinsWhenMultipleRulesMatch(t *testing.T) {
 		t.Fatalf("expected deny precedence, got %+v", got)
 	}
 }
+
+func TestRateLimitActionAndPrecedence(t *testing.T) {
+	cfg := &config.DetectorCfg{Rules: []config.Rule{
+		{Name: "poison", Action: "fake", When: config.When{IPFreq: &config.Cond{Window: config.Duration(time.Minute), GTE: 1}}},
+		{Name: "throttle", Action: "rate_limit", When: config.When{IPFreq: &config.Cond{Window: config.Duration(10 * time.Minute), GTE: 1}}},
+	}}
+	d, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Observe("1.2.3.4", "token", "client")
+	got := d.Evaluate("1.2.3.4", "token", "client")
+	if !got.Hit || got.Action != "rate_limit" || got.RetryAfter != 10*time.Minute {
+		t.Fatalf("result=%+v, want rate_limit with 10m retry", got)
+	}
+}

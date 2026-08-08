@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -46,6 +47,7 @@ type Gateway struct {
 	// autoBan 字段已删除:命中规则统一投毒,无自动封禁逻辑。
 	requests atomic.Uint64
 	logger   *slog.Logger
+	guard    *upstreamGuard
 
 	// 可选:GeoIP 查询,用于把地区、ASN 与云厂商信息落进请求日志。
 	geoLookup func(ip string) NetworkInfo
@@ -126,6 +128,7 @@ func NewGateway(
 		faker:  fk,
 		rng:    rand.New(rand.NewSource(time.Now().UnixNano())),
 		logger: logger,
+		guard:  newUpstreamGuard(cfg.RateLimit),
 	}
 	if err := g.Reload(cfg.Tenants); err != nil {
 		return nil, err
@@ -334,16 +337,40 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 7) 执行:按命中规则处置。多规则同时命中时 detector 返回 deny 优先。
+	// 7) 执行:按命中规则处置。429/403 都在反代前短路，绝不访问上游。
 	if res.Hit {
-		if res.Action == "deny" {
+		switch res.Action {
+		case "deny":
 			g.respondDeny(w, pr, tokenHash, res.Tags, start)
-		} else {
+		case "rate_limit":
+			g.respondRateLimit(w, pr, tokenHash, res.Tags, res.RetryAfter, start)
+		default:
 			g.respondFake(w, r, pr, tokenHash, res.Tags, start)
 		}
 	} else {
 		g.transparentProxyWithLog(w, r, pr, tokenHash, res.Tags, "pass", start)
 	}
+}
+
+func (g *Gateway) respondRateLimit(w http.ResponseWriter, pr *parser.Request, tokenHash string, tags []string, retryAfter time.Duration, start time.Time) {
+	if retryAfter <= 0 {
+		retryAfter = time.Minute
+	}
+	seconds := int(retryAfter.Round(time.Second) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	// 避免向客户端宣告过长的等待时间；滑窗仍按规则原始窗口自动恢复。
+	if seconds > 3600 {
+		seconds = 3600
+	}
+	setNoStoreHeaders(w.Header())
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	const body = "Too Many Requests\n"
+	w.WriteHeader(http.StatusTooManyRequests)
+	_, _ = io.WriteString(w, body)
+	g.logEvent(pr, tokenHash, "rate_limit", http.StatusTooManyRequests, tags, 0, int64(len(body)), start)
 }
 
 func (g *Gateway) respondDeny(w http.ResponseWriter, pr *parser.Request, tokenHash string, tags []string, start time.Time) {
@@ -360,6 +387,12 @@ func (g *Gateway) transparentProxyWithLog(
 	w http.ResponseWriter, r *http.Request, pr *parser.Request,
 	tokenHash string, tags []string, action string, start time.Time,
 ) {
+	release, ok, reason := g.guard.TryAcquire(pr.ClientIP)
+	if !ok {
+		g.respondRateLimit(w, pr, tokenHash, append(tags, reason), time.Duration(g.cfg.RateLimit.RetryAfterSeconds)*time.Second, start)
+		return
+	}
+	defer release()
 	rp := g.snap.Load().proxies[pr.Tenant.Name]
 	if rp == nil {
 		http.Error(w, "无可用上游", http.StatusBadGateway)
@@ -407,6 +440,12 @@ func (g *Gateway) respondFake(
 	w http.ResponseWriter, r *http.Request, pr *parser.Request,
 	tokenHash string, tags []string, start time.Time,
 ) {
+	release, ok, reason := g.guard.TryAcquire(pr.ClientIP)
+	if !ok {
+		g.respondRateLimit(w, pr, tokenHash, append(tags, reason), time.Duration(g.cfg.RateLimit.RetryAfterSeconds)*time.Second, start)
+		return
+	}
+	defer release()
 	rp := g.snap.Load().proxies[pr.Tenant.Name]
 	if rp == nil {
 		http.Error(w, "无可用上游", http.StatusBadGateway)
@@ -523,6 +562,91 @@ func (g *Gateway) respondFake(
 		ASNOrg:        network.ASNOrg,
 		CloudProvider: network.CloudProvider,
 	})
+}
+
+// upstreamGuard 同时限制进入源站的速率与并发。所有检查均为非阻塞：
+// 容量不足时立刻失败，绝不让请求在 Sub-Panel 内排队占住 goroutine。
+type upstreamGuard struct {
+	mu            sync.Mutex
+	globalRPS     float64
+	globalBurst   float64
+	tokens        float64
+	lastRefill    time.Time
+	perIPMax      int
+	perIPActive   map[string]int
+	upstreamSlots chan struct{}
+}
+
+func newUpstreamGuard(cfg config.RateLimitCfg) *upstreamGuard {
+	if cfg.GlobalRPS <= 0 {
+		cfg.GlobalRPS = 200
+	}
+	if cfg.GlobalBurst <= 0 {
+		cfg.GlobalBurst = cfg.GlobalRPS * 2
+	}
+	if cfg.UpstreamMaxConcurrent <= 0 {
+		cfg.UpstreamMaxConcurrent = 64
+	}
+	if cfg.PerIPMaxConcurrent <= 0 {
+		cfg.PerIPMaxConcurrent = 3
+	}
+	return &upstreamGuard{
+		globalRPS:     float64(cfg.GlobalRPS),
+		globalBurst:   float64(cfg.GlobalBurst),
+		tokens:        float64(cfg.GlobalBurst),
+		lastRefill:    time.Now(),
+		perIPMax:      cfg.PerIPMaxConcurrent,
+		perIPActive:   make(map[string]int),
+		upstreamSlots: make(chan struct{}, cfg.UpstreamMaxConcurrent),
+	}
+}
+
+func (g *upstreamGuard) TryAcquire(ip string) (release func(), ok bool, reason string) {
+	now := time.Now()
+	g.mu.Lock()
+	elapsed := now.Sub(g.lastRefill).Seconds()
+	if elapsed > 0 {
+		g.tokens += elapsed * g.globalRPS
+		if g.tokens > g.globalBurst {
+			g.tokens = g.globalBurst
+		}
+		g.lastRefill = now
+	}
+	if g.tokens < 1 {
+		g.mu.Unlock()
+		return nil, false, "global_rate_limit"
+	}
+	if g.perIPActive[ip] >= g.perIPMax {
+		g.mu.Unlock()
+		return nil, false, "ip_upstream_concurrency"
+	}
+	g.tokens--
+	g.perIPActive[ip]++
+	g.mu.Unlock()
+
+	select {
+	case g.upstreamSlots <- struct{}{}:
+		var once sync.Once
+		return func() {
+			once.Do(func() {
+				<-g.upstreamSlots
+				g.mu.Lock()
+				g.perIPActive[ip]--
+				if g.perIPActive[ip] <= 0 {
+					delete(g.perIPActive, ip)
+				}
+				g.mu.Unlock()
+			})
+		}, true, ""
+	default:
+		g.mu.Lock()
+		g.perIPActive[ip]--
+		if g.perIPActive[ip] <= 0 {
+			delete(g.perIPActive, ip)
+		}
+		g.mu.Unlock()
+		return nil, false, "upstream_concurrency_limit"
+	}
 }
 
 // bufferingWriter 拦截上游响应,buffer 在内存里方便改写。

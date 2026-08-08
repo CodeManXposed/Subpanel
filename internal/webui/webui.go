@@ -117,6 +117,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/aws-ip-changes/add", s.auth(http.HandlerFunc(s.apiAWSIPChangeAdd)))
 	mux.Handle("/api/aws-ip-changes/detail", s.auth(http.HandlerFunc(s.apiAWSIPChangeDetail)))
 	mux.Handle("/api/aws-ip-changes/remove", s.auth(http.HandlerFunc(s.apiAWSIPChangeRemove)))
+	mux.Handle("/api/aws-suspects", s.auth(http.HandlerFunc(s.apiAWSSuspects)))
 	mux.Handle("/api/dns-watchers", s.auth(http.HandlerFunc(s.apiDNSWatchers)))
 	mux.Handle("/api/dns-watchers/add", s.auth(http.HandlerFunc(s.apiDNSWatcherAdd)))
 	mux.Handle("/api/dns-watchers/toggle", s.auth(http.HandlerFunc(s.apiDNSWatcherToggle)))
@@ -287,7 +288,7 @@ func (s *Server) apiSummary(w http.ResponseWriter, r *http.Request) {
 	winStr := r.URL.Query().Get("window")
 	dur, err := time.ParseDuration(winStr)
 	if err != nil || dur <= 0 {
-		dur = 24 * time.Hour
+		dur = 7 * 24 * time.Hour
 	}
 	st, err := s.st.Summary(r.Context(), tenant, time.Now().Add(-dur))
 	if err != nil {
@@ -317,6 +318,7 @@ func (s *Server) apiSummary(w http.ResponseWriter, r *http.Request) {
 				st.TopIPs[i].ISP = info.ISP
 			}
 		}
+		st.TopIPs[i].Whitelisted = s.rules != nil && s.rules.IPWhitelisted(ip)
 	}
 	writeJSON(w, 200, st)
 }
@@ -328,7 +330,7 @@ func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	winStr := q.Get("window")
 	dur, _ := time.ParseDuration(winStr)
 	if dur <= 0 {
-		dur = 24 * time.Hour
+		dur = 7 * 24 * time.Hour
 	}
 	f := store.EventFilter{
 		Tenant:      q.Get("tenant"),
@@ -598,6 +600,11 @@ func (s *Server) apiTokenBlockAdd(w http.ResponseWriter, r *http.Request) {
 		_ = s.bans.RemoveToken(target)
 		writeJSON(w, 500, map[string]any{"error": err.Error()})
 		return
+	}
+	// 拉黑即完成处置：同步移出重点关注名单，避免同一 Token 同时出现在两处。
+	_ = s.st.RemoveFocusToken(r.Context(), body.Token)
+	if target != body.Token {
+		_ = s.st.RemoveFocusToken(r.Context(), target)
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "action": body.Action})
 }
@@ -1301,11 +1308,54 @@ func (s *Server) apiGeoIPLookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	info := geoip.Global().Lookup(ip)
+	policy := s.ipPolicyStatus(ip, info)
 	if info == nil {
-		writeJSON(w, 200, map[string]any{"ip": ip, "found": false})
+		writeJSON(w, 200, map[string]any{"ip": ip, "found": false, "policy": policy})
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ip": ip, "found": true, "info": info})
+	writeJSON(w, 200, map[string]any{"ip": ip, "found": true, "info": info, "policy": policy})
+}
+
+type ipPolicyStatus struct {
+	Whitelisted       bool     `json:"whitelisted"`
+	IPBlacklisted     bool     `json:"ip_blacklisted"`
+	IPBlacklistReason string   `json:"ip_blacklist_reason,omitempty"`
+	GlobalHits        []string `json:"global_hits"`
+}
+
+func (s *Server) ipPolicyStatus(ip string, info *geoip.Info) ipPolicyStatus {
+	out := ipPolicyStatus{GlobalHits: []string{}}
+	if s.rules != nil {
+		out.Whitelisted = s.rules.IPWhitelisted(ip)
+	}
+	if s.bans != nil {
+		out.IPBlacklisted, out.IPBlacklistReason = s.bans.CheckIP(ip)
+	}
+	if s.bl == nil || info == nil {
+		return out
+	}
+	sn := s.bl.Get()
+	isCloud := info.CloudProvider != ""
+	if !isCloud && s.cloud != nil {
+		isCloud, _ = s.cloud.Match(ip)
+	}
+	if sn.CloudEnabled && isCloud {
+		label := "云厂商 IP"
+		if info.CloudProvider != "" {
+			label += " · " + info.CloudProvider
+		}
+		out.GlobalHits = append(out.GlobalHits, label)
+	}
+	if sn.CNIDCEnabled && !blacklist.IsOverseaCountry(info.ISOCode, info.Country) && strings.EqualFold(strings.TrimSpace(info.UsageType), "IDC") {
+		out.GlobalHits = append(out.GlobalHits, "国内 IDC")
+	}
+	if sn.OverseaEnabled && blacklist.IsOverseaCountry(info.ISOCode, info.Country) {
+		out.GlobalHits = append(out.GlobalHits, "海外 IP")
+	}
+	if hit, keyword := s.bl.ISPHitKeyword(info.ISP); hit {
+		out.GlobalHits = append(out.GlobalHits, "ISP 关键字 · "+keyword)
+	}
+	return out
 }
 
 // ---------- 页面 ----------

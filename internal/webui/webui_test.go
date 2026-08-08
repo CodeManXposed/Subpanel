@@ -16,8 +16,10 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/huabanmao168/SubPanel/internal/banlist"
+	"github.com/huabanmao168/SubPanel/internal/blacklist"
 	"github.com/huabanmao168/SubPanel/internal/cloudip"
 	"github.com/huabanmao168/SubPanel/internal/config"
+	"github.com/huabanmao168/SubPanel/internal/geoip"
 	"github.com/huabanmao168/SubPanel/internal/rules"
 	"github.com/huabanmao168/SubPanel/internal/store"
 	"github.com/huabanmao168/SubPanel/internal/token"
@@ -108,6 +110,9 @@ func TestLoginAndAccessAPI(t *testing.T) {
 		Action: "pass", Status: 200,
 	})
 	time.Sleep(150 * time.Millisecond)
+	if err := srv.rules.AddIPWhitelist("1.1.1.0/24", "summary test"); err != nil {
+		t.Fatal(err)
+	}
 
 	// 登录
 	body := strings.NewReader(`{"username":"admin","password":"p@ss"}`)
@@ -137,6 +142,33 @@ func TestLoginAndAccessAPI(t *testing.T) {
 	}
 	if s.TotalEvents < 1 {
 		t.Errorf("expected at least 1 event, got %d", s.TotalEvents)
+	}
+	if len(s.TopIPs) != 1 || !s.TopIPs[0].Whitelisted {
+		t.Fatalf("summary top IP whitelist annotation missing: %+v", s.TopIPs)
+	}
+}
+
+func TestIPPolicyStatusShowsWhitelistManualBanAndGlobalIPRules(t *testing.T) {
+	srv, st, _ := setup(t)
+	if err := srv.rules.AddIPWhitelist("203.0.113.0/24", "trusted node"); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.bans.AddIP("203.0.113.8", "manual test", 0, nil, "test"); err != nil {
+		t.Fatal(err)
+	}
+	srv.bl = blacklist.New(st)
+	if err := srv.bl.Update(blacklist.Snapshot{CloudEnabled: true, CNIDCEnabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	status := srv.ipPolicyStatus("203.0.113.8", &geoip.Info{
+		Country: "中国", ISOCode: "CN", UsageType: "IDC", CloudProvider: "aws",
+	})
+	if !status.Whitelisted || !status.IPBlacklisted || status.IPBlacklistReason != "manual test" {
+		t.Fatalf("missing list status: %+v", status)
+	}
+	joined := strings.Join(status.GlobalHits, "|")
+	if !strings.Contains(joined, "云厂商 IP") || !strings.Contains(joined, "国内 IDC") {
+		t.Fatalf("missing global blacklist hits: %+v", status)
 	}
 }
 
@@ -175,6 +207,15 @@ func TestAWSIPChangeAPIRecordsSnapshot(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "snapshot-token") || !strings.Contains(w.Body.String(), "default") {
 		t.Fatalf("detail: %d %s", w.Code, w.Body.String())
+	}
+
+	if err := srv.rules.AddIPWhitelist("8.8.8.0/24", "测试 CIDR 白名单"); err != nil {
+		t.Fatal(err)
+	}
+	rows := []store.AWSSuspectSummary{{IPs: []store.AWSSuspectIP{{IP: "8.8.8.8"}, {IP: "1.1.1.1"}}}}
+	srv.annotateAWSSuspectWhitelist(rows)
+	if !rows[0].IPs[0].Whitelisted || rows[0].IPs[1].Whitelisted {
+		t.Fatalf("unexpected suspect whitelist annotation: %+v", rows[0].IPs)
 	}
 }
 
@@ -279,6 +320,18 @@ func TestCloudUAProbeRuleConversion(t *testing.T) {
 	}
 	if row.CloudTokenUAsWindowSec != 60 || row.CloudTokenUAsGTE != 4 || row.Action != "deny" {
 		t.Fatalf("unexpected API rule: %+v", row)
+	}
+}
+
+func TestRateLimitRuleConversion(t *testing.T) {
+	row, err := rowToAPI(store.DetectRuleRow{
+		Name: "ip_freq_burst", Action: "rate_limit", WhenJSON: `{"IPFreq":{"Window":60000000000,"GTE":20}}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.Action != "rate_limit" || row.IPFreqWindowSec != 60 || row.IPFreqGTE != 20 {
+		t.Fatalf("unexpected rate-limit API rule: %+v", row)
 	}
 }
 
@@ -500,6 +553,10 @@ func TestTokenBlockWorkflowViaAPI(t *testing.T) {
 		return w
 	}
 
+	if err := st.AddFocusToken(context.Background(), "suspect-token", "sled", "watching"); err != nil {
+		t.Fatalf("focus token before block: %v", err)
+	}
+
 	w := post("/api/token-blocks/add", `{"token":"suspect-token","tenant":"sled","action":"deny","reason":"confirmed leak","ttl":"24h"}`)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"action":"deny"`) {
 		t.Fatalf("token block add: %d %s", w.Code, w.Body.String())
@@ -510,6 +567,10 @@ func TestTokenBlockWorkflowViaAPI(t *testing.T) {
 	resolved, err := st.ListResolvedTokens(context.Background(), "sled")
 	if err != nil || len(resolved) != 1 || resolved[0].Token != "suspect-token" {
 		t.Fatalf("resolved after block: rows=%+v err=%v", resolved, err)
+	}
+	focused, err := st.ListFocusTokens(context.Background(), "sled")
+	if err != nil || len(focused) != 0 {
+		t.Fatalf("focus remained after block: rows=%+v err=%v", focused, err)
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/token-blocks?tenant=sled", nil)

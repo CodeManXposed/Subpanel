@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -194,6 +195,62 @@ func TestE2ERuleDenyReturnsForbidden(t *testing.T) {
 	gw.ServeHTTP(w, mkSubReq("sub.example.com", "Clash/1.0", "blocked", "clash", "9.9.9.9"))
 	if w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != "Forbidden" {
 		t.Fatalf("expected HTTP 403 deny, got %d %q", w.Code, w.Body.String())
+	}
+}
+
+func TestE2ERateLimitNeverReachesUpstream(t *testing.T) {
+	gw, _, _, _, cleanup := newE2E(t, false, config.Rule{
+		Name:   "rate_once",
+		Action: "rate_limit",
+		When:   config.When{IPFreq: &config.Cond{Window: config.Duration(time.Minute), GTE: 1}},
+	})
+	defer cleanup()
+
+	var upstreamHits atomic.Int64
+	protectedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "must-not-be-returned")
+	}))
+	defer protectedUpstream.Close()
+	tenants := gw.Tenants()
+	tenants[0].Upstream = protectedUpstream.URL
+	if err := gw.Reload(tenants); err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	gw.ServeHTTP(w, mkSubReq("sub.example.com", "Clash/1.0", "random-token", "clash", "9.9.9.9"))
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected HTTP 429, got %d %q", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Retry-After"); got != "60" {
+		t.Fatalf("Retry-After=%q, want 60", got)
+	}
+	if got := upstreamHits.Load(); got != 0 {
+		t.Fatalf("rate-limited request reached PHP upstream %d times", got)
+	}
+}
+
+func TestUpstreamGuardRejectsWithoutQueueing(t *testing.T) {
+	g := newUpstreamGuard(config.RateLimitCfg{
+		GlobalRPS: 100, GlobalBurst: 100, UpstreamMaxConcurrent: 1, PerIPMaxConcurrent: 1,
+	})
+	release, ok, _ := g.TryAcquire("1.2.3.4")
+	if !ok {
+		t.Fatal("first request should acquire upstream slot")
+	}
+	if _, ok, reason := g.TryAcquire("1.2.3.4"); ok || reason != "ip_upstream_concurrency" {
+		t.Fatalf("second request=(ok=%v reason=%q), want immediate per-IP rejection", ok, reason)
+	}
+	if _, ok, reason := g.TryAcquire("5.6.7.8"); ok || reason != "upstream_concurrency_limit" {
+		t.Fatalf("other IP=(ok=%v reason=%q), want immediate global concurrency rejection", ok, reason)
+	}
+	release()
+	if release2, ok, reason := g.TryAcquire("5.6.7.8"); !ok {
+		t.Fatalf("slot should be reusable after release: %q", reason)
+	} else {
+		release2()
 	}
 }
 

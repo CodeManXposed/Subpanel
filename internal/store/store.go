@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -127,7 +128,7 @@ CREATE TABLE IF NOT EXISTS detect_rules (
     name       TEXT PRIMARY KEY,
     desc       TEXT,
     severity   TEXT NOT NULL,         -- yellow|orange|red
-	 action      TEXT NOT NULL DEFAULT 'fake', -- fake|deny
+	 action      TEXT NOT NULL DEFAULT 'fake', -- fake|deny|rate_limit
     when_json  TEXT NOT NULL,         -- 序列化的 config.When
     enabled    INTEGER NOT NULL DEFAULT 1,
     sort_order INTEGER NOT NULL DEFAULT 0,
@@ -342,6 +343,21 @@ func Open(path string, flushEvery time.Duration, flushSize int) (*Store, error) 
 	_, _ = db.Exec("ALTER TABLE detect_rules ADD COLUMN action TEXT NOT NULL DEFAULT 'fake'")
 	// Token 黑名单处置动作。旧封禁记录保持 fake，升级不改变现有行为。
 	_, _ = db.Exec("ALTER TABLE bans ADD COLUMN action TEXT NOT NULL DEFAULT 'fake'")
+	// “已处理用户”升级为 Token 黑名单后，将旧记录一次性补为永久投毒。
+	// 新流程写入 token_block:* 备注并同步创建 bans，不参与这次兼容迁移。
+	if _, err := db.Exec(`INSERT INTO bans
+		(kind,target,reason,rule_tags,created_ts,expires_ts,created_by,action)
+		SELECT 'token',r.token,
+			CASE WHEN TRIM(COALESCE(r.note,''))=''
+				THEN '旧“已处理用户”迁移'
+				ELSE '旧“已处理用户”迁移：'||TRIM(r.note) END,
+			'["legacy_resolved"]',r.resolved_ts,NULL,'migration:resolved_tokens','fake'
+		FROM resolved_tokens r
+		WHERE COALESCE(r.note,'') NOT LIKE 'token_block:%'
+		  AND NOT EXISTS (SELECT 1 FROM bans b WHERE b.kind='token' AND b.target=r.token)`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate legacy resolved tokens: %w", err)
+	}
 	// DNS 追踪 IP 存活时间(老库升级)
 	_, _ = db.Exec("ALTER TABLE dns_watchers ADD COLUMN last_changed_ts INTEGER NOT NULL DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE dns_watchers ADD COLUMN note TEXT NOT NULL DEFAULT ''")
@@ -970,6 +986,7 @@ type Stats struct {
 	SlowCount       int64            `json:"slow"`
 	FakeCount       int64            `json:"fake"`
 	DenyCount       int64            `json:"deny"`
+	RateLimitCount  int64            `json:"rate_limit"`
 	UniqueIPs       int64            `json:"unique_ips"`
 	UniqueTokens    int64            `json:"unique_tokens"`
 	TopIPs          []KeyCount       `json:"top_ips"`
@@ -978,8 +995,9 @@ type Stats struct {
 }
 
 type KeyCount struct {
-	Key   string `json:"key"`
-	Count int64  `json:"count"`
+	Key         string `json:"key"`
+	Count       int64  `json:"count"`
+	Whitelisted bool   `json:"whitelisted,omitempty"`
 	// Tenant 仅用于 TopTokens，避免不同站点相同 token 被合并。
 	Tenant string `json:"tenant,omitempty"`
 	// 仅用于 Top IPs 富化:在 Summary() 中由 webui 层填,store 本身留空。
@@ -1022,6 +1040,8 @@ func (s *Store) Summary(ctx context.Context, tenant string, since time.Time) (*S
 			out.FakeCount = n
 		case "deny":
 			out.DenyCount = n
+		case "rate_limit":
+			out.RateLimitCount = n
 		}
 	}
 	rows.Close()
@@ -1291,6 +1311,48 @@ type AWSChangeTokenHistory struct {
 	Total int
 }
 
+// AWSSuspectIP 是墙前快照中同一 Token 使用过的一个订阅者 IP。
+type AWSSuspectIP struct {
+	IP            string `json:"ip"`
+	CloudProvider string `json:"cloud_provider"`
+	ASN           string `json:"asn"`
+	ASNOrg        string `json:"asn_org"`
+	PullCount     int    `json:"pull_count"`
+	LastSeenTS    int64  `json:"last_seen_ts"`
+	Whitelisted   bool   `json:"whitelisted"`
+}
+
+// AWSSuspectOccurrence 保留 Token 在单次墙前快照中的取证明细。
+type AWSSuspectOccurrence struct {
+	ChangeID             int64  `json:"change_id"`
+	OccurredTS           int64  `json:"occurred_ts"`
+	FailureTS            int64  `json:"failure_ts"`
+	ClientIP             string `json:"client_ip"`
+	UA                   string `json:"ua"`
+	PullCount            int    `json:"pull_count"`
+	FirstSeenTS          int64  `json:"first_seen_ts"`
+	LastSeenTS           int64  `json:"last_seen_ts"`
+	SecondsBeforeFailure int64  `json:"seconds_before_failure"`
+}
+
+// AWSSuspectSummary 将同一入口、实际站点和 Token 的最近最多 50 次墙前记录聚合为一行。
+type AWSSuspectSummary struct {
+	DNSName        string                 `json:"dns_name"`
+	EntryNote      string                 `json:"entry_note"`
+	Tenant         string                 `json:"tenant"`
+	TokenHash      string                 `json:"token"`
+	IPs            []AWSSuspectIP         `json:"ips"`
+	UAs            []string               `json:"uas"`
+	ChangeHits     int                    `json:"change_hits"`
+	ChangeTotal    int                    `json:"change_total"`
+	PullCount      int                    `json:"pull_count"`
+	FirstSeenTS    int64                  `json:"first_seen_ts"`
+	LastSeenTS     int64                  `json:"last_seen_ts"`
+	ClosestSeconds int64                  `json:"closest_seconds"`
+	HasUncommonUA  bool                   `json:"has_uncommon_ua"`
+	Occurrences    []AWSSuspectOccurrence `json:"occurrences"`
+}
+
 // AddAWSIPChange 新增换 IP 记录，并在同一事务中按设置的分钟数冻结动作前订阅者。
 func (s *Store) AddAWSIPChange(ctx context.Context, change AWSIPChange) (*AWSIPChange, error) {
 	if change.LookbackMinutes < 1 || change.LookbackMinutes > 120 {
@@ -1411,14 +1473,17 @@ func (s *Store) ListAWSIPChangeSubscribers(ctx context.Context, changeID int64) 
 	return out, rows.Err()
 }
 
-// AWSIPChangeTokenHistory 返回同一入口最近三次换 IP 中，各“站点 + Token”的出现次数。
+// AWSIPChangeTokenHistory 返回同一 DNS 监控任务（入口 + 绑定站点范围）最近最多 50 次换 IP 中，
+// 各实际站点 + Token 的出现次数；相同 DNS 的其他监控范围不会混入。
 func (s *Store) AWSIPChangeTokenHistory(ctx context.Context, changeID int64) (map[string]AWSChangeTokenHistory, error) {
 	rows, err := s.db.QueryContext(ctx, `WITH target AS (
-		SELECT dns_name,occurred_ts FROM aws_ip_changes WHERE id=? AND COALESCE(dns_name,'')<>''
+		SELECT dns_name,COALESCE(tenant,'') AS watcher_tenant,occurred_ts
+		FROM aws_ip_changes WHERE id=? AND COALESCE(dns_name,'')<>''
 	), recent AS (
 		SELECT c.id FROM aws_ip_changes c,target t
-		WHERE c.dns_name=t.dns_name AND (c.occurred_ts<t.occurred_ts OR (c.occurred_ts=t.occurred_ts AND c.id<=?))
-		ORDER BY c.occurred_ts DESC,c.id DESC LIMIT 3
+		WHERE c.dns_name=t.dns_name AND COALESCE(c.tenant,'')=t.watcher_tenant
+		  AND (c.occurred_ts<t.occurred_ts OR (c.occurred_ts=t.occurred_ts AND c.id<=?))
+		ORDER BY c.occurred_ts DESC,c.id DESC LIMIT 50
 	)
 	SELECT s.tenant,s.token_hash,COUNT(DISTINCT s.change_id),(SELECT COUNT(*) FROM recent)
 	FROM aws_ip_change_subscribers s
@@ -1438,6 +1503,183 @@ func (s *Store) AWSIPChangeTokenHistory(ctx context.Context, changeID int64) (ma
 		out[tenant+"\x00"+token] = h
 	}
 	return out, rows.Err()
+}
+
+// ListAWSSuspectSummaries 返回 AWS 换 IP 取证中提纯后的 Token。
+// 每个入口/站点只遍历对该站点生效的最近 50 次换 IP，避免旧数据无限放大命中数。
+func (s *Store) ListAWSSuspectSummaries(ctx context.Context) ([]AWSSuspectSummary, error) {
+	type changeRow struct {
+		id, occurredTS, failureTS int64
+		dnsName, watcherTenant    string
+		note                      string
+	}
+	changeRows, err := s.db.QueryContext(ctx, `WITH ranked AS (
+		SELECT id,occurred_ts,COALESCE(dns_name,'') AS dns_name,COALESCE(tenant,'') AS watcher_tenant,
+		       COALESCE(failure_ts,0) AS failure_ts,COALESCE(note,'') AS note,
+		       ROW_NUMBER() OVER (PARTITION BY dns_name,COALESCE(tenant,'') ORDER BY occurred_ts DESC,id DESC) AS rn
+		FROM aws_ip_changes WHERE COALESCE(dns_name,'')<>''
+	)
+	SELECT id,occurred_ts,dns_name,watcher_tenant,failure_ts,note
+	FROM ranked WHERE rn<=50 ORDER BY occurred_ts DESC,id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	var changes []changeRow
+	for changeRows.Next() {
+		var row changeRow
+		if err := changeRows.Scan(&row.id, &row.occurredTS, &row.dnsName, &row.watcherTenant, &row.failureTS, &row.note); err != nil {
+			_ = changeRows.Close()
+			return nil, err
+		}
+		changes = append(changes, row)
+	}
+	if err := changeRows.Close(); err != nil {
+		return nil, err
+	}
+	if len(changes) == 0 {
+		return []AWSSuspectSummary{}, nil
+	}
+
+	type rawSubscriber struct {
+		changeID                   int64
+		occurredTS, failureTS      int64
+		dnsName, watcherTenant     string
+		note, tenant, token        string
+		clientIP, ua               string
+		pullCount                  int
+		firstSeenTS, lastSeenTS    int64
+		cloudProvider, asn, asnOrg string
+	}
+	rows, err := s.db.QueryContext(ctx, `WITH ranked AS (
+		SELECT id,occurred_ts,COALESCE(dns_name,'') AS dns_name,COALESCE(tenant,'') AS watcher_tenant,
+		       COALESCE(failure_ts,0) AS failure_ts,COALESCE(note,'') AS note,
+		       ROW_NUMBER() OVER (PARTITION BY dns_name,COALESCE(tenant,'') ORDER BY occurred_ts DESC,id DESC) AS rn
+		FROM aws_ip_changes WHERE COALESCE(dns_name,'')<>''
+	)
+	SELECT c.id,c.occurred_ts,c.dns_name,c.watcher_tenant,c.failure_ts,c.note,
+	       s.tenant,s.token_hash,COALESCE(s.client_ip,''),COALESCE(s.ua,''),s.pull_count,
+	       s.first_seen_ts,s.last_seen_ts,COALESCE(s.cloud_provider,''),COALESCE(s.asn,''),COALESCE(s.asn_org,'')
+	FROM ranked c JOIN aws_ip_change_subscribers s ON s.change_id=c.id
+	WHERE c.rn<=50 AND s.token_hash<>''
+	ORDER BY c.occurred_ts DESC,c.id DESC,s.last_seen_ts DESC`)
+	if err != nil {
+		return nil, err
+	}
+	type aggregate struct {
+		dnsName, tenant, token string
+		raw                    []rawSubscriber
+	}
+	aggregates := map[string]*aggregate{}
+	for rows.Next() {
+		var row rawSubscriber
+		if err := rows.Scan(&row.changeID, &row.occurredTS, &row.dnsName, &row.watcherTenant, &row.failureTS, &row.note,
+			&row.tenant, &row.token, &row.clientIP, &row.ua, &row.pullCount, &row.firstSeenTS, &row.lastSeenTS,
+			&row.cloudProvider, &row.asn, &row.asnOrg); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		key := row.dnsName + "\x00" + row.tenant + "\x00" + row.token
+		a := aggregates[key]
+		if a == nil {
+			a = &aggregate{dnsName: row.dnsName, tenant: row.tenant, token: row.token}
+			aggregates[key] = a
+		}
+		a.raw = append(a.raw, row)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	out := make([]AWSSuspectSummary, 0, len(aggregates))
+	for _, a := range aggregates {
+		allowed := map[int64]bool{}
+		entryNote := ""
+		for _, change := range changes {
+			if change.dnsName != a.dnsName || (change.watcherTenant != "" && change.watcherTenant != a.tenant) {
+				continue
+			}
+			if len(allowed) >= 50 {
+				break
+			}
+			allowed[change.id] = true
+			if entryNote == "" && change.note != "" {
+				entryNote = change.note
+			}
+		}
+		item := AWSSuspectSummary{
+			DNSName: a.dnsName, EntryNote: entryNote, Tenant: a.tenant, TokenHash: a.token,
+			ChangeTotal: len(allowed), ClosestSeconds: -1,
+		}
+		hits := map[int64]bool{}
+		ipMap := map[string]*AWSSuspectIP{}
+		uaMap := map[string]bool{}
+		for _, row := range a.raw {
+			if !allowed[row.changeID] {
+				continue
+			}
+			hits[row.changeID] = true
+			item.PullCount += row.pullCount
+			if item.FirstSeenTS == 0 || row.firstSeenTS < item.FirstSeenTS {
+				item.FirstSeenTS = row.firstSeenTS
+			}
+			if row.lastSeenTS > item.LastSeenTS {
+				item.LastSeenTS = row.lastSeenTS
+			}
+			anchor := row.failureTS
+			if anchor <= 0 {
+				anchor = row.occurredTS
+			}
+			before := int64(0)
+			if anchor > row.lastSeenTS {
+				before = (anchor - row.lastSeenTS) / 1000
+			}
+			if item.ClosestSeconds < 0 || before < item.ClosestSeconds {
+				item.ClosestSeconds = before
+			}
+			item.Occurrences = append(item.Occurrences, AWSSuspectOccurrence{
+				ChangeID: row.changeID, OccurredTS: row.occurredTS, FailureTS: row.failureTS,
+				ClientIP: row.clientIP, UA: row.ua, PullCount: row.pullCount,
+				FirstSeenTS: row.firstSeenTS, LastSeenTS: row.lastSeenTS, SecondsBeforeFailure: before,
+			})
+			if row.clientIP != "" {
+				ip := ipMap[row.clientIP]
+				if ip == nil {
+					ip = &AWSSuspectIP{IP: row.clientIP, CloudProvider: row.cloudProvider, ASN: row.asn, ASNOrg: row.asnOrg}
+					ipMap[row.clientIP] = ip
+				}
+				ip.PullCount += row.pullCount
+				if row.lastSeenTS > ip.LastSeenTS {
+					ip.LastSeenTS = row.lastSeenTS
+					ip.CloudProvider, ip.ASN, ip.ASNOrg = row.cloudProvider, row.asn, row.asnOrg
+				}
+			}
+			if row.ua != "" {
+				uaMap[row.ua] = true
+			}
+		}
+		item.ChangeHits = len(hits)
+		for _, ip := range ipMap {
+			item.IPs = append(item.IPs, *ip)
+		}
+		sort.Slice(item.IPs, func(i, j int) bool { return item.IPs[i].LastSeenTS > item.IPs[j].LastSeenTS })
+		for ua := range uaMap {
+			item.UAs = append(item.UAs, ua)
+		}
+		sort.Strings(item.UAs)
+		if item.ChangeHits > 0 {
+			out = append(out, item)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ChangeHits != out[j].ChangeHits {
+			return out[i].ChangeHits > out[j].ChangeHits
+		}
+		if out[i].PullCount != out[j].PullCount {
+			return out[i].PullCount > out[j].PullCount
+		}
+		return out[i].LastSeenTS > out[j].LastSeenTS
+	})
+	return out, nil
 }
 
 func (s *Store) DeleteAWSIPChange(ctx context.Context, id int64) error {
@@ -2129,8 +2371,11 @@ func (s *Store) ListDetectRules() ([]DetectRuleRow, error) {
 }
 
 func normalizeRuleAction(action string) string {
-	if strings.EqualFold(strings.TrimSpace(action), "deny") {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "deny":
 		return "deny"
+	case "rate_limit":
+		return "rate_limit"
 	}
 	return "fake"
 }

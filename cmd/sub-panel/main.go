@@ -37,7 +37,7 @@ import (
 	"github.com/huabanmao168/SubPanel/internal/webui"
 )
 
-var Version = "0.1.73"
+var Version = "0.1.83"
 
 func main() {
 	if len(os.Args) >= 2 {
@@ -134,6 +134,10 @@ func main() {
 	}
 	if err := ensureUncommonUARule(st); err != nil {
 		logger.Error("初始化非常见 UA 规则失败", "err", err)
+		os.Exit(1)
+	}
+	if err := ensureAbuseRateLimitRules(st); err != nil {
+		logger.Error("初始化上游前限流规则失败", "err", err)
 		os.Exit(1)
 	}
 	if rs, err := loadDetectRulesFromDB(st); err != nil {
@@ -438,6 +442,7 @@ func seedDetectRulesFromYAML(st *store.Store, cfg *config.Config, logger *slog.L
 		if err := st.UpsertDetectRule(store.DetectRuleRow{
 			Name:      r.Name,
 			Desc:      r.Desc,
+			Action:    r.Action,
 			WhenJSON:  string(buf),
 			Enabled:   true,
 			SortOrder: i,
@@ -481,6 +486,47 @@ func ensureUncommonUARule(st *store.Store) error {
 	return st.SetMeta(migrationKey, "1")
 }
 
+// ensureAbuseRateLimitRules 为已有安装补齐真正的“上游前”防刷规则。
+// 迁移只执行一次；之后管理员可以在 UI 中自由修改动作、阈值或删除规则。
+func ensureAbuseRateLimitRules(st *store.Store) error {
+	const migrationKey = "migration_abuse_rate_limit_rules_v1"
+	if done, _ := st.GetMeta(migrationKey); done == "1" {
+		return nil
+	}
+	rows, err := st.ListDetectRules()
+	if err != nil {
+		return err
+	}
+	byName := make(map[string]store.DetectRuleRow, len(rows))
+	for _, row := range rows {
+		byName[row.Name] = row
+	}
+	defaults := []store.DetectRuleRow{
+		{
+			Name: "ip_freq_burst", Desc: "单 IP 60 秒内 >=20 次请求，直接 429 且不访问源站",
+			Action: "rate_limit", WhenJSON: `{"IPFreq":{"Window":60000000000,"GTE":20}}`, Enabled: true, SortOrder: 20,
+		},
+		{
+			Name: "ip_multi_token", Desc: "单 IP 10 分钟内 >=8 个不同 Token，直接 429 且不访问源站",
+			Action: "rate_limit", WhenJSON: `{"IPDistinctTokens":{"Window":600000000000,"GTE":8}}`, Enabled: true, SortOrder: 30,
+		},
+	}
+	for _, def := range defaults {
+		if existing, ok := byName[def.Name]; ok {
+			existing.Action = "rate_limit"
+			// 保留管理员原有条件和启停状态，只升级处置语义。
+			if err := st.UpsertDetectRule(existing); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := st.UpsertDetectRule(def); err != nil {
+			return err
+		}
+	}
+	return st.SetMeta(migrationKey, "1")
+}
+
 // loadDetectRulesFromDB 读 DB 里启用的规则,反序列化成 config.Rule slice。
 func loadDetectRulesFromDB(st *store.Store) ([]config.Rule, error) {
 	rows, err := st.ListDetectRules()
@@ -497,9 +543,10 @@ func loadDetectRulesFromDB(st *store.Store) ([]config.Rule, error) {
 			return nil, fmt.Errorf("规则 %s 反序列化失败: %w", r.Name, err)
 		}
 		out = append(out, config.Rule{
-			Name: r.Name,
-			Desc: r.Desc,
-			When: when,
+			Name:   r.Name,
+			Desc:   r.Desc,
+			Action: r.Action,
+			When:   when,
 		})
 	}
 	return out, nil

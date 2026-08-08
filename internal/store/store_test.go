@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -191,6 +192,43 @@ func TestRemoveBan(t *testing.T) {
 	}
 }
 
+func TestOpenMigratesLegacyResolvedTokensToPermanentFakeBans(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-resolved.db")
+	st, err := Open(path, 100*time.Millisecond, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddResolvedToken(context.Background(), "legacy-token", "sled", "人工已处理"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddResolvedToken(context.Background(), "current-token", "sled", "token_block:deny"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err = Open(path, 100*time.Millisecond, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	bans, err := st.ListActiveBans(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bans) != 1 {
+		t.Fatalf("want only one migrated legacy ban, got %+v", bans)
+	}
+	got := bans[0]
+	if got.Kind != "token" || got.Target != "legacy-token" || got.Action != "fake" || got.ExpiresTS != nil || got.CreatedBy != "migration:resolved_tokens" {
+		t.Fatalf("unexpected migrated ban: %+v", got)
+	}
+	if !strings.Contains(got.Reason, "人工已处理") {
+		t.Fatalf("legacy note was not preserved: %+v", got)
+	}
+}
+
 func TestSummary(t *testing.T) {
 	st := newTestStore(t)
 	now := time.Now()
@@ -331,6 +369,13 @@ func TestAWSIPChangeTokenHistoryCorrelatesSameDNSAndTenant(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// 相同 DNS 但绑定到其他站点范围的监控记录不能进入 sled 任务的分母。
+	if _, err := st.AddAWSIPChange(ctx, AWSIPChange{
+		OccurredTS: base.Add(24*time.Minute + 30*time.Second).UnixMilli(), DNSName: "entry.example.com", Tenant: "rfs",
+		OldIP: "10.0.1.1", NewIP: "10.0.1.2", LookbackMinutes: 5,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	second, err := st.AddAWSIPChange(ctx, AWSIPChange{
 		OccurredTS: base.Add(25 * time.Minute).UnixMilli(), DNSName: "entry.example.com", Tenant: "sled",
 		OldIP: "10.0.0.2", NewIP: "10.0.0.3", LookbackMinutes: 5,
@@ -351,6 +396,77 @@ func TestAWSIPChangeTokenHistoryCorrelatesSameDNSAndTenant(t *testing.T) {
 	}
 	if _, leaked := history["rfs\x00repeat-token"]; leaked {
 		t.Fatalf("other tenant must not enter site-scoped snapshots: %+v", history)
+	}
+}
+
+func TestAWSIPChangeTokenHistoryCapsMonitoredSiteAtFiftyChanges(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	base := time.Now().Add(-55 * time.Hour).UnixMilli()
+	var lastID int64
+	for i := 0; i < 55; i++ {
+		ts := base + int64(i)*int64(time.Hour/time.Millisecond)
+		res, err := st.db.ExecContext(ctx, `INSERT INTO aws_ip_changes
+			(occurred_ts,dns_name,tenant,old_ip,new_ip,lookback_minutes,failure_ts,note,created_ts)
+			VALUES (?,?,?,?,?,?,?,?,?)`, ts, "fifty.example.com", "sled", "1.1.1.1", "1.1.1.2", 20, 0, "", ts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lastID, err = res.LastInsertId()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.db.ExecContext(ctx, `INSERT INTO aws_ip_change_subscribers
+			(change_id,tenant,token_hash,client_ip,ua,pull_count,first_seen_ts,last_seen_ts,cloud_provider,asn,asn_org)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?)`, lastID, "sled", "repeat-token", "1.1.1.1", "clash", 1, ts-1000, ts-1000, "", "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	history, err := st.AWSIPChangeTokenHistory(ctx, lastID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := history["sled\x00repeat-token"]
+	if got.Hits != 50 || got.Total != 50 {
+		t.Fatalf("history must cap the monitored site at 50 changes: %+v", got)
+	}
+}
+
+func TestListAWSSuspectSummariesGroupsEntrySiteAndToken(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	base := time.Now().Add(-time.Hour).UnixMilli()
+	for i := 0; i < 3; i++ {
+		occurred := base + int64(i)*10*60_000
+		res, err := st.db.ExecContext(ctx, `INSERT INTO aws_ip_changes
+			(occurred_ts,dns_name,tenant,old_ip,new_ip,lookback_minutes,failure_ts,note,created_ts)
+			VALUES (?,?,?,?,?,?,?,?,?)`, occurred, "aws-entry.example.com", "sled", "1.1.1.1", "1.1.1.2", 20, occurred-30_000, "新加坡入口", occurred)
+		if err != nil {
+			t.Fatal(err)
+		}
+		changeID, _ := res.LastInsertId()
+		if i < 2 {
+			if _, err := st.db.ExecContext(ctx, `INSERT INTO aws_ip_change_subscribers
+				(change_id,tenant,token_hash,client_ip,ua,pull_count,first_seen_ts,last_seen_ts,cloud_provider,asn,asn_org)
+				VALUES (?,?,?,?,?,?,?,?,?,?,?)`, changeID, "sled", "repeat-token", fmt.Sprintf("8.8.8.%d", i+1), "clash", i+1,
+				occurred-90_000, occurred-60_000, "aws", "AS16509", "AMAZON-02"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	rows, err := st.ListAWSSuspectSummaries(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("unexpected summaries: %+v", rows)
+	}
+	got := rows[0]
+	if got.DNSName != "aws-entry.example.com" || got.EntryNote != "新加坡入口" || got.Tenant != "sled" || got.TokenHash != "repeat-token" {
+		t.Fatalf("unexpected identity: %+v", got)
+	}
+	if got.ChangeHits != 2 || got.ChangeTotal != 3 || got.PullCount != 3 || len(got.IPs) != 2 || len(got.Occurrences) != 2 {
+		t.Fatalf("unexpected aggregation: %+v", got)
 	}
 }
 

@@ -47,6 +47,14 @@ admin:
   # 仅作手工配置示例;正式部署必须替换。
   password_hash: "$2a$10$4X17qnFIVcMqpszFGboBBeF0LMWDHxhR21dgL9UKU9EjjH0gtTBCG"
 
+# PHP 源站硬保护：所有请求在反代前先过此关，超限立即 429，不排队、不访问源站。
+rate_limit:
+  global_rps: 200
+  global_burst: 400
+  upstream_max_concurrent: 64
+  per_ip_max_concurrent: 3
+  retry_after_seconds: 60
+
 # 租户(订阅前置)。可以在管理面 → 租户管理 增删
 tenants: []
 
@@ -64,6 +72,22 @@ detector:
         token_freq:
           window: 5m
           gte: 30
+
+    - name: ip_freq_burst
+      desc: 单 IP 60 秒内 >=20 次，直接 429 且不访问源站
+      action: rate_limit
+      when:
+        ip_freq:
+          window: 1m
+          gte: 20
+
+    - name: ip_multi_token
+      desc: 单 IP 10 分钟内 >=8 个不同 Token，直接 429 且不访问源站
+      action: rate_limit
+      when:
+        ip_distinct_tokens:
+          window: 10m
+          gte: 8
 
     - name: token_multi_ip
       desc: 单 token 5 分钟多 IP

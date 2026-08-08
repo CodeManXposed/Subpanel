@@ -50,6 +50,9 @@ func TestLoadValid(t *testing.T) {
 	if c.Faker.NodeCount == 0 {
 		t.Error("faker defaults not applied")
 	}
+	if c.RateLimit.GlobalRPS != 200 || c.RateLimit.GlobalBurst != 400 || c.RateLimit.UpstreamMaxConcurrent != 64 || c.RateLimit.PerIPMaxConcurrent != 3 {
+		t.Errorf("rate limit defaults not applied: %+v", c.RateLimit)
+	}
 }
 
 func TestDurationParseDays(t *testing.T) {
