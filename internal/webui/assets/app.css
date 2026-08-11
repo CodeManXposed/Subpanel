@@ -746,9 +746,11 @@ table tbody tr:hover { background: #f8fafc; }
 .aws-subscriber-table th:nth-child(4) { width: 165px; }
 .aws-subscriber-table th:nth-child(5) { width: 215px; }
 .aws-subscriber-table td { min-width: 0; white-space: nowrap; }
+.aws-subscriber-table th,
+.aws-subscriber-table td { vertical-align: top; }
 .aws-subscriber-table .aws-copy-wrap {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 7px;
   min-width: 0;
 }
@@ -778,6 +780,66 @@ table tbody tr:hover { background: #f8fafc; }
   text-overflow: ellipsis;
 }
 .aws-subscriber-count { text-align: right; }
+.aws-continuity-site-title { display:flex; align-items:center; gap:6px; padding:8px 10px; font-weight:650; }
+.aws-continuity-repeat td { background: #fffbeb; }
+.aws-continuity-repeat { box-shadow: inset 3px 0 0 #f59e0b; }
+
+/* 小型说明按钮：桌面悬浮/聚焦显示，触屏点按后通过 focus 显示。 */
+.info-tip {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 17px;
+  min-width: 17px;
+  height: 17px;
+  padding: 0;
+  margin: 0 1px;
+  border: 1px solid #94a3b8;
+  border-radius: 50%;
+  background: #fff;
+  color: #64748b;
+  font: 700 11px/1 sans-serif;
+  vertical-align: middle;
+  cursor: help;
+  box-shadow: none;
+}
+.info-tip:hover,
+.info-tip:focus-visible { border-color:#2563eb; color:#2563eb; background:#eff6ff; transform:none; }
+.info-tip::after {
+  content: attr(data-tip);
+  position: absolute;
+  z-index: 80;
+  top: calc(100% + 7px);
+  left: 50%;
+  width: max-content;
+  max-width: min(300px, calc(100vw - 32px));
+  padding: 7px 9px;
+  border-radius: 7px;
+  background: #0f172a;
+  color: #fff;
+  font: 400 12px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  text-align: left;
+  white-space: normal;
+  box-shadow: 0 8px 24px rgba(15,23,42,.22);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translate(-50%, -3px);
+  transition: opacity .12s, transform .12s, visibility .12s;
+}
+.info-tip:hover::after,
+.info-tip:focus::after,
+.info-tip:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, 0);
+}
+.ev-card-head .info-tip::after { left:auto; right:0; transform:translate(0,-3px); }
+.ev-card-head .info-tip:hover::after,
+.ev-card-head .info-tip:focus::after { transform:translate(0,0); }
+.aws-subscriber-table th:last-child .info-tip::after { left:auto; right:0; transform:translate(0,-3px); }
+.aws-subscriber-table th:last-child .info-tip:hover::after,
+.aws-subscriber-table th:last-child .info-tip:focus::after { transform:translate(0,0); }
 
 /* 侧栏打开后的中等宽度窗口也用卡片，避免桌面表格被截断。 */
 @media (max-width: 1180px) {
@@ -800,6 +862,7 @@ table tbody tr:hover { background: #f8fafc; }
     background: var(--surface);
     box-shadow: var(--shadow-sm);
   }
+  .aws-continuity-repeat { box-shadow: inset 3px 0 0 #f59e0b, var(--shadow-sm); }
   .aws-subscriber-table tbody td {
     display: grid;
     grid-template-columns: 82px minmax(0, 1fr);
@@ -826,6 +889,10 @@ table tbody tr:hover { background: #f8fafc; }
     overflow-wrap: anywhere;
   }
   .aws-subscriber-table .aws-copy-wrap { flex-wrap: wrap; }
+  .info-tip::after { position: fixed; top:auto; right:16px; bottom:18px; left:16px; width:auto; max-width:none; transform:translateY(4px); }
+  .info-tip:hover::after,
+  .info-tip:focus::after,
+  .info-tip:focus-visible::after { transform:translateY(0); }
 }
 .aws-change-filter-actions select { min-width: 250px; max-width: 420px; }
 

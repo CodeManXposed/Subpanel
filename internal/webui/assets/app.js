@@ -24,6 +24,9 @@ function escapeHTML(s) {
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
   }[c]));
 }
+function infoTip(text, label = '查看说明') {
+  return `<button type="button" class="info-tip" aria-label="${escapeHTML(label)}" data-tip="${escapeHTML(text)}">i</button>`;
+}
 function tokenShort(h) {
   // 用户要求所有页面直接显示 token 原文,不截断。
   // 保留函数名避免到处改调用点;CSS 用 word-break:break-all 处理长字符串。
@@ -2503,8 +2506,8 @@ async function loadAWSIPChanges() {
         ${r.note ? `<span class="pill tag">${escapeHTML(r.note)}</span>` : ''}
         <span class="mono">${escapeHTML(fmtTime(new Date(r.occurred_ts)))}</span>
         <span class="ev-spacer"></span>
-        <span class="pill ${r.failure_ts ? 'orange' : 'tag'}" title="${r.failure_ts ? '已收到 TCP 首次失联上报，失联时间更精确' : '没有 TCP 失联上报，以 DNS 解析变化时间作为分界'}">${r.failure_ts ? '精准失联锚点' : '仅 DNS 锚点'}</span>
-        <span class="pill tag" title="用于卡片中的换前订阅者和拉取统计；下方前后对比按请求条数取样">${r.lookback_minutes} 分钟取证</span>
+        <span class="pill ${r.failure_ts ? 'orange' : 'tag'}">${r.failure_ts ? '精准失联锚点' : '仅 DNS 锚点'} ${infoTip(r.failure_ts ? '已收到 TCP 首次失联上报，失联时间更精确。' : '没有 TCP 失联上报，以 DNS 解析变化时间作为分界。', '锚点说明')}</span>
+        <span class="pill tag">${r.lookback_minutes} 分钟取证 ${infoTip('用于卡片中的换前订阅者和拉取统计；下方前后对比按请求条数取样。', '取证范围说明')}</span>
       </div>
       <div class="ev-row-full">
         <span class="ev-label">入口</span>
@@ -2550,21 +2553,22 @@ async function loadAWSChangeContinuity(box, id, sampleSize) {
     (grouped[row.tenant] ||= []).push(row);
   }
   const sites = Object.keys(grouped).sort();
-  let html = `<div class="aws-snapshot-toolbar"><span title="只列出换 IP 前后两批请求中都出现过的同站点 Token">换前 ${continuity.before_requests || 0} 条 · 换后 ${continuity.after_requests || 0} 条 · ${continuity.tokens?.length || 0} 个相同 Token</span><label title="分别从 DNS 变化前和变化后取多少条有效订阅请求">每侧取 <select class="aws-continuity-size" title="每侧请求取样数量"><option value="20">20 次</option><option value="50">50 次</option><option value="100">100 次</option><option value="200">200 次</option><option value="500">500 次</option></select></label></div>`;
+  let html = `<div class="aws-snapshot-toolbar"><span>换前 ${continuity.before_requests || 0} 条 · 换后 ${continuity.after_requests || 0} 条 · ${continuity.tokens?.length || 0} 个相同 Token ${infoTip('只列出换 IP 前后两批请求中都出现过的同站点 Token；换前、换后都至少出现 2 次的行会高亮。', 'Token 对比说明')}</span><label>每侧取 ${infoTip('分别从 DNS 变化前和变化后取多少条有效订阅请求。', '取样数量说明')} <select class="aws-continuity-size"><option value="20">20 次</option><option value="50">50 次</option><option value="100">100 次</option><option value="200">200 次</option><option value="500">500 次</option></select></label></div>`;
   if (!sites.length) {
     html += '<div class="empty-state">当前取样范围内，没有在 DNS 变化前后均出现的 Token</div>';
   }
   for (const site of sites) {
     const rows = grouped[site];
-    html += `<div class="datatable" style="margin-top:12px"><div style="padding:8px 10px;font-weight:650">站点：${escapeHTML(site)} · ${rows.length} 个 Token</div>`;
-    html += '<table class="aws-subscriber-table"><thead><tr><th>Token</th><th title="IP 相同时只显示一个；变化时显示换前 → 换后">IP 变化</th><th title="表格显示换后 UA；悬浮可查看换前与换后完整 UA">换后 UA</th><th>换前 / 换后<small class="muted" style="display:block;font-weight:400;white-space:nowrap">左侧换前次数 · 右侧换后次数</small></th><th title="换前最后一次请求与换后第一次请求的时间">临界时间<small class="muted" style="display:block;font-weight:400">换前最后 · 换后首次</small></th></tr></thead><tbody>';
+    html += `<div class="datatable" style="margin-top:12px"><div class="aws-continuity-site-title">站点：${escapeHTML(site)} · ${rows.length} 个 Token ${infoTip('淡黄色行表示该 Token 在换前和换后都至少出现 2 次。', '高亮规则说明')}</div>`;
+    html += `<table class="aws-subscriber-table"><thead><tr><th>Token</th><th>IP 变化 ${infoTip('IP 相同时只显示一个；变化时显示换前 → 换后。', 'IP 变化说明')}</th><th>换后 UA ${infoTip('表格只显示换后 UA；鼠标悬浮该内容可查看换前与换后完整 UA。', 'UA 说明')}</th><th>换前 / 换后 ${infoTip('左侧是换 IP 前样本中的请求次数，右侧是换 IP 后样本中的请求次数。', '请求次数说明')}</th><th>临界时间 ${infoTip('上面是换前最后一次请求，下面是换后第一次请求。', '临界时间说明')}</th></tr></thead><tbody>`;
     for (const row of rows) {
       const beforeIP = row.before_ip || '-';
       const afterIP = row.after_ip || '-';
       const beforeUA = row.before_ua || '(空 UA)';
       const afterUA = row.after_ua || '(空 UA)';
       const ipChange = beforeIP === afterIP ? beforeIP : `${beforeIP} → ${afterIP}`;
-      html += `<tr>
+      const repeated = Number(row.before_pull_count) >= 2 && Number(row.after_pull_count) >= 2;
+      html += `<tr class="${repeated ? 'aws-continuity-repeat' : ''}">
         <td class="mono aws-subscriber-token" data-label="Token"><div class="aws-copy-wrap"><span class="aws-cell-value" title="${escapeHTML(row.token)}">${escapeHTML(row.token)}</span><button type="button" class="ip-copy-btn copyable" data-copy="${escapeHTML(row.token)}">复制</button></div></td>
         <td class="mono aws-subscriber-ip" data-label="IP 变化"><div class="aws-ellipsis-wrap" title="${escapeHTML(ipChange)}"><span class="aws-cell-value">${escapeHTML(ipChange)}</span></div></td>
         <td class="mono aws-subscriber-ua" data-label="换后 UA"><div class="aws-ellipsis-wrap" title="${escapeHTML('换前：' + beforeUA + '\n换后：' + afterUA)}"><span class="aws-cell-value">${escapeHTML(afterUA)}</span></div></td>
