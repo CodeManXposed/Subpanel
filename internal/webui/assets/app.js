@@ -2523,7 +2523,7 @@ async function loadAWSIPChanges() {
         <span class="ev-meta-item"><span class="ev-label">拉取</span><strong>${r.pull_count || 0}</strong></span>
       </div>
       <div class="sus-actions">
-        <button class="aws-change-detail" data-id="${r.id}" title="以 DNS 变化为分界，对比前后各 X 条有效请求">查看换前/换后请求</button>
+        <button class="aws-change-detail" data-id="${r.id}" title="比较同一入口、同一站点最近的换 IP 快照中是否存在相同 Token">查看 Token 历史存在</button>
         <button class="danger aws-change-remove" data-id="${r.id}">删除记录</button>
       </div>
       <div class="aws-change-detail-box" style="display:none"></div>
@@ -2540,76 +2540,64 @@ async function toggleAWSChangeDetail(card, id) {
     return;
   }
   box.style.display = 'block';
-  await loadAWSChangeContinuity(box, id, 50);
+  await loadAWSChangeHistory(box, id, 20);
 }
 
-async function loadAWSChangeContinuity(box, id, sampleSize) {
-  box.innerHTML = '<div class="muted" style="padding:10px 0">正在对比 DNS 变化前后的请求...</div>';
+async function loadAWSChangeHistory(box, id, sampleSize) {
+  box.innerHTML = '<div class="muted" style="padding:10px 0">正在遍历同入口、同站点的换 IP 记录...</div>';
   const data = await api('/api/aws-ip-changes/detail?id=' + encodeURIComponent(id) + '&sample_size=' + encodeURIComponent(sampleSize));
   if (!data) return;
-  const continuity = data.continuity || {};
+  const history = data.history || {};
   const grouped = {};
-  for (const row of (continuity.tokens || [])) {
+  for (const row of (history.tokens || [])) {
     (grouped[row.tenant] ||= []).push(row);
   }
   const sites = Object.keys(grouped).sort();
-  const allRows = continuity.tokens || [];
-  const reachedCount = allRows.filter(row => Number(row.after_pull_count) > 0).length;
-  const missingCount = allRows.filter(row => Number(row.after_pull_count) === 0).length;
-  let html = `<div class="aws-snapshot-toolbar"><span>换后 ${continuity.after_requests || 0} 条请求 · ${reachedCount} 个 Token 已请求入口 · ${missingCount} 个换后未出现 ${infoTip('有效请求包括正常放行和投毒响应；拒绝、限流等无效请求不会进入样本。换后有请求的 Token 会直接展示，只有换前出现的 Token 会单独折叠。', 'Token 对比说明')}</span><label>每侧取 ${infoTip('分别从 DNS 变化前和变化后取多少条有效订阅请求。', '取样数量说明')} <select class="aws-continuity-size"><option value="20">20 次</option><option value="50">50 次</option><option value="100">100 次</option><option value="200">200 次</option><option value="500">500 次</option></select></label></div>`;
+  const allRows = history.tokens || [];
+  const repeatedCount = allRows.filter(row => Number(row.history_hits) > 1).length;
+  const fullCount = allRows.filter(row => Number(row.history_total) > 1 && Number(row.history_hits) === Number(row.history_total)).length;
+  let html = `<div class="aws-snapshot-toolbar"><span>当前快照 ${allRows.length} 个 Token · ${repeatedCount} 个曾在其他换 IP 记录出现 · ${fullCount} 个在所选记录中持续存在 ${infoTip('比较单位是换 IP 记录，不是请求次数。只比较同一个入口 DNS、同一个实际站点；当前记录计入“最近记录”，但不计入“以前”。', 'Token 历史存在说明')}</span><label>遍历最近 <select class="aws-continuity-size"><option value="10">10 条</option><option value="20">20 条</option><option value="30">30 条</option><option value="50">50 条</option></select></label></div>`;
   if (!sites.length) {
-    html += '<div class="empty-state">当前取样范围内没有有效订阅请求</div>';
+    html += '<div class="empty-state">当前换 IP 快照中没有 Token</div>';
   }
-  const renderContinuityTable = rows => {
-    let table = `<table class="aws-subscriber-table"><thead><tr><th>Token</th><th>IP 变化 ${infoTip('IP 相同时只显示一个；变化时显示换前 → 换后。仅单侧出现时显示该侧 IP。', 'IP 变化说明')}</th><th>最近 UA ${infoTip('优先显示换后 UA；换后未出现时显示换前 UA。悬浮内容可查看两侧完整 UA。', 'UA 说明')}</th><th>换前 / 换后 ${infoTip('左侧是换 IP 前样本中的请求次数，右侧是换 IP 后样本中的请求次数。', '请求次数说明')}</th><th>临界时间 ${infoTip('上面是换前最后一次请求，下面是换后第一次请求；未出现的一侧显示横线。', '临界时间说明')}</th></tr></thead><tbody>`;
+  const renderHistoryTable = rows => {
+    let table = `<table class="aws-subscriber-table aws-history-presence-table"><thead><tr><th>Token</th><th>最近记录存在 ${infoTip('分子是该 Token 出现过的换 IP 记录数，分母是本次实际参与比较的记录数；包含当前记录。', '存在次数')}</th><th>本次以前 / 本次及以后 ${infoTip('“以前”是比本次更早的换 IP 记录；“及以后”包含当前记录和时间上更新的记录，因此不会把当前记录误算成历史命中。', '前后口径')}</th><th>当前 IP / UA</th><th>当前快照</th></tr></thead><tbody>`;
     for (const row of rows) {
-      const beforeCount = Number(row.before_pull_count) || 0;
-      const afterCount = Number(row.after_pull_count) || 0;
-      const beforeIP = row.before_ip || '';
-      const afterIP = row.after_ip || '';
-      const beforeUA = row.before_ua || '';
-      const afterUA = row.after_ua || '';
-      const ipChange = beforeIP && afterIP && beforeIP !== afterIP ? `${beforeIP} → ${afterIP}` : (afterIP || beforeIP || '-');
-      const recentUA = afterUA || beforeUA || '(空 UA)';
-      const repeated = beforeCount >= 2 && afterCount >= 2;
-      const afterOnly = beforeCount === 0 && afterCount > 0;
-      const missingAfter = beforeCount > 0 && afterCount === 0;
-      const rowClass = repeated ? 'aws-continuity-repeat' : (afterOnly ? 'aws-continuity-new' : (missingAfter ? 'aws-continuity-missing' : ''));
-      const status = afterOnly ? '<span class="pill pass">换后新出现</span>' : (missingAfter ? '<span class="pill orange">换后未出现</span>' : '');
-      const beforeTime = row.before_last_seen_ts ? fmtTime(new Date(row.before_last_seen_ts)) : '-';
-      const afterTime = row.after_first_seen_ts ? fmtTime(new Date(row.after_first_seen_ts)) : '-';
+      const historyHits = Number(row.history_hits) || 1;
+      const historyTotal = Number(row.history_total) || 1;
+      const olderHits = Number(row.older_hits) || 0;
+      const olderTotal = Number(row.older_total) || 0;
+      const newerHits = (Number(row.newer_hits) || 0) + 1;
+      const newerTotal = (Number(row.newer_total) || 0) + 1;
+      const repeated = historyHits > 1;
+      const persistent = historyTotal >= 3 && historyHits === historyTotal;
+      const rowClass = persistent ? 'aws-history-persistent' : (repeated ? 'aws-history-repeat' : '');
+      const status = persistent ? '<span class="pill red">持续存在</span>' : (repeated ? '<span class="pill orange">历史重复</span>' : '<span class="pill tag">仅本次</span>');
+      const currentIP = row.client_ip || '-';
+      const currentUA = row.ua || '(空 UA)';
+      const lastSeen = row.last_seen_ts ? fmtTime(new Date(row.last_seen_ts)) : '-';
       table += `<tr class="${rowClass}">
-        <td class="mono aws-subscriber-token" data-label="Token"><div class="aws-copy-wrap"><span class="aws-cell-value" title="${escapeHTML(row.token)}">${escapeHTML(row.token)}</span><button type="button" class="ip-copy-btn copyable" data-copy="${escapeHTML(row.token)}">复制</button></div></td>
-        <td class="mono aws-subscriber-ip" data-label="IP 变化"><div class="aws-ellipsis-wrap" title="${escapeHTML(ipChange)}"><span class="aws-cell-value">${escapeHTML(ipChange)}</span></div></td>
-        <td class="mono aws-subscriber-ua" data-label="最近 UA"><div class="aws-ellipsis-wrap" title="${escapeHTML('换前：' + (beforeUA || '-') + '\n换后：' + (afterUA || '-'))}"><span class="aws-cell-value">${escapeHTML(recentUA)}</span></div></td>
-        <td class="mono aws-subscriber-count" data-label="换前 / 换后"><strong>${beforeCount} / ${afterCount}</strong>${status}</td>
-        <td class="mono aws-subscriber-time" data-label="临界时间"><div><span class="muted">前</span> ${escapeHTML(beforeTime)}</div><div><span class="muted">后</span> ${escapeHTML(afterTime)}</div></td>
+        <td class="mono aws-subscriber-token" data-label="Token"><div class="aws-copy-wrap"><span class="aws-cell-value" title="${escapeHTML(row.token)}">${escapeHTML(row.token)}</span><button type="button" class="ip-copy-btn copyable" data-copy="${escapeHTML(row.token)}">复制</button></div>${status}</td>
+        <td class="mono aws-subscriber-count" data-label="最近记录存在"><strong>${historyHits}/${historyTotal}</strong><small>${historyHits === historyTotal && historyTotal > 1 ? `最近 ${historyTotal} 条均存在` : `共出现 ${historyHits} 条`}</small></td>
+        <td class="mono aws-history-sides" data-label="本次以前 / 本次及以后"><div><span class="muted">前</span><strong>${olderHits}/${olderTotal}</strong></div><div><span class="muted">后</span><strong>${newerHits}/${newerTotal}</strong></div></td>
+        <td class="mono aws-subscriber-ua" data-label="当前 IP / UA"><div class="aws-ellipsis-wrap" title="${escapeHTML(currentIP)}"><span class="aws-cell-value">${escapeHTML(currentIP)}</span></div><div class="aws-ellipsis-wrap" title="${escapeHTML(currentUA)}"><span class="aws-cell-value muted">${escapeHTML(currentUA)}</span></div></td>
+        <td class="mono aws-subscriber-time" data-label="当前快照"><div><strong>${Number(row.pull_count) || 0}</strong> 次拉取</div><div class="muted">${escapeHTML(lastSeen)}</div></td>
       </tr>`;
     }
     return table + '</tbody></table>';
   };
   for (const site of sites) {
     const rows = grouped[site];
-    const reached = rows.filter(row => Number(row.after_pull_count) > 0);
-    const missing = rows.filter(row => Number(row.after_pull_count) === 0);
-    html += `<div class="datatable" style="margin-top:12px"><div class="aws-continuity-site-title">站点：${escapeHTML(site)} · 换后有请求 ${reached.length} 个 Token ${infoTip('淡黄色行表示换前和换后都至少出现 2 次；淡蓝色行表示只在换后样本中新出现。', '高亮规则说明')}</div>`;
-    if (reached.length) {
-      html += renderContinuityTable(reached);
-    } else {
-      html += '<div class="empty-state">该站点换后样本中暂时没有有效 Token 请求</div>';
-    }
-    html += '</div>';
-    if (missing.length) {
-      html += `<details class="aws-continuity-missing-fold"><summary>换后尚未出现 · ${escapeHTML(site)} · ${missing.length} 个 Token ${infoTip('这些 Token 出现在换前样本中，但当前换后样本中尚未再次出现。', '换后未出现说明')}</summary><div class="datatable">${renderContinuityTable(missing)}</div></details>`;
-    }
+    const repeated = rows.filter(row => Number(row.history_hits) > 1).length;
+    html += `<div class="datatable" style="margin-top:12px"><div class="aws-continuity-site-title">站点：${escapeHTML(site)} · 当前 ${rows.length} 个 Token · 历史重复 ${repeated} 个 ${infoTip('红色表示在参与比较的每一条换 IP 记录中都存在；橙色表示至少还在一条其他记录中出现。', '高亮规则')}</div>${renderHistoryTable(rows)}</div>`;
   }
   box.innerHTML = html;
   box.dataset.loaded = '1';
   bindCopyHandlers(box);
   const sizeSelect = box.querySelector('.aws-continuity-size');
   if (sizeSelect) {
-    sizeSelect.value = String(continuity.sample_size || sampleSize);
-    sizeSelect.addEventListener('change', () => loadAWSChangeContinuity(box, id, Number(sizeSelect.value || 50)));
+    sizeSelect.value = String(history.sample_size || sampleSize);
+    sizeSelect.addEventListener('change', () => loadAWSChangeHistory(box, id, Number(sizeSelect.value || 20)));
   }
 }
 

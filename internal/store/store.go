@@ -1319,6 +1319,29 @@ type AWSIPChangeContinuity struct {
 	Tokens         []AWSIPChangeContinuingToken `json:"tokens"`
 }
 
+// AWSIPChangeHistoryToken 以一条换 IP 记录中的 Token 为主体，统计它在同一
+// 入口、同一站点的相邻换 IP 快照中是否也存在。Current 计入 HistoryHits，
+// Older/Newer 只统计当前记录两侧，避免把“请求次数”误当成“换 IP 记录数”。
+type AWSIPChangeHistoryToken struct {
+	Tenant       string `json:"tenant"`
+	TokenHash    string `json:"token"`
+	ClientIP     string `json:"client_ip"`
+	UA           string `json:"ua"`
+	PullCount    int    `json:"pull_count"`
+	LastSeenTS   int64  `json:"last_seen_ts"`
+	HistoryHits  int    `json:"history_hits"`
+	HistoryTotal int    `json:"history_total"`
+	OlderHits    int    `json:"older_hits"`
+	OlderTotal   int    `json:"older_total"`
+	NewerHits    int    `json:"newer_hits"`
+	NewerTotal   int    `json:"newer_total"`
+}
+
+type AWSIPChangeHistory struct {
+	SampleSize int                       `json:"sample_size"`
+	Tokens     []AWSIPChangeHistoryToken `json:"tokens"`
+}
+
 // AWSSuspectIP 是墙前快照中同一 Token 使用过的一个订阅者 IP。
 type AWSSuspectIP struct {
 	IP            string `json:"ip"`
@@ -1845,6 +1868,157 @@ func (s *Store) AWSIPChangeTokenContinuity(ctx context.Context, changeID int64, 
 			return iStrength > jStrength
 		}
 		return result.Tokens[i].AfterFirstSeenTS < result.Tokens[j].AfterFirstSeenTS
+	})
+	return result, nil
+}
+
+// AWSIPChangeTokenHistoryPresence 比较的是换 IP 快照，不是 DNS 变化前后的请求条数。
+// 每个站点单独选取一个最多 sampleSize 条、且包含当前记录的相邻记录窗口；窗口
+// 优先保留较新的记录，再用较旧记录补足。返回值只包含当前快照中存在的 Token。
+func (s *Store) AWSIPChangeTokenHistoryPresence(ctx context.Context, changeID int64, sampleSize int) (*AWSIPChangeHistory, error) {
+	if sampleSize <= 0 || sampleSize > 50 {
+		return nil, fmt.Errorf("sample size must be between 1 and 50")
+	}
+	var dnsName string
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(dns_name,'') FROM aws_ip_changes WHERE id=?`, changeID).Scan(&dnsName); err != nil {
+		return nil, err
+	}
+	current, err := s.ListAWSIPChangeSubscribers(ctx, changeID)
+	if err != nil {
+		return nil, err
+	}
+	byKey := make(map[string]*AWSIPChangeHistoryToken)
+	tenants := make(map[string]struct{})
+	for _, row := range current {
+		key := row.Tenant + "\x00" + row.TokenHash
+		item := byKey[key]
+		if item == nil {
+			item = &AWSIPChangeHistoryToken{Tenant: row.Tenant, TokenHash: row.TokenHash, HistoryHits: 1}
+			byKey[key] = item
+		}
+		item.PullCount += row.PullCount
+		if row.LastSeenTS >= item.LastSeenTS {
+			item.LastSeenTS, item.ClientIP, item.UA = row.LastSeenTS, row.ClientIP, row.UA
+		}
+		tenants[row.Tenant] = struct{}{}
+	}
+
+	type changeRef struct {
+		id int64
+	}
+	for tenant := range tenants {
+		rows, err := s.db.QueryContext(ctx, `SELECT c.id
+			FROM aws_ip_changes c
+			WHERE c.dns_name=? AND (COALESCE(c.tenant,'')='' OR c.tenant=?)
+			  AND EXISTS (SELECT 1 FROM aws_ip_change_subscribers s
+			              WHERE s.change_id=c.id AND s.tenant=?)
+			ORDER BY c.occurred_ts DESC,c.id DESC LIMIT 500`, dnsName, tenant, tenant)
+		if err != nil {
+			return nil, err
+		}
+		refs := make([]changeRef, 0, sampleSize)
+		currentPos := -1
+		for rows.Next() {
+			var ref changeRef
+			if err := rows.Scan(&ref.id); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			if ref.id == changeID {
+				currentPos = len(refs)
+			}
+			refs = append(refs, ref)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if currentPos < 0 {
+			continue
+		}
+		start := currentPos - (sampleSize - 1)
+		if start < 0 {
+			start = 0
+		}
+		end := start + sampleSize
+		if end > len(refs) {
+			end = len(refs)
+			start = end - sampleSize
+			if start < 0 {
+				start = 0
+			}
+		}
+		window := refs[start:end]
+		windowCurrent := currentPos - start
+		ids := make([]any, 0, len(window)+1)
+		placeholders := make([]string, 0, len(window))
+		ids = append(ids, tenant)
+		for _, ref := range window {
+			placeholders = append(placeholders, "?")
+			ids = append(ids, ref.id)
+		}
+		q := `SELECT change_id,token_hash FROM aws_ip_change_subscribers
+			WHERE tenant=? AND change_id IN (` + strings.Join(placeholders, ",") + `)
+			GROUP BY change_id,token_hash`
+		presenceRows, err := s.db.QueryContext(ctx, q, ids...)
+		if err != nil {
+			return nil, err
+		}
+		present := make(map[int64]map[string]struct{}, len(window))
+		for presenceRows.Next() {
+			var id int64
+			var token string
+			if err := presenceRows.Scan(&id, &token); err != nil {
+				_ = presenceRows.Close()
+				return nil, err
+			}
+			if present[id] == nil {
+				present[id] = make(map[string]struct{})
+			}
+			present[id][token] = struct{}{}
+		}
+		if err := presenceRows.Close(); err != nil {
+			return nil, err
+		}
+		for key, item := range byKey {
+			if item.Tenant != tenant {
+				continue
+			}
+			item.HistoryTotal = len(window)
+			item.NewerTotal = windowCurrent
+			item.OlderTotal = len(window) - windowCurrent - 1
+			for i, ref := range window {
+				if i == windowCurrent {
+					continue
+				}
+				if _, ok := present[ref.id][item.TokenHash]; !ok {
+					continue
+				}
+				item.HistoryHits++
+				if i < windowCurrent {
+					item.NewerHits++
+				} else {
+					item.OlderHits++
+				}
+			}
+			byKey[key] = item
+		}
+	}
+
+	result := &AWSIPChangeHistory{SampleSize: sampleSize, Tokens: make([]AWSIPChangeHistoryToken, 0, len(byKey))}
+	for _, row := range byKey {
+		result.Tokens = append(result.Tokens, *row)
+	}
+	sort.Slice(result.Tokens, func(i, j int) bool {
+		if result.Tokens[i].Tenant != result.Tokens[j].Tenant {
+			return result.Tokens[i].Tenant < result.Tokens[j].Tenant
+		}
+		if result.Tokens[i].HistoryHits != result.Tokens[j].HistoryHits {
+			return result.Tokens[i].HistoryHits > result.Tokens[j].HistoryHits
+		}
+		if result.Tokens[i].PullCount != result.Tokens[j].PullCount {
+			return result.Tokens[i].PullCount > result.Tokens[j].PullCount
+		}
+		return result.Tokens[i].TokenHash < result.Tokens[j].TokenHash
 	})
 	return result, nil
 }

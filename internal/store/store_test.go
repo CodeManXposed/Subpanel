@@ -448,6 +448,76 @@ func TestAWSIPChangeTokenContinuityHonorsSampleSize(t *testing.T) {
 	}
 }
 
+func TestAWSIPChangeTokenHistoryPresenceUsesChangeRecordsByEntryAndSite(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	base := time.Now().Add(-time.Hour).Truncate(time.Second).UnixMilli()
+	changeIDs := make([]int64, 0, 6)
+	for i := 0; i < 6; i++ {
+		ts := base + int64(i)*60_000
+		res, err := st.db.ExecContext(ctx, `INSERT INTO aws_ip_changes
+			(occurred_ts,dns_name,tenant,old_ip,new_ip,lookback_minutes,failure_ts,note,created_ts)
+			VALUES (?,?,?,?,?,?,?,?,?)`, ts, "history.example.com", "sled", "1.1.1.1", "1.1.1.2", 20, 0, "", ts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := res.LastInsertId()
+		changeIDs = append(changeIDs, id)
+		if _, err := st.db.ExecContext(ctx, `INSERT INTO aws_ip_change_subscribers
+			(change_id,tenant,token_hash,client_ip,ua,pull_count,first_seen_ts,last_seen_ts,cloud_provider,asn,asn_org)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?)`, id, "sled", "persistent-token", fmt.Sprintf("8.8.8.%d", i+1), "clash", i+1, ts-1000, ts-100, "", "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	currentID := changeIDs[2] // 3 条更新记录、1 条较旧记录会进入最近 5 条窗口。
+	if _, err := st.db.ExecContext(ctx, `INSERT INTO aws_ip_change_subscribers
+		(change_id,tenant,token_hash,client_ip,ua,pull_count,first_seen_ts,last_seen_ts,cloud_provider,asn,asn_org)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)`, currentID, "sled", "current-only", "9.9.9.9", "clash", 1, base, base, "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	// 同入口的其他站点、同站点的其他入口都不能参与统计。
+	for _, args := range [][]any{
+		{base + 10*60_000, "history.example.com", "rfs", "persistent-token"},
+		{base + 11*60_000, "other.example.com", "sled", "persistent-token"},
+	} {
+		res, err := st.db.ExecContext(ctx, `INSERT INTO aws_ip_changes
+			(occurred_ts,dns_name,tenant,old_ip,new_ip,lookback_minutes,failure_ts,note,created_ts)
+			VALUES (?,?,?,?,?,?,?,?,?)`, args[0], args[1], args[2], "2.2.2.2", "2.2.2.3", 20, 0, "", args[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := res.LastInsertId()
+		if _, err := st.db.ExecContext(ctx, `INSERT INTO aws_ip_change_subscribers
+			(change_id,tenant,token_hash,client_ip,ua,pull_count,first_seen_ts,last_seen_ts,cloud_provider,asn,asn_org)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?)`, id, args[2], args[3], "7.7.7.7", "clash", 1, args[0], args[0], "", "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	history, err := st.AWSIPChangeTokenHistoryPresence(ctx, currentID, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if history.SampleSize != 5 || len(history.Tokens) != 2 {
+		t.Fatalf("unexpected history result: %+v", history)
+	}
+	byToken := make(map[string]AWSIPChangeHistoryToken, len(history.Tokens))
+	for _, row := range history.Tokens {
+		byToken[row.TokenHash] = row
+	}
+	persistent := byToken["persistent-token"]
+	if persistent.HistoryHits != 5 || persistent.HistoryTotal != 5 || persistent.NewerHits != 3 || persistent.NewerTotal != 3 || persistent.OlderHits != 1 || persistent.OlderTotal != 1 {
+		t.Fatalf("persistent token must be counted by surrounding change records: %+v", persistent)
+	}
+	currentOnly := byToken["current-only"]
+	if currentOnly.HistoryHits != 1 || currentOnly.HistoryTotal != 5 || currentOnly.NewerHits != 0 || currentOnly.OlderHits != 0 {
+		t.Fatalf("current-only token must not gain synthetic history hits: %+v", currentOnly)
+	}
+	if _, err := st.AWSIPChangeTokenHistoryPresence(ctx, currentID, 51); err == nil {
+		t.Fatal("sample size above 50 should fail")
+	}
+}
+
 func TestListAWSSuspectSummariesGroupsEntrySiteAndToken(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()

@@ -294,18 +294,18 @@ func (s *Server) apiAWSIPChangeDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	sampleSize, _ := strconv.Atoi(r.URL.Query().Get("sample_size"))
 	if sampleSize == 0 {
-		sampleSize = 50
+		sampleSize = 20
 	}
-	if sampleSize < 1 || sampleSize > 500 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "sample_size must be between 1 and 500"})
+	if sampleSize < 1 || sampleSize > 50 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "sample_size must be between 1 and 50"})
 		return
 	}
-	continuity, err := s.st.AWSIPChangeTokenContinuity(r.Context(), id, sampleSize)
+	history, err := s.st.AWSIPChangeTokenHistoryPresence(r.Context(), id, sampleSize)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"change": change, "continuity": continuity})
+	writeJSON(w, http.StatusOK, map[string]any{"change": change, "history": history})
 }
 
 func (s *Server) apiAWSIPChangeRemove(w http.ResponseWriter, r *http.Request) {
