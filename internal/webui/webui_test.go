@@ -57,7 +57,7 @@ func setup(t *testing.T) (*Server, *store.Store, *banlist.List) {
 	cm := cloudip.NewMatcher()
 	rulesMgr := rules.NewManager(st)
 	_ = rulesMgr.Reload()
-	srv := NewServer(cfg, st, bans, hasher, cm, nil, rulesMgr, nil, nil, nil, "0.1.86-test", logger)
+	srv := NewServer(cfg, st, bans, hasher, cm, nil, rulesMgr, nil, nil, nil, "0.1.87-test", logger)
 	return srv, st, bans
 }
 
@@ -93,7 +93,7 @@ func TestRenderedPagesUseRuntimeVersion(t *testing.T) {
 	loginReq := httptest.NewRequest(http.MethodGet, "/login", nil)
 	loginRec := httptest.NewRecorder()
 	h.ServeHTTP(loginRec, loginReq)
-	if loginRec.Code != http.StatusOK || !strings.Contains(loginRec.Body.String(), "v0.1.86-test") || strings.Contains(loginRec.Body.String(), "{{VERSION}}") {
+	if loginRec.Code != http.StatusOK || !strings.Contains(loginRec.Body.String(), "v0.1.87-test") || strings.Contains(loginRec.Body.String(), "{{VERSION}}") {
 		t.Fatalf("login runtime version not rendered: code=%d", loginRec.Code)
 	}
 	if got := loginRec.Header().Get("Cache-Control"); got != "no-store" {
@@ -105,7 +105,7 @@ func TestRenderedPagesUseRuntimeVersion(t *testing.T) {
 	indexReq.AddCookie(cookie)
 	indexRec := httptest.NewRecorder()
 	h.ServeHTTP(indexRec, indexReq)
-	if indexRec.Code != http.StatusOK || !strings.Contains(indexRec.Body.String(), "Sub-Panel v0.1.86-test") {
+	if indexRec.Code != http.StatusOK || !strings.Contains(indexRec.Body.String(), "Sub-Panel v0.1.87-test") {
 		t.Fatalf("index runtime version not rendered: code=%d", indexRec.Code)
 	}
 }

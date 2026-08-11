@@ -59,7 +59,7 @@ type Gateway struct {
 	// 可选:全局黑名单(海外/云/ISP/浏览器),命中即投毒,优先级高于触发规则
 	bl *blacklist.Manager
 
-	// 可选:IP 白名单查询(优先级最高,命中直接放行,跳过黑名单/触发规则)
+	// 可选:IP 白名单查询。命中仅豁免“单 IP 多 Token”规则。
 	ipWhitelisted func(ip string) bool
 
 	// tenants 快照:读多写少,Reload 时原子替换整个 snap 指针,
@@ -95,7 +95,7 @@ func (g *Gateway) SetBlacklist(b *blacklist.Manager) {
 // SetPassthroughAll 一键透传开关。热生效。
 func (g *Gateway) SetPassthroughAll(b bool) { g.passthroughAll.Store(b) }
 
-// SetIPWhitelist 注入 IP 白名单查询(优先级最高,命中直接放行)。
+// SetIPWhitelist 注入 IP 白名单查询(仅豁免单 IP 多 Token 规则)。
 func (g *Gateway) SetIPWhitelist(fn func(ip string) bool) {
 	g.ipWhitelisted = fn
 }
@@ -280,11 +280,11 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2.6) IP 白名单命中即跳过 IP banlist/黑名单/触发规则,直接透传。
-	// 也不进 detector.Observe(避免影响频率统计)。
+	// 2.6) IP 白名单只豁免“单 IP 多 Token”条件。当前请求仍进入所有
+	// 频率窗口，并继续接受 IP 黑名单、网络、UA、Token 与并发限制。
+	ipWhitelisted := g.det.Whitelisted(pr.ClientIP, pr.UA)
 	if g.ipWhitelisted != nil && g.ipWhitelisted(pr.ClientIP) {
-		g.transparentProxyWithLog(w, r, pr, tokenHash, []string{"ip_whitelist"}, "pass", start)
-		return
+		ipWhitelisted = true
 	}
 
 	// 3) IP banlist 检查：按记录动作投毒或直接 403，均在访问上游前执行。
@@ -328,7 +328,12 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	g.det.Observe(pr.ClientIP, tokenHash, pr.UA)
 
 	// 5) evaluate
-	res := g.det.Evaluate(pr.ClientIP, tokenHash, pr.UA)
+	res := g.det.EvaluateWithOptions(pr.ClientIP, tokenHash, pr.UA, detector.EvaluateOptions{
+		ExemptIPDistinctTokens: ipWhitelisted,
+	})
+	if ipWhitelisted {
+		res.Tags = append(res.Tags, "ip_whitelist_multi_token_exempt")
+	}
 
 	// 6) 记 incident(如有命中)
 	if res.Hit {

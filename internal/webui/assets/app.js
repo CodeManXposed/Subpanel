@@ -49,7 +49,8 @@ const TAG_PREFIX_CN = {
   'bl_browser':     '黑名单·浏览器直访',
   'bl_isp':         '黑名单·运营商',
   // 白名单 / 路径
-  'ip_whitelist':   '白名单放行',
+  'ip_whitelist':   '白名单（旧版放行）',
+  'ip_whitelist_multi_token_exempt': '白名单·豁免多Token',
   'banlist_ip':     'IP 黑名单',
   'banlist_token':  'Token 黑名单',
   'path_not_match': '路径不匹配',
@@ -266,7 +267,7 @@ async function loadSummary() {
   (s.top_ips || []).forEach(k => {
     const tr = document.createElement('tr');
     const isp = k.isp ? escapeHTML(k.isp) : '<span class="muted">未知</span>';
-    tr.innerHTML = `<td><div class="dashboard-ip-cell"><span class="mono" title="${escapeHTML(k.key)}">${escapeHTML(k.key)}</span>${k.whitelisted ? '<span class="dashboard-whitelist-pill" title="命中当前 IP 白名单，实际请求优先放行">白名单</span>' : ''}</div></td><td title="${escapeHTML(k.region || '未知')}">${k.region ? escapeHTML(k.region) : '<span class="muted">未知</span>'}</td><td title="${escapeHTML(k.isp || '未知')}">${isp}</td><td style="text-align:right" class="mono">${k.count}</td>`;
+    tr.innerHTML = `<td><div class="dashboard-ip-cell"><span class="mono" title="${escapeHTML(k.key)}">${escapeHTML(k.key)}</span>${k.whitelisted ? '<span class="dashboard-whitelist-pill" title="仅豁免单 IP 多 Token 检测；高频请求及其他规则继续生效">白名单</span>' : ''}</div></td><td title="${escapeHTML(k.region || '未知')}">${k.region ? escapeHTML(k.region) : '<span class="muted">未知</span>'}</td><td title="${escapeHTML(k.isp || '未知')}">${isp}</td><td style="text-align:right" class="mono">${k.count}</td>`;
     ipTbody.appendChild(tr);
   });
   const tokTbody = $('#topTokens tbody'); tokTbody.innerHTML = '';
@@ -417,7 +418,6 @@ async function loadEvents(append = false) {
     client_match: $('#evClientMatch').value,
     provider: $('#evProvider').value,
     asn: $('#evASN').value.trim(),
-    show_whitelist: $('#evShowWL').checked ? '1' : '0',
   });
   const evs = await api('/api/events?' + q);
   if (!evs) return;
@@ -864,7 +864,7 @@ async function loadGeoIPInfo() {
 function renderIPPolicy(policy) {
   if (!policy) return '';
   const badges = [];
-  if (policy.whitelisted) badges.push('<span class="geo-policy-badge allow">IP 白名单 · 优先放行</span>');
+  if (policy.whitelisted) badges.push('<span class="geo-policy-badge allow">IP 白名单 · 仅豁免多 Token</span>');
   if (policy.ip_blacklisted) {
     const ipAction = policy.ip_blacklist_action === 'deny' ? 'REJECT · 403' : '投毒 · 200';
     badges.push(`<span class="geo-policy-badge deny" title="${escapeHTML(policy.ip_blacklist_reason || '')}">手工 IP 黑名单 · ${ipAction}${policy.ip_blacklist_reason ? ' · ' + escapeHTML(policy.ip_blacklist_reason) : ''}</span>`);
@@ -875,7 +875,7 @@ function renderIPPolicy(policy) {
     badges.push(`<span class="geo-policy-badge warn">全局黑名单 · ${escapeHTML(hit)}</span>`);
   }
   if (!badges.length) return '<div class="geo-policy-strip clear"><span>策略状态</span><strong>未命中 IP 黑名单、IP 白名单或已开启的全局 IP 拦截</strong></div>';
-  return `<div class="geo-policy-strip${policy.whitelisted ? ' whitelisted' : ''}"><span>策略状态</span><div>${badges.join('')}</div>${policy.whitelisted && (policy.ip_blacklisted || (policy.global_hits || []).length) ? '<small>白名单优先级更高，当前 IP 实际放行</small>' : ''}</div>`;
+  return `<div class="geo-policy-strip${policy.whitelisted ? ' whitelisted' : ''}"><span>策略状态</span><div>${badges.join('')}</div>${policy.whitelisted ? '<small>仅跳过单 IP 多 Token 条件；其余命中仍按对应动作处理</small>' : ''}</div>`;
 }
 
 function renderGeoInfo(info, policy) {
@@ -2287,7 +2287,7 @@ function renderAWSSuspects() {
         const ipHTML = ips.slice(0, 3).map(ip => {
           const related = ipTokenMap.get(ip.ip)?.size || 1;
           const network = [cloudProviderLabel(ip.cloud_provider), ip.asn, ip.asn_org].filter(Boolean).join(' · ');
-          return `<div class="aws-suspect-ip-line"><span class="mono" title="${escapeHTML(network || ip.ip)}">${escapeHTML(ip.ip)}</span><button type="button" class="ip-copy-btn copyable" data-copy="${escapeHTML(ip.ip)}">复制</button>${ip.whitelisted ? '<span class="aws-ip-whitelisted" title="该 IP 命中当前 IP 白名单，实际请求会优先放行">白名单</span>' : ''}${related > 1 ? `<span class="aws-ip-related" title="该 IP 在当前 AWS 墙前记录中由 ${related} 个不同 Token 使用">共享 ${related} Token</span>` : ''}</div>`;
+          return `<div class="aws-suspect-ip-line"><span class="mono" title="${escapeHTML(network || ip.ip)}">${escapeHTML(ip.ip)}</span><button type="button" class="ip-copy-btn copyable" data-copy="${escapeHTML(ip.ip)}">复制</button>${ip.whitelisted ? '<span class="aws-ip-whitelisted" title="该 IP 仅豁免单 IP 多 Token 检测">白名单</span>' : ''}${related > 1 ? `<span class="aws-ip-related" title="该 IP 在当前 AWS 墙前记录中由 ${related} 个不同 Token 使用">共享 ${related} Token</span>` : ''}</div>`;
         }).join('');
         const ua = (row.uas || [])[0] || '(空 UA)';
         const network = ips[0] ? [cloudProviderLabel(ips[0].cloud_provider), ips[0].asn, ips[0].asn_org].filter(Boolean).join(' · ') : '-';
@@ -2314,7 +2314,7 @@ function renderAWSSuspects() {
 
 function renderAWSSuspectDetail(row) {
   const ips = row.ips || [];
-  const ipList = ips.map(ip => `<div class="aws-suspect-detail-ip"><span class="aws-suspect-detail-ip-name"><span class="mono">${escapeHTML(ip.ip)}</span>${ip.whitelisted ? '<span class="aws-ip-whitelisted" title="该 IP 命中当前 IP 白名单，实际请求会优先放行">白名单</span>' : ''}</span><span>${escapeHTML([cloudProviderLabel(ip.cloud_provider), ip.asn, ip.asn_org].filter(Boolean).join(' · ') || '-')}</span><strong>${ip.pull_count || 0} 次</strong></div>`).join('');
+  const ipList = ips.map(ip => `<div class="aws-suspect-detail-ip"><span class="aws-suspect-detail-ip-name"><span class="mono">${escapeHTML(ip.ip)}</span>${ip.whitelisted ? '<span class="aws-ip-whitelisted" title="该 IP 仅豁免单 IP 多 Token 检测">白名单</span>' : ''}</span><span>${escapeHTML([cloudProviderLabel(ip.cloud_provider), ip.asn, ip.asn_org].filter(Boolean).join(' · ') || '-')}</span><strong>${ip.pull_count || 0} 次</strong></div>`).join('');
   const occurrences = (row.occurrences || []).map(item => `<tr><td class="mono">${escapeHTML(fmtTime(new Date(item.failure_ts || item.occurred_ts)))}</td><td class="mono">${escapeHTML(item.client_ip || '-')}</td><td class="mono aws-suspect-detail-ua" title="${escapeHTML(item.ua || '(空 UA)')}">${escapeHTML(item.ua || '(空 UA)')}</td><td><strong>${escapeHTML(fmtBeforeFailure(item.seconds_before_failure || 0))}</strong></td><td>${item.pull_count || 0}</td></tr>`).join('');
   return `<div class="aws-suspect-detail-grid"><div><h4>关联 IP（${ips.length}）</h4>${ipList || '<span class="muted">无 IP</span>'}</div><div><h4>墙前取证明细</h4><div class="datatable"><table><thead><tr><th>失联/换 IP 时间</th><th>订阅者 IP</th><th>UA</th><th>距离</th><th>拉取</th></tr></thead><tbody>${occurrences}</tbody></table></div></div></div>`;
 }

@@ -211,7 +211,6 @@
             </select>
             <input id="evASN" placeholder="ASN，如 AS16509" style="width:145px">
             <div class="events-filter-actions">
-              <label class="events-whitelist-toggle" title="默认隐藏白名单 IP 的请求"><input type="checkbox" id="evShowWL"><span>显示白名单</span></label>
               <button class="primary" id="evQuery">查询</button>
               <button class="danger" id="evPurge" title="清空当前机场的请求日志和异常记录">清空日志</button>
             </div>
@@ -307,7 +306,7 @@
             <input id="ipWLNote" placeholder="备注">
             <button class="primary" id="ipWLAddBtn">添加</button>
           </div>
-          <p class="muted">白名单 IP 跳过所有规则检测,直接放行。<strong style="color:var(--text)">优先级最高,凌驾于黑名单。</strong></p>
+          <p class="muted">白名单 IP 仅豁免<strong style="color:var(--text)">“单 IP 拉取多个 Token”</strong>规则；单 IP 高频请求仍会触发 429，Token/IP 黑名单、UA、云厂商及 IDC 等其他规则继续生效。</p>
         </div>
         <div class="card" style="margin-top:16px">
           <div class="card-header">

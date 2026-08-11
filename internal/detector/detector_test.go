@@ -131,6 +131,27 @@ func TestRateLimitActionAndPrecedence(t *testing.T) {
 	}
 }
 
+func TestIPWhitelistOnlyExemptsDistinctTokenRule(t *testing.T) {
+	cfg := &config.DetectorCfg{Rules: []config.Rule{
+		{Name: "ip_freq_burst", Action: "rate_limit", When: config.When{IPFreq: &config.Cond{Window: config.Duration(time.Minute), GTE: 2}}},
+		{Name: "ip_multi_token", Action: "rate_limit", When: config.When{IPDistinctTokens: &config.Cond{Window: config.Duration(10 * time.Minute), GTE: 2}}},
+	}}
+	d, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.SetDynamicIPWhitelist(func(ip string) bool { return ip == "1.2.3.4" })
+	d.Observe("1.2.3.4", "token-a", "clash")
+	if got := d.Evaluate("1.2.3.4", "token-a", "clash"); got.Hit {
+		t.Fatalf("first whitelisted request triggered unexpectedly: %+v", got)
+	}
+	d.Observe("1.2.3.4", "token-b", "clash")
+	got := d.Evaluate("1.2.3.4", "token-b", "clash")
+	if !got.Hit || got.Action != "rate_limit" || len(got.Tags) != 1 || got.Tags[0] != "ip_freq_burst" {
+		t.Fatalf("whitelisted IP must still hit frequency rule only: %+v", got)
+	}
+}
+
 func TestObserveCapsRandomTokensPerIPWithoutStoppingIPFrequency(t *testing.T) {
 	cfg := &config.DetectorCfg{Rules: []config.Rule{{
 		Name: "ip_flood", Action: "rate_limit",

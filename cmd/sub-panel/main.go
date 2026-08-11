@@ -37,7 +37,7 @@ import (
 	"github.com/huabanmao168/SubPanel/internal/webui"
 )
 
-var Version = "0.1.86"
+var Version = "0.1.87"
 
 func main() {
 	if len(os.Args) >= 2 {
@@ -256,7 +256,7 @@ func main() {
 	// 全局黑名单(海外/云/ISP/浏览器)
 	bl := blacklist.New(st)
 	gw.SetBlacklist(bl)
-	// IP 白名单优先级最高,在网关入口短路放行
+	// IP 白名单仅豁免“单 IP 多 Token”条件；其他检测与硬限流继续生效。
 	gw.SetIPWhitelist(rulesMgr.IPWhitelisted)
 
 	// 启动时恢复「一键透传」开关(store.meta 持久化)

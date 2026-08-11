@@ -156,7 +156,8 @@ type Result struct {
 	Note       string
 }
 
-// Whitelisted IP 白名单 — 完全跳过所有规则。
+// Whitelisted 判断 IP 是否享有“单 IP 多 Token”检测豁免。
+// 白名单不会再跳过频率、UA、Token 或网络类型等其他规则。
 // ua 参数保留兼容签名,内部不再使用。
 func (d *Detector) Whitelisted(ip, ua string) bool {
 	if _, ok := d.ipWhitelist[ip]; ok {
@@ -169,12 +170,21 @@ func (d *Detector) Whitelisted(ip, ua string) bool {
 	return false
 }
 
+// EvaluateOptions 控制一次检测允许跳过的特定条件。
+type EvaluateOptions struct {
+	ExemptIPDistinctTokens bool
+}
+
 // Evaluate 运行所有规则。注意 Evaluate 必须在 Observe 之后调用,
 // 这样当前请求自身也算进窗口。ua 参数保留兼容签名,内部不再使用。
 func (d *Detector) Evaluate(ip, tokenHash, ua string) Result {
-	if d.Whitelisted(ip, ua) {
-		return Result{}
-	}
+	return d.EvaluateWithOptions(ip, tokenHash, ua, EvaluateOptions{
+		ExemptIPDistinctTokens: d.Whitelisted(ip, ua),
+	})
+}
+
+// EvaluateWithOptions 供网关把动态 IP 白名单状态作为精确豁免传入。
+func (d *Detector) EvaluateWithOptions(ip, tokenHash, ua string, opts EvaluateOptions) Result {
 	var (
 		tags       []string
 		notes      []string
@@ -187,7 +197,7 @@ func (d *Detector) Evaluate(ip, tokenHash, ua string) Result {
 		rules = *snap
 	}
 	for _, r := range rules {
-		hit, note := d.matchRule(r, ip, tokenHash, ua)
+		hit, note := d.matchRule(r, ip, tokenHash, ua, opts)
 		if !hit {
 			continue
 		}
@@ -230,7 +240,7 @@ func ruleMaxWindow(r config.Rule) time.Duration {
 	return out
 }
 
-func (d *Detector) matchRule(r config.Rule, ip, tokenHash, ua string) (bool, string) {
+func (d *Detector) matchRule(r config.Rule, ip, tokenHash, ua string, opts EvaluateOptions) (bool, string) {
 	w := r.When
 	if w.UncommonUA && !blacklist.IsKnownSubClient(ua) {
 		if d.dynamicUAWhitelist == nil || !d.dynamicUAWhitelist(ua) {
@@ -259,7 +269,7 @@ func (d *Detector) matchRule(r config.Rule, ip, tokenHash, ua string) (bool, str
 			return true, formatN("token_distinct_ips", n, c)
 		}
 	}
-	if c := w.IPDistinctTokens; c != nil {
+	if c := w.IPDistinctTokens; c != nil && !opts.ExemptIPDistinctTokens {
 		n := d.ipTokenSet.Count(ip, c.Window.Std())
 		if n >= c.GTE {
 			return true, formatN("ip_distinct_tokens", n, c)

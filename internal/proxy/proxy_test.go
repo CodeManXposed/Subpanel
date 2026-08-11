@@ -232,6 +232,40 @@ func TestE2ERateLimitNeverReachesUpstream(t *testing.T) {
 	}
 }
 
+func TestE2EIPWhitelistStillRateLimited(t *testing.T) {
+	gw, _, _, _, cleanup := newE2E(t, false,
+		config.Rule{Name: "ip_freq_burst", Action: "rate_limit", When: config.When{IPFreq: &config.Cond{Window: config.Duration(time.Minute), GTE: 2}}},
+		config.Rule{Name: "ip_multi_token", Action: "rate_limit", When: config.When{IPDistinctTokens: &config.Cond{Window: config.Duration(10 * time.Minute), GTE: 1}}},
+	)
+	defer cleanup()
+	gw.SetIPWhitelist(func(ip string) bool { return ip == "9.9.9.9" })
+
+	first := httptest.NewRecorder()
+	gw.ServeHTTP(first, mkSubReq("sub.example.com", "Clash/1.0", "token-a", "clash", "9.9.9.9"))
+	if first.Code != http.StatusOK {
+		t.Fatalf("multi-token exemption should allow first request, got %d %q", first.Code, first.Body.String())
+	}
+	second := httptest.NewRecorder()
+	gw.ServeHTTP(second, mkSubReq("sub.example.com", "Clash/1.0", "token-b", "clash", "9.9.9.9"))
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("whitelisted IP must still receive 429 for frequency, got %d %q", second.Code, second.Body.String())
+	}
+}
+
+func TestE2EIPWhitelistDoesNotOverrideIPBlacklist(t *testing.T) {
+	gw, _, _, bans, cleanup := newE2E(t, false)
+	defer cleanup()
+	gw.SetIPWhitelist(func(ip string) bool { return ip == "7.7.7.7" })
+	if err := bans.AddIPWithAction("7.7.7.7", "deny", "manual block", time.Hour, nil, "test"); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	gw.ServeHTTP(w, mkSubReq("sub.example.com", "Clash/1.0", "token", "clash", "7.7.7.7"))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("IP blacklist must override multi-token exemption, got %d %q", w.Code, w.Body.String())
+	}
+}
+
 func TestUpstreamGuardRejectsWithoutQueueing(t *testing.T) {
 	g := newUpstreamGuard(config.RateLimitCfg{
 		GlobalRPS: 100, GlobalBurst: 100, UpstreamMaxConcurrent: 1, PerIPMaxConcurrent: 1,
