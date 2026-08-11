@@ -3,6 +3,9 @@ package banlist
 
 import (
 	"context"
+	"fmt"
+	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,19 +18,43 @@ type entry struct {
 	action  string // fake|deny
 }
 
+type prefixEntry struct {
+	prefix netip.Prefix
+	entry  entry
+}
+
 type List struct {
-	mu     sync.RWMutex
-	ips    map[string]entry
-	tokens map[string]entry
-	st     *store.Store
+	mu       sync.RWMutex
+	ips      map[string]entry
+	prefixes map[string]prefixEntry
+	tokens   map[string]entry
+	st       *store.Store
 }
 
 func New(st *store.Store) *List {
 	return &List{
-		ips:    map[string]entry{},
-		tokens: map[string]entry{},
-		st:     st,
+		ips:      map[string]entry{},
+		prefixes: map[string]prefixEntry{},
+		tokens:   map[string]entry{},
+		st:       st,
 	}
+}
+
+func normalizeIPTarget(target string) (string, netip.Prefix, bool, error) {
+	target = strings.TrimSpace(target)
+	if strings.Contains(target, "/") {
+		prefix, err := netip.ParsePrefix(target)
+		if err != nil {
+			return "", netip.Prefix{}, false, fmt.Errorf("invalid IP/CIDR %q", target)
+		}
+		prefix = prefix.Masked()
+		return prefix.String(), prefix, true, nil
+	}
+	addr, err := netip.ParseAddr(target)
+	if err != nil {
+		return "", netip.Prefix{}, false, fmt.Errorf("invalid IP/CIDR %q", target)
+	}
+	return addr.Unmap().String(), netip.Prefix{}, false, nil
 }
 
 // LoadFromStore 启动时调用。
@@ -45,7 +72,16 @@ func (l *List) LoadFromStore(ctx context.Context) error {
 		}
 		switch b.Kind {
 		case "ip":
-			l.ips[b.Target] = e
+			target, prefix, isPrefix, parseErr := normalizeIPTarget(b.Target)
+			if parseErr != nil {
+				// 旧数据库可能存在手工写入的无效目标；跳过它，避免阻断服务启动。
+				continue
+			}
+			if isPrefix {
+				l.prefixes[target] = prefixEntry{prefix: prefix, entry: e}
+			} else {
+				l.ips[target] = e
+			}
 		case "token":
 			l.tokens[b.Target] = e
 		}
@@ -69,19 +105,61 @@ func (l *List) CheckIP(ip string) (bool, string) {
 // CheckIPAction 检查 IP 黑名单动作,返回 (banned, action, reason)。
 // 过期记录会被惰性清理。
 func (l *List) CheckIPAction(ip string) (bool, string, string) {
+	addr, err := netip.ParseAddr(strings.TrimSpace(ip))
+	if err != nil {
+		return false, "", ""
+	}
+	addr = addr.Unmap()
+	now := time.Now()
+
 	l.mu.RLock()
-	e, ok := l.ips[ip]
+	e, ok := l.ips[addr.String()]
 	l.mu.RUnlock()
-	if !ok {
-		return false, "", ""
-	}
-	if !e.expires.IsZero() && time.Now().After(e.expires) {
+	if ok && !e.expires.IsZero() && now.After(e.expires) {
 		l.mu.Lock()
-		delete(l.ips, ip)
+		delete(l.ips, addr.String())
 		l.mu.Unlock()
-		return false, "", ""
+		ok = false
 	}
-	return true, normalizeAction(e.action), e.reason
+	if ok {
+		return true, normalizeAction(e.action), e.reason
+	}
+
+	// 网段命中时选择最具体的前缀；精确 IP 始终优先于 CIDR。
+	bestBits := -1
+	bestTarget := ""
+	var best entry
+	var expired []string
+	l.mu.RLock()
+	for target, candidate := range l.prefixes {
+		if !candidate.entry.expires.IsZero() && now.After(candidate.entry.expires) {
+			expired = append(expired, target)
+			continue
+		}
+		if !candidate.prefix.Contains(addr) {
+			continue
+		}
+		bits := candidate.prefix.Bits()
+		if bits > bestBits || (bits == bestBits && (bestTarget == "" || target < bestTarget)) {
+			bestBits = bits
+			bestTarget = target
+			best = candidate.entry
+		}
+	}
+	l.mu.RUnlock()
+	if len(expired) > 0 {
+		l.mu.Lock()
+		for _, target := range expired {
+			if candidate, exists := l.prefixes[target]; exists && !candidate.entry.expires.IsZero() && now.After(candidate.entry.expires) {
+				delete(l.prefixes, target)
+			}
+		}
+		l.mu.Unlock()
+	}
+	if bestBits >= 0 {
+		return true, normalizeAction(best.action), best.reason
+	}
+	return false, "", ""
 }
 
 // AddIP 保留旧调用语义：未指定动作时默认投毒。
@@ -91,6 +169,10 @@ func (l *List) AddIP(ip, reason string, ttl time.Duration, ruleTags []string, cr
 
 // AddIPWithAction 立即在内存生效并落库。
 func (l *List) AddIPWithAction(ip, action, reason string, ttl time.Duration, ruleTags []string, createdBy string) error {
+	target, prefix, isPrefix, err := normalizeIPTarget(ip)
+	if err != nil {
+		return err
+	}
 	now := time.Now()
 	action = normalizeAction(action)
 	e := entry{reason: reason, action: action}
@@ -100,11 +182,15 @@ func (l *List) AddIPWithAction(ip, action, reason string, ttl time.Duration, rul
 		expPtr = &e.expires
 	}
 	l.mu.Lock()
-	l.ips[ip] = e
+	if isPrefix {
+		l.prefixes[target] = prefixEntry{prefix: prefix, entry: e}
+	} else {
+		l.ips[target] = e
+	}
 	l.mu.Unlock()
 	return l.st.AddBan(store.Ban{
 		Kind:      "ip",
-		Target:    ip,
+		Target:    target,
 		Reason:    reason,
 		RuleTags:  ruleTags,
 		CreatedTS: now,
@@ -156,10 +242,18 @@ func (l *List) AddToken(target, action, reason string, ttl time.Duration, create
 }
 
 func (l *List) RemoveIP(ip string) error {
+	target, _, isPrefix, err := normalizeIPTarget(ip)
+	if err != nil {
+		return err
+	}
 	l.mu.Lock()
-	delete(l.ips, ip)
+	if isPrefix {
+		delete(l.prefixes, target)
+	} else {
+		delete(l.ips, target)
+	}
 	l.mu.Unlock()
-	return l.st.RemoveBan("ip", ip)
+	return l.st.RemoveBan("ip", target)
 }
 
 func (l *List) RemoveToken(target string) error {
@@ -181,8 +275,15 @@ type Entry struct {
 func (l *List) Snapshot() []Entry {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	out := make([]Entry, 0, len(l.ips)+len(l.tokens))
+	out := make([]Entry, 0, len(l.ips)+len(l.prefixes)+len(l.tokens))
 	for k, e := range l.ips {
+		if !e.expires.IsZero() && time.Now().After(e.expires) {
+			continue
+		}
+		out = append(out, Entry{Kind: "ip", Target: k, Reason: e.reason, Expires: e.expires, Action: normalizeAction(e.action)})
+	}
+	for k, candidate := range l.prefixes {
+		e := candidate.entry
 		if !e.expires.IsZero() && time.Now().After(e.expires) {
 			continue
 		}

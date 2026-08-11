@@ -12,8 +12,8 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -824,6 +824,61 @@ func (s *Server) apiBans(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, bs)
 }
 
+func normalizeIPBanTargets(raw string) ([]string, []string) {
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == '，' || r == '\n' || r == '\r' || r == ';' || r == '；' || r == '\t' || r == ' '
+	})
+	seen := make(map[string]bool, len(parts))
+	targets := make([]string, 0, len(parts))
+	invalid := make([]string, 0)
+	add := func(target string) {
+		if !seen[target] {
+			seen[target] = true
+			targets = append(targets, target)
+		}
+	}
+	normalize := func(part string) (string, bool) {
+		if addr, err := netip.ParseAddr(part); err == nil {
+			return addr.Unmap().String(), true
+		}
+		if prefix, err := netip.ParsePrefix(part); err == nil {
+			return prefix.Masked().String(), true
+		}
+		return "", false
+	}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "/" {
+			// 兼容旧界面示例中用空格包围的斜杠分隔符。
+			continue
+		}
+		if target, ok := normalize(part); ok {
+			add(target)
+			continue
+		}
+		// 兼容旧版使用斜杠分隔多个精确 IP 的输入方式；合法 CIDR 已在上方优先识别。
+		legacy := strings.Split(part, "/")
+		legacyTargets := make([]string, 0, len(legacy))
+		legacyOK := len(legacy) > 1
+		for _, candidate := range legacy {
+			addr, err := netip.ParseAddr(strings.TrimSpace(candidate))
+			if err != nil {
+				legacyOK = false
+				break
+			}
+			legacyTargets = append(legacyTargets, addr.Unmap().String())
+		}
+		if legacyOK {
+			for _, target := range legacyTargets {
+				add(target)
+			}
+			continue
+		}
+		invalid = append(invalid, part)
+	}
+	return targets, invalid
+}
+
 func (s *Server) apiBanAdd(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		writeJSON(w, 405, map[string]any{"error": "POST only"})
@@ -862,35 +917,17 @@ func (s *Server) apiBanAdd(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 400, map[string]any{"error": "action must be fake or deny"})
 			return
 		}
-		parts := strings.FieldsFunc(body.Target, func(r rune) bool {
-			return r == ',' || r == '，' || r == '/' || r == '\n' || r == '\r' || r == ';' || r == '；' || r == '\t'
-		})
-		if len(parts) == 0 {
+		targets, invalid := normalizeIPBanTargets(body.Target)
+		if len(targets) == 0 && len(invalid) == 0 {
 			writeJSON(w, 400, map[string]any{"error": "IP is required"})
 			return
 		}
-		if len(parts) > 1000 {
-			writeJSON(w, 400, map[string]any{"error": "一次最多添加 1000 个 IP"})
+		if len(targets) > 1000 {
+			writeJSON(w, 400, map[string]any{"error": "一次最多添加 1000 个 IP/CIDR"})
 			return
 		}
-		seen := make(map[string]bool, len(parts))
-		targets := make([]string, 0, len(parts))
-		var invalid []string
-		for _, part := range parts {
-			part = strings.TrimSpace(part)
-			parsed := net.ParseIP(part)
-			if parsed == nil {
-				invalid = append(invalid, part)
-				continue
-			}
-			ip := parsed.String()
-			if !seen[ip] {
-				seen[ip] = true
-				targets = append(targets, ip)
-			}
-		}
 		if len(invalid) > 0 {
-			writeJSON(w, 400, map[string]any{"error": "无效 IP: " + strings.Join(invalid, ", ")})
+			writeJSON(w, 400, map[string]any{"error": "无效 IP/CIDR: " + strings.Join(invalid, ", ")})
 			return
 		}
 		existing := make(map[string]bool)

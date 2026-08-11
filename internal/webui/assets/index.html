@@ -282,7 +282,7 @@
             <h3>新增 IP 封禁</h3>
           </div>
           <div class="ban-entry-grid">
-            <label class="ban-entry-field ban-entry-target"><span>IP 地址（支持批量）</span><textarea id="banIPTarget" rows="3" placeholder="每行一个，或使用逗号、/ 分隔&#10;例如：1.2.3.4, 5.6.7.8 / 9.10.11.12"></textarea></label>
+            <label class="ban-entry-field ban-entry-target"><span>IP / CIDR（支持批量）</span><textarea id="banIPTarget" rows="3" placeholder="每行一个，或使用逗号分隔&#10;例如：1.2.3.4, 101.90.140.0/24"></textarea></label>
             <label class="ban-entry-field"><span>拦截动作</span><select id="banIPAction"><option value="deny">REJECT · HTTP 403（不访问源站）</option><option value="fake">投毒 · HTTP 200</option></select></label>
             <label class="ban-entry-field"><span>封禁原因</span><input id="banIPReason" placeholder="原因（可选）"></label>
             <label class="ban-entry-field"><span>有效期</span><input id="banIPTTL" placeholder="如 24h，留空为永久"></label>
@@ -291,7 +291,7 @@
         </div>
         <div class="datatable">
           <table>
-            <thead><tr><th>IP</th><th>动作</th><th>原因</th><th>标签</th><th>创建</th><th>过期</th><th>来源</th><th></th></tr></thead>
+            <thead><tr><th>IP / CIDR</th><th>动作</th><th>原因</th><th>标签</th><th>创建</th><th>过期</th><th>来源</th><th></th></tr></thead>
             <tbody id="ipBanTbody"></tbody>
           </table>
         </div>

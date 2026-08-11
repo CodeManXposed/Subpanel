@@ -550,6 +550,44 @@ func TestBanAddRemoveViaAPI(t *testing.T) {
 	}
 }
 
+func TestCIDRBanAndLegacySlashBatchViaAPI(t *testing.T) {
+	srv, _, bans := setup(t)
+	h := srv.Handler()
+	cookie := login(t, h)
+
+	post := func(payload string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/bans/add", strings.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(cookie)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w
+	}
+	w := post(`{"kind":"ip","target":"203.0.113.77/24","action":"deny","reason":"range","ttl":"1h"}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"added":1`) {
+		t.Fatalf("CIDR add: %d %s", w.Code, w.Body.String())
+	}
+	if hit, action, reason := bans.CheckIPAction("203.0.113.9"); !hit || action != "deny" || reason != "range" {
+		t.Fatalf("CIDR API check=(%v,%q,%q)", hit, action, reason)
+	}
+
+	w = post(`{"kind":"ip","target":"198.51.100.1/198.51.100.2","action":"fake"}`)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"added":2`) {
+		t.Fatalf("legacy slash batch: %d %s", w.Code, w.Body.String())
+	}
+	for _, ip := range []string{"198.51.100.1", "198.51.100.2"} {
+		if hit, action, _ := bans.CheckIPAction(ip); !hit || action != "fake" {
+			t.Fatalf("legacy IP %s check=(%v,%q)", ip, hit, action)
+		}
+	}
+
+	w = post(`{"kind":"ip","target":"203.0.113.0/33","action":"deny"}`)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "无效 IP/CIDR") {
+		t.Fatalf("invalid CIDR: %d %s", w.Code, w.Body.String())
+	}
+}
+
 func TestTokenBanActionsViaAPI(t *testing.T) {
 	srv, _, bans := setup(t)
 	h := srv.Handler()
