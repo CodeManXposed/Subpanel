@@ -398,10 +398,14 @@ func TestAWSIPChangeTokenContinuityFindsOnlyTokensOnBothSides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if continuity.BeforeRequests != 3 || continuity.AfterRequests != 3 || len(continuity.Tokens) != 1 {
+	if continuity.BeforeRequests != 3 || continuity.AfterRequests != 3 || len(continuity.Tokens) != 3 {
 		t.Fatalf("unexpected continuity result: %+v", continuity)
 	}
-	got := continuity.Tokens[0]
+	byToken := make(map[string]AWSIPChangeContinuingToken, len(continuity.Tokens))
+	for _, row := range continuity.Tokens {
+		byToken[row.TokenHash] = row
+	}
+	got := byToken["common-token"]
 	if got.Tenant != "sled" || got.TokenHash != "common-token" || got.BeforePullCount != 2 || got.AfterPullCount != 2 {
 		t.Fatalf("unexpected common token: %+v", got)
 	}
@@ -410,6 +414,12 @@ func TestAWSIPChangeTokenContinuityFindsOnlyTokensOnBothSides(t *testing.T) {
 	}
 	if got.BeforeLastSeenTS != base.Add(-time.Second).UnixMilli() || got.AfterFirstSeenTS != base.Add(time.Second).UnixMilli() {
 		t.Fatalf("unexpected boundary timestamps: %+v", got)
+	}
+	if row := byToken["before-only"]; row.BeforePullCount != 1 || row.AfterPullCount != 0 {
+		t.Fatalf("before-only token must be retained and marked missing after change: %+v", row)
+	}
+	if row := byToken["after-only"]; row.BeforePullCount != 0 || row.AfterPullCount != 1 {
+		t.Fatalf("after-only token must be returned as newly seen: %+v", row)
 	}
 }
 

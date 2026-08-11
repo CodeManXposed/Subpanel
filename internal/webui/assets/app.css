@@ -785,6 +785,13 @@ table tbody tr:hover { background: #f8fafc; }
 .aws-continuity-site-title { display:flex; align-items:center; gap:6px; padding:8px 10px; font-weight:650; }
 .aws-continuity-repeat td { background: #fffbeb; }
 .aws-continuity-repeat { box-shadow: inset 3px 0 0 #f59e0b; }
+.aws-continuity-new td { background:#eff6ff; }
+.aws-continuity-new { box-shadow:inset 3px 0 0 #3b82f6; }
+.aws-continuity-missing td { background:#f8fafc; color:#64748b; }
+.aws-subscriber-count .pill { display:block; width:max-content; margin:4px auto 0; }
+.aws-continuity-missing-fold { margin-top:10px; border:1px solid var(--border); border-radius:8px; background:#f8fafc; }
+.aws-continuity-missing-fold > summary { padding:9px 11px; color:#64748b; font-size:12px; font-weight:650; cursor:pointer; }
+.aws-continuity-missing-fold > .datatable { margin:0 8px 8px; background:#fff; }
 
 /* 小型说明按钮：桌面悬浮/聚焦显示，触屏点按后通过 focus 显示。 */
 .info-tip {
@@ -865,6 +872,7 @@ table tbody tr:hover { background: #f8fafc; }
     box-shadow: var(--shadow-sm);
   }
   .aws-continuity-repeat { box-shadow: inset 3px 0 0 #f59e0b, var(--shadow-sm); }
+  .aws-continuity-new { box-shadow:inset 3px 0 0 #3b82f6, var(--shadow-sm); }
   .aws-subscriber-table tbody td {
     display: grid;
     grid-template-columns: 82px minmax(0, 1fr);
@@ -877,6 +885,7 @@ table tbody tr:hover { background: #f8fafc; }
     align-items: start;
   }
   .aws-subscriber-table .aws-subscriber-count { text-align: left; }
+  .aws-subscriber-count .pill { margin:4px 0 0; }
   .aws-subscriber-table tbody td::before {
     content: attr(data-label);
     color: var(--text-dim);

@@ -1291,7 +1291,7 @@ type AWSIPChangeSubscriber struct {
 	SecondsBeforeFailure int64  `json:"seconds_before_failure"`
 }
 
-// AWSIPChangeContinuingToken 是 DNS 变化前后各取固定条数请求后，两侧均出现的 Token。
+// AWSIPChangeContinuingToken 是 DNS 变化前后各取固定条数请求后的 Token 画像。
 // 两侧网络信息分别取最靠近 DNS 变化的一次请求。
 type AWSIPChangeContinuingToken struct {
 	Tenant              string `json:"tenant"`
@@ -1737,7 +1737,7 @@ func (s *Store) ListAWSIPChangeSubscribers(ctx context.Context, changeID int64) 
 }
 
 // AWSIPChangeTokenContinuity 以本次 DNS 变化时间为分界，向前、向后各取 sampleSize
-// 条有效订阅请求，只返回在两侧均出现的同站点 Token。
+// 条有效订阅请求，返回两侧 Token 的并集，由前后次数区分持续、新增和未再出现。
 func (s *Store) AWSIPChangeTokenContinuity(ctx context.Context, changeID int64, sampleSize int) (*AWSIPChangeContinuity, error) {
 	if sampleSize <= 0 || sampleSize > 500 {
 		return nil, fmt.Errorf("sample size must be between 1 and 500")
@@ -1806,7 +1806,8 @@ func (s *Store) AWSIPChangeTokenContinuity(ctx context.Context, changeID int64, 
 		key := e.tenant + "\x00" + e.token
 		row := byKey[key]
 		if row == nil {
-			continue
+			row = &AWSIPChangeContinuingToken{Tenant: e.tenant, TokenHash: e.token}
+			byKey[key] = row
 		}
 		if row.AfterPullCount == 0 {
 			row.AfterIP, row.AfterUA = e.ip, e.ua
@@ -1820,13 +1821,23 @@ func (s *Store) AWSIPChangeTokenContinuity(ctx context.Context, changeID int64, 
 		Tokens: make([]AWSIPChangeContinuingToken, 0),
 	}
 	for _, row := range byKey {
-		if row.AfterPullCount > 0 {
-			result.Tokens = append(result.Tokens, *row)
-		}
+		result.Tokens = append(result.Tokens, *row)
 	}
 	sort.Slice(result.Tokens, func(i, j int) bool {
 		if result.Tokens[i].Tenant != result.Tokens[j].Tenant {
 			return result.Tokens[i].Tenant < result.Tokens[j].Tenant
+		}
+		category := func(row AWSIPChangeContinuingToken) int {
+			if row.BeforePullCount > 0 && row.AfterPullCount > 0 {
+				return 0
+			}
+			if row.AfterPullCount > 0 {
+				return 1
+			}
+			return 2
+		}
+		if category(result.Tokens[i]) != category(result.Tokens[j]) {
+			return category(result.Tokens[i]) < category(result.Tokens[j])
 		}
 		iStrength := min(result.Tokens[i].BeforePullCount, result.Tokens[i].AfterPullCount)
 		jStrength := min(result.Tokens[j].BeforePullCount, result.Tokens[j].AfterPullCount)
