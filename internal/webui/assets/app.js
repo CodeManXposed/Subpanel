@@ -2503,8 +2503,8 @@ async function loadAWSIPChanges() {
         ${r.note ? `<span class="pill tag">${escapeHTML(r.note)}</span>` : ''}
         <span class="mono">${escapeHTML(fmtTime(new Date(r.occurred_ts)))}</span>
         <span class="ev-spacer"></span>
-        <span class="pill ${r.failure_ts ? 'orange' : 'tag'}">${r.failure_ts ? '精准失联锚点' : '仅 DNS 锚点'}</span>
-        <span class="pill tag">${r.lookback_minutes} 分钟取证</span>
+        <span class="pill ${r.failure_ts ? 'orange' : 'tag'}" title="${r.failure_ts ? '已收到 TCP 首次失联上报，失联时间更精确' : '没有 TCP 失联上报，以 DNS 解析变化时间作为分界'}">${r.failure_ts ? '精准失联锚点' : '仅 DNS 锚点'}</span>
+        <span class="pill tag" title="用于卡片中的换前订阅者和拉取统计；下方前后对比按请求条数取样">${r.lookback_minutes} 分钟取证</span>
       </div>
       <div class="ev-row-full">
         <span class="ev-label">入口</span>
@@ -2520,7 +2520,7 @@ async function loadAWSIPChanges() {
         <span class="ev-meta-item"><span class="ev-label">拉取</span><strong>${r.pull_count || 0}</strong></span>
       </div>
       <div class="sus-actions">
-        <button class="aws-change-detail" data-id="${r.id}">查看前后同现 Token</button>
+        <button class="aws-change-detail" data-id="${r.id}" title="以 DNS 变化为分界，对比前后各 X 条有效请求">查看换前/换后请求</button>
         <button class="danger aws-change-remove" data-id="${r.id}">删除记录</button>
       </div>
       <div class="aws-change-detail-box" style="display:none"></div>
@@ -2550,14 +2550,14 @@ async function loadAWSChangeContinuity(box, id, sampleSize) {
     (grouped[row.tenant] ||= []).push(row);
   }
   const sites = Object.keys(grouped).sort();
-  let html = `<div class="aws-snapshot-toolbar"><span>换前 ${continuity.before_requests || 0} 条 · 换后 ${continuity.after_requests || 0} 条 · ${continuity.tokens?.length || 0} 个相同 Token</span><label>每侧取 <select class="aws-continuity-size"><option value="20">20 次</option><option value="50">50 次</option><option value="100">100 次</option><option value="200">200 次</option><option value="500">500 次</option></select></label></div>`;
+  let html = `<div class="aws-snapshot-toolbar"><span title="只列出换 IP 前后两批请求中都出现过的同站点 Token">换前 ${continuity.before_requests || 0} 条 · 换后 ${continuity.after_requests || 0} 条 · ${continuity.tokens?.length || 0} 个相同 Token</span><label title="分别从 DNS 变化前和变化后取多少条有效订阅请求">每侧取 <select class="aws-continuity-size" title="每侧请求取样数量"><option value="20">20 次</option><option value="50">50 次</option><option value="100">100 次</option><option value="200">200 次</option><option value="500">500 次</option></select></label></div>`;
   if (!sites.length) {
     html += '<div class="empty-state">当前取样范围内，没有在 DNS 变化前后均出现的 Token</div>';
   }
   for (const site of sites) {
     const rows = grouped[site];
     html += `<div class="datatable" style="margin-top:12px"><div style="padding:8px 10px;font-weight:650">站点：${escapeHTML(site)} · ${rows.length} 个 Token</div>`;
-    html += '<table class="aws-subscriber-table"><thead><tr><th>Token</th><th>IP 变化</th><th>换后 UA</th><th>换前 / 换后<small class="muted" style="display:block;font-weight:400;white-space:nowrap">左侧换前次数 · 右侧换后次数</small></th><th>临界时间</th></tr></thead><tbody>';
+    html += '<table class="aws-subscriber-table"><thead><tr><th>Token</th><th title="IP 相同时只显示一个；变化时显示换前 → 换后">IP 变化</th><th title="表格显示换后 UA；悬浮可查看换前与换后完整 UA">换后 UA</th><th>换前 / 换后<small class="muted" style="display:block;font-weight:400;white-space:nowrap">左侧换前次数 · 右侧换后次数</small></th><th title="换前最后一次请求与换后第一次请求的时间">临界时间<small class="muted" style="display:block;font-weight:400">换前最后 · 换后首次</small></th></tr></thead><tbody>';
     for (const row of rows) {
       const beforeIP = row.before_ip || '-';
       const afterIP = row.after_ip || '-';
