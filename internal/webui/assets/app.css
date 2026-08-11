@@ -736,18 +736,15 @@ table tbody tr:hover { background: #f8fafc; }
 .aws-history-fold table th,
 .aws-history-fold table td { padding: 7px 9px; }
 
-/* AWS 换 IP 快照订阅者明细：桌面不拆字，手机改为信息卡片。 */
+/* AWS 换 IP 前后请求交集：桌面保持紧凑，手机改为信息卡片。 */
 .aws-snapshot-toolbar { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:10px; padding:8px 10px; border:1px solid #fed7aa; border-radius:8px; background:#fff7ed; color:#9a3412; font-size:12px; }
 .aws-snapshot-toolbar select { width:auto; min-width:150px; }
-.aws-subscriber-table { min-width: 1420px; table-layout: fixed; }
+.aws-subscriber-table { min-width: 1050px; table-layout: fixed; }
 .aws-subscriber-table th:nth-child(1) { width: 285px; }
-.aws-subscriber-table th:nth-child(2) { width: 190px; }
-.aws-subscriber-table th:nth-child(3) { width: 300px; }
-.aws-subscriber-table th:nth-child(4) { width: 230px; }
-.aws-subscriber-table th:nth-child(5) { width: 135px; }
-.aws-subscriber-table th:nth-child(6) { width: 65px; }
-.aws-subscriber-table th:nth-child(7),
-.aws-subscriber-table th:nth-child(8) { width: 165px; }
+.aws-subscriber-table th:nth-child(2) { width: 225px; }
+.aws-subscriber-table th:nth-child(3) { width: 260px; }
+.aws-subscriber-table th:nth-child(4) { width: 165px; }
+.aws-subscriber-table th:nth-child(5) { width: 215px; }
 .aws-subscriber-table td { min-width: 0; white-space: nowrap; }
 .aws-subscriber-table .aws-copy-wrap {
   display: flex;
@@ -776,18 +773,11 @@ table tbody tr:hover { background: #f8fafc; }
 }
 .aws-subscriber-table .aws-ellipsis-wrap .pill { flex: 0 0 auto; }
 .aws-subscriber-table .aws-ellipsis-wrap .aws-cell-value { flex: 1 1 auto; }
-.aws-subscriber-table .aws-subscriber-ua,
-.aws-subscriber-table .aws-subscriber-network {
+.aws-subscriber-table .aws-subscriber-ua {
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .aws-subscriber-count { text-align: right; }
-.aws-subscriber-proximity { display:flex; align-items:center; gap:5px; }
-.aws-subscriber-row-warm td { background: rgba(255,247,237,.62); }
-.aws-subscriber-row-hot td { background: rgba(254,226,226,.82); }
-.aws-subscriber-row-hot { box-shadow: inset 3px 0 0 #ef4444; }
-.aws-subscriber-row-repeat td { background: #fee2e2; }
-.aws-subscriber-row-repeat { box-shadow: inset 4px 0 0 #dc2626; }
 .aws-change-filter-actions select { min-width: 250px; max-width: 420px; }
 
 /* AWS 墙前嫌疑用户聚合页 */
@@ -1179,8 +1169,7 @@ table tbody tr:hover { background: #f8fafc; }
     font: 500 11px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
   .aws-subscriber-table .aws-subscriber-token,
-  .aws-subscriber-table .aws-subscriber-ua,
-  .aws-subscriber-table .aws-subscriber-network {
+  .aws-subscriber-table .aws-subscriber-ua {
     overflow: visible;
     text-overflow: clip;
     overflow-wrap: anywhere;
