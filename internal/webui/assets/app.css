@@ -780,7 +780,8 @@ table tbody tr:hover { background: #f8fafc; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.aws-subscriber-count { text-align: right; }
+.aws-subscriber-table th:nth-child(4),
+.aws-subscriber-count { text-align: center; }
 .aws-continuity-site-title { display:flex; align-items:center; gap:6px; padding:8px 10px; font-weight:650; }
 .aws-continuity-repeat td { background: #fffbeb; }
 .aws-continuity-repeat { box-shadow: inset 3px 0 0 #f59e0b; }
@@ -875,6 +876,7 @@ table tbody tr:hover { background: #f8fafc; }
     min-height: 28px;
     align-items: start;
   }
+  .aws-subscriber-table .aws-subscriber-count { text-align: left; }
   .aws-subscriber-table tbody td::before {
     content: attr(data-label);
     color: var(--text-dim);
