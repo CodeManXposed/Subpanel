@@ -268,17 +268,26 @@ func TestAWSIPChangeAPIRecordsSnapshot(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"sample_size":20`) ||
 		!strings.Contains(w.Body.String(), `"token":"snapshot-token"`) ||
+		!strings.Contains(w.Body.String(), `"before_pull_count":1`) ||
+		!strings.Contains(w.Body.String(), `"after_pull_count":1`) ||
 		!strings.Contains(w.Body.String(), `"history_hits":1`) ||
 		!strings.Contains(w.Body.String(), `"history_total":1`) {
 		t.Fatalf("detail: %d %s", w.Code, w.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/aws-ip-changes/detail?id=%d&sample_size=51", change.ID), nil)
+	req = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/aws-ip-changes/detail?id=%d&sample_size=501", change.ID), nil)
 	req.AddCookie(cookie)
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("invalid sample size: %d %s", w.Code, w.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/aws-ip-changes/detail?id=%d&history_size=51", change.ID), nil)
+	req.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid history size: %d %s", w.Code, w.Body.String())
 	}
 
 	if err := srv.rules.AddIPWhitelist("8.8.8.0/24", "测试 CIDR 白名单"); err != nil {
