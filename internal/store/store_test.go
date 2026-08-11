@@ -369,85 +369,72 @@ func TestAWSIPChangeSnapshotsPriorWindowByTenant(t *testing.T) {
 	}
 }
 
-func TestAWSIPChangeTokenHistoryCorrelatesSameDNSAndTenant(t *testing.T) {
+func TestAWSIPChangeTokenContinuityFindsOnlyTokensOnBothSides(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
-	base := time.Now().Add(-30 * time.Minute).Truncate(time.Second)
+	base := time.Now().Add(-time.Minute).Truncate(time.Second)
 	for _, event := range []Event{
-		{TS: base.Add(-time.Minute), Tenant: "sled", TokenHash: "repeat-token", ClientIP: "1.1.1.1", Action: "pass"},
-		{TS: base.Add(24 * time.Minute), Tenant: "sled", TokenHash: "repeat-token", ClientIP: "2.2.2.2", Action: "pass"},
-		{TS: base.Add(24 * time.Minute), Tenant: "rfs", TokenHash: "repeat-token", ClientIP: "3.3.3.3", Action: "pass"},
-		{TS: base.Add(24 * time.Minute), Tenant: "sled", TokenHash: "once-token", ClientIP: "4.4.4.4", Action: "pass"},
+		{TS: base.Add(-4 * time.Second), Tenant: "sled", TokenHash: "common-token", ClientIP: "1.1.1.1", UA: "before-old", Action: "pass"},
+		{TS: base.Add(-2 * time.Second), Tenant: "sled", TokenHash: "before-only", ClientIP: "2.2.2.2", Action: "pass"},
+		{TS: base.Add(-time.Second), Tenant: "sled", TokenHash: "common-token", ClientIP: "1.1.1.2", UA: "before-near", Action: "fake", ASN: "AS1"},
+		{TS: base.Add(-500 * time.Millisecond), Tenant: "sled", TokenHash: "ignored-deny", ClientIP: "9.9.9.9", Action: "deny"},
+		{TS: base.Add(-200 * time.Millisecond), Tenant: "rfs", TokenHash: "common-token", ClientIP: "3.3.3.3", Action: "pass"},
+		{TS: base.Add(time.Second), Tenant: "sled", TokenHash: "common-token", ClientIP: "4.4.4.1", UA: "after-near", Action: "pass", ASN: "AS2"},
+		{TS: base.Add(2 * time.Second), Tenant: "sled", TokenHash: "after-only", ClientIP: "5.5.5.5", Action: "pass"},
+		{TS: base.Add(3 * time.Second), Tenant: "sled", TokenHash: "common-token", ClientIP: "4.4.4.2", UA: "after-later", Action: "pass"},
+		{TS: base.Add(500 * time.Millisecond), Tenant: "rfs", TokenHash: "common-token", ClientIP: "6.6.6.6", Action: "pass"},
 	} {
 		st.SubmitEvent(event)
 	}
 	time.Sleep(150 * time.Millisecond)
-	if _, err := st.AddAWSIPChange(ctx, AWSIPChange{
+	change, err := st.AddAWSIPChange(ctx, AWSIPChange{
 		OccurredTS: base.UnixMilli(), DNSName: "entry.example.com", Tenant: "sled",
 		OldIP: "10.0.0.1", NewIP: "10.0.0.2", LookbackMinutes: 5,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	// 相同 DNS 但绑定到其他站点范围的监控记录不能进入 sled 任务的分母。
-	if _, err := st.AddAWSIPChange(ctx, AWSIPChange{
-		OccurredTS: base.Add(24*time.Minute + 30*time.Second).UnixMilli(), DNSName: "entry.example.com", Tenant: "rfs",
-		OldIP: "10.0.1.1", NewIP: "10.0.1.2", LookbackMinutes: 5,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	second, err := st.AddAWSIPChange(ctx, AWSIPChange{
-		OccurredTS: base.Add(25 * time.Minute).UnixMilli(), DNSName: "entry.example.com", Tenant: "sled",
-		OldIP: "10.0.0.2", NewIP: "10.0.0.3", LookbackMinutes: 5,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	history, err := st.AWSIPChangeTokenHistory(ctx, second.ID)
+	continuity, err := st.AWSIPChangeTokenContinuity(ctx, change.ID, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	repeated := history["sled\x00repeat-token"]
-	if repeated.Hits != 2 || repeated.Total != 2 {
-		t.Fatalf("same DNS/site token must correlate across changes: %+v", history)
+	if continuity.BeforeRequests != 3 || continuity.AfterRequests != 3 || len(continuity.Tokens) != 1 {
+		t.Fatalf("unexpected continuity result: %+v", continuity)
 	}
-	if once := history["sled\x00once-token"]; once.Hits != 1 || once.Total != 2 {
-		t.Fatalf("single appearance must not look repeated: %+v", history)
+	got := continuity.Tokens[0]
+	if got.Tenant != "sled" || got.TokenHash != "common-token" || got.BeforePullCount != 2 || got.AfterPullCount != 2 {
+		t.Fatalf("unexpected common token: %+v", got)
 	}
-	if _, leaked := history["rfs\x00repeat-token"]; leaked {
-		t.Fatalf("other tenant must not enter site-scoped snapshots: %+v", history)
+	if got.BeforeIP != "1.1.1.2" || got.BeforeUA != "before-near" || got.AfterIP != "4.4.4.1" || got.AfterUA != "after-near" {
+		t.Fatalf("continuity must use events closest to DNS change: %+v", got)
+	}
+	if got.BeforeLastSeenTS != base.Add(-time.Second).UnixMilli() || got.AfterFirstSeenTS != base.Add(time.Second).UnixMilli() {
+		t.Fatalf("unexpected boundary timestamps: %+v", got)
 	}
 }
 
-func TestAWSIPChangeTokenHistoryCapsMonitoredSiteAtFiftyChanges(t *testing.T) {
+func TestAWSIPChangeTokenContinuityHonorsSampleSize(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()
-	base := time.Now().Add(-55 * time.Hour).UnixMilli()
-	var lastID int64
-	for i := 0; i < 55; i++ {
-		ts := base + int64(i)*int64(time.Hour/time.Millisecond)
-		res, err := st.db.ExecContext(ctx, `INSERT INTO aws_ip_changes
-			(occurred_ts,dns_name,tenant,old_ip,new_ip,lookback_minutes,failure_ts,note,created_ts)
-			VALUES (?,?,?,?,?,?,?,?,?)`, ts, "fifty.example.com", "sled", "1.1.1.1", "1.1.1.2", 20, 0, "", ts)
-		if err != nil {
-			t.Fatal(err)
-		}
-		lastID, err = res.LastInsertId()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := st.db.ExecContext(ctx, `INSERT INTO aws_ip_change_subscribers
-			(change_id,tenant,token_hash,client_ip,ua,pull_count,first_seen_ts,last_seen_ts,cloud_provider,asn,asn_org)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?)`, lastID, "sled", "repeat-token", "1.1.1.1", "clash", 1, ts-1000, ts-1000, "", "", ""); err != nil {
-			t.Fatal(err)
-		}
+	base := time.Now().Add(-time.Minute).Truncate(time.Second)
+	for i := 1; i <= 3; i++ {
+		st.SubmitEvent(Event{TS: base.Add(-time.Duration(i) * time.Second), Tenant: "sled", TokenHash: fmt.Sprintf("before-%d", i), Action: "pass"})
+		st.SubmitEvent(Event{TS: base.Add(time.Duration(i) * time.Second), Tenant: "sled", TokenHash: fmt.Sprintf("after-%d", i), Action: "pass"})
 	}
-	history, err := st.AWSIPChangeTokenHistory(ctx, lastID)
+	time.Sleep(150 * time.Millisecond)
+	change, err := st.AddAWSIPChange(ctx, AWSIPChange{OccurredTS: base.UnixMilli(), DNSName: "sample.example.com", Tenant: "sled", OldIP: "1.1.1.1", NewIP: "1.1.1.2", LookbackMinutes: 5})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := history["sled\x00repeat-token"]
-	if got.Hits != 50 || got.Total != 50 {
-		t.Fatalf("history must cap the monitored site at 50 changes: %+v", got)
+	continuity, err := st.AWSIPChangeTokenContinuity(ctx, change.ID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if continuity.BeforeRequests != 2 || continuity.AfterRequests != 2 || continuity.SampleSize != 2 {
+		t.Fatalf("sample size was not honored: %+v", continuity)
+	}
+	if _, err := st.AWSIPChangeTokenContinuity(ctx, change.ID, 501); err == nil {
+		t.Fatal("sample size above limit should fail")
 	}
 }
 

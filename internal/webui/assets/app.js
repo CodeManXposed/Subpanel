@@ -2520,7 +2520,7 @@ async function loadAWSIPChanges() {
         <span class="ev-meta-item"><span class="ev-label">拉取</span><strong>${r.pull_count || 0}</strong></span>
       </div>
       <div class="sus-actions">
-        <button class="aws-change-detail" data-id="${r.id}">按站点查看订阅者</button>
+        <button class="aws-change-detail" data-id="${r.id}">查看前后同现 Token</button>
         <button class="danger aws-change-remove" data-id="${r.id}">删除记录</button>
       </div>
       <div class="aws-change-detail-box" style="display:none"></div>
@@ -2537,43 +2537,41 @@ async function toggleAWSChangeDetail(card, id) {
     return;
   }
   box.style.display = 'block';
-  box.innerHTML = '<div class="muted" style="padding:10px 0">加载快照...</div>';
-  const data = await api('/api/aws-ip-changes/detail?id=' + encodeURIComponent(id));
+  await loadAWSChangeContinuity(box, id, 50);
+}
+
+async function loadAWSChangeContinuity(box, id, sampleSize) {
+  box.innerHTML = '<div class="muted" style="padding:10px 0">正在对比 DNS 变化前后的请求...</div>';
+  const data = await api('/api/aws-ip-changes/detail?id=' + encodeURIComponent(id) + '&sample_size=' + encodeURIComponent(sampleSize));
   if (!data) return;
+  const continuity = data.continuity || {};
   const grouped = {};
-  for (const row of (data.subscribers || [])) {
+  for (const row of (continuity.tokens || [])) {
     (grouped[row.tenant] ||= []).push(row);
   }
   const sites = Object.keys(grouped).sort();
+  let html = `<div class="aws-snapshot-toolbar"><span>以本次 DNS 变化为分界，只显示前后两侧都出现的同站点 Token。已取换前 <strong>${continuity.before_requests || 0}</strong> 条、换后 <strong>${continuity.after_requests || 0}</strong> 条有效请求，共 <strong>${(continuity.tokens || []).length}</strong> 个交集 Token。</span><label>前后各取 <select class="aws-continuity-size"><option value="20">20 次</option><option value="50">50 次</option><option value="100">100 次</option><option value="200">200 次</option><option value="500">500 次</option></select></label></div>`;
   if (!sites.length) {
-    box.innerHTML = '<div class="empty-state">该时间窗内没有订阅拉取记录</div>';
-    box.dataset.loaded = '1';
-    return;
+    html += '<div class="empty-state">当前取样范围内，没有在 DNS 变化前后均出现的 Token</div>';
   }
-  const preciseAnchor = Boolean(data.change && data.change.failure_ts);
-  let html = `<div class="aws-snapshot-toolbar"><span>${preciseAnchor ? '已按 TCP 首次失联时间排序，越接近失联越可疑。' : '本条没有 TCP 失联上报，只能按 DNS 变更时间回溯。'}</span><select class="aws-proximity-filter"><option value="0">显示全部</option><option value="60">只看 1 分钟内</option><option value="180">只看 3 分钟内</option><option value="300">只看 5 分钟内</option></select></div>`;
   for (const site of sites) {
     const rows = grouped[site];
-    const uniqueTokens = new Set(rows.map(x => x.token)).size;
-    html += `<div class="datatable" style="margin-top:12px"><div style="padding:8px 10px;font-weight:650">站点：${escapeHTML(site)} · ${uniqueTokens} 个订阅者 · ${rows.reduce((n,x)=>n+(x.pull_count||0),0)} 次拉取</div>`;
-    const proximityLabel = preciseAnchor ? '距失联' : '距 DNS 变化';
-    html += `<table class="aws-subscriber-table"><thead><tr><th>Token</th><th>订阅者 IP</th><th>UA</th><th>云厂商 / ASN</th><th>${proximityLabel}</th><th style="text-align:right">次数</th><th>首次</th><th>最后</th></tr></thead><tbody>`;
+    html += `<div class="datatable" style="margin-top:12px"><div style="padding:8px 10px;font-weight:650">站点：${escapeHTML(site)} · ${rows.length} 个前后同现 Token</div>`;
+    html += '<table class="aws-subscriber-table"><thead><tr><th>Token</th><th>换前 IP → 换后 IP</th><th>换前 UA → 换后 UA</th><th>换后网络</th><th>换前 / 换后</th><th>换前最后</th><th>换后首次</th></tr></thead><tbody>';
     for (const row of rows) {
-      const network = [cloudProviderLabel(row.cloud_provider), row.asn, row.asn_org].filter(Boolean).join(' · ') || '-';
-      const proximityClass = preciseAnchor && row.seconds_before_failure <= 60 ? 'aws-subscriber-row-hot' : (preciseAnchor && row.seconds_before_failure <= 300 ? 'aws-subscriber-row-warm' : '');
-      const repeatedClass = row.repeated_before_changes ? 'aws-subscriber-row-repeat' : '';
-      const repeatedLabel = row.recent_change_total
-        ? `<span class="pill ${row.repeated_before_changes ? 'red' : 'tag'}" title="该 DNS 监控任务过去最多 50 次换 IP 记录中，同站点 Token 在墙前窗口出现 ${row.recent_change_hits} 次">墙前命中 ${row.recent_change_hits}/${row.recent_change_total}</span>`
-        : '';
-      html += `<tr data-offset="${Number(row.seconds_before_failure) || 0}" class="${row.ua_uncommon ? 'aws-subscriber-row-uncommon' : ''} ${proximityClass} ${repeatedClass}">
+      const network = [cloudProviderLabel(row.after_cloud_provider), row.after_asn, row.after_asn_org].filter(Boolean).join(' · ') || '-';
+      const beforeIP = row.before_ip || '-';
+      const afterIP = row.after_ip || '-';
+      const beforeUA = row.before_ua || '(空 UA)';
+      const afterUA = row.after_ua || '(空 UA)';
+      html += `<tr class="aws-subscriber-row-repeat">
         <td class="mono aws-subscriber-token" data-label="Token"><div class="aws-copy-wrap"><span class="aws-cell-value" title="${escapeHTML(row.token)}">${escapeHTML(row.token)}</span><button type="button" class="ip-copy-btn copyable" data-copy="${escapeHTML(row.token)}">复制</button></div></td>
-        <td class="mono aws-subscriber-ip" data-label="订阅者 IP"><div class="aws-copy-wrap"><span class="aws-cell-value" title="${escapeHTML(row.client_ip || '-')}">${escapeHTML(row.client_ip || '-')}</span>${row.client_ip ? `<button type="button" class="ip-copy-btn copyable" data-copy="${escapeHTML(row.client_ip)}">复制</button>` : ''}</div></td>
-        <td class="mono aws-subscriber-ua" data-label="UA"><div class="aws-ellipsis-wrap" title="${escapeHTML(row.ua || '-')}">${row.ua_uncommon ? '<span class="pill orange">非常见</span>' : ''}<span class="aws-cell-value">${escapeHTML(row.ua || '(空 UA)')}</span></div></td>
-        <td class="aws-subscriber-network" data-label="云厂商 / ASN"><div class="aws-ellipsis-wrap" title="${escapeHTML(network)}"><span class="aws-cell-value">${escapeHTML(network)}</span></div></td>
-        <td class="mono aws-subscriber-proximity" data-label="${proximityLabel}">${repeatedLabel}${preciseAnchor && row.seconds_before_failure <= 60 ? '<span class="pill red">高度相关</span>' : ''}<strong>${escapeHTML(fmtBeforeFailure(row.seconds_before_failure))}</strong></td>
-        <td class="mono aws-subscriber-count" data-label="次数"><strong>${row.pull_count || 0}</strong></td>
-        <td class="mono aws-subscriber-time" data-label="首次">${escapeHTML(fmtTime(new Date(row.first_seen_ts)))}</td>
-        <td class="mono aws-subscriber-time" data-label="最后">${escapeHTML(fmtTime(new Date(row.last_seen_ts)))}</td>
+        <td class="mono aws-subscriber-ip" data-label="换前 IP → 换后 IP"><div class="aws-ellipsis-wrap" title="${escapeHTML(beforeIP + ' → ' + afterIP)}"><span class="aws-cell-value">${escapeHTML(beforeIP)} → ${escapeHTML(afterIP)}</span></div></td>
+        <td class="mono aws-subscriber-ua" data-label="换前 UA → 换后 UA"><div class="aws-ellipsis-wrap" title="${escapeHTML(beforeUA + ' → ' + afterUA)}"><span class="aws-cell-value">${escapeHTML(beforeUA)} → ${escapeHTML(afterUA)}</span></div></td>
+        <td class="aws-subscriber-network" data-label="换后网络"><div class="aws-ellipsis-wrap" title="${escapeHTML(network)}"><span class="aws-cell-value">${escapeHTML(network)}</span></div></td>
+        <td class="mono aws-subscriber-count" data-label="换前 / 换后"><span class="pill red">前后同现</span><strong>${row.before_pull_count || 0} / ${row.after_pull_count || 0}</strong></td>
+        <td class="mono aws-subscriber-time" data-label="换前最后">${escapeHTML(fmtTime(new Date(row.before_last_seen_ts)))}</td>
+        <td class="mono aws-subscriber-time" data-label="换后首次">${escapeHTML(fmtTime(new Date(row.after_first_seen_ts)))}</td>
       </tr>`;
     }
     html += '</tbody></table></div>';
@@ -2581,13 +2579,11 @@ async function toggleAWSChangeDetail(card, id) {
   box.innerHTML = html;
   box.dataset.loaded = '1';
   bindCopyHandlers(box);
-  const proximityFilter = box.querySelector('.aws-proximity-filter');
-  if (proximityFilter) proximityFilter.addEventListener('change', () => {
-    const limit = Number(proximityFilter.value || 0);
-    box.querySelectorAll('tbody tr[data-offset]').forEach(row => {
-      row.style.display = !limit || Number(row.dataset.offset) <= limit ? '' : 'none';
-    });
-  });
+  const sizeSelect = box.querySelector('.aws-continuity-size');
+  if (sizeSelect) {
+    sizeSelect.value = String(continuity.sample_size || sampleSize);
+    sizeSelect.addEventListener('change', () => loadAWSChangeContinuity(box, id, Number(sizeSelect.value || 50)));
+  }
 }
 
 $('#awsWatcherAddBtn').addEventListener('click', async () => {

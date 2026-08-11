@@ -1277,26 +1277,46 @@ type AWSIPChange struct {
 
 // AWSIPChangeSubscriber 是更换动作发生前时间窗内冻结的一行订阅画像。
 type AWSIPChangeSubscriber struct {
-	Tenant                string `json:"tenant"`
-	TokenHash             string `json:"token"`
-	ClientIP              string `json:"client_ip"`
-	UA                    string `json:"ua"`
-	PullCount             int    `json:"pull_count"`
-	FirstSeenTS           int64  `json:"first_seen_ts"`
-	LastSeenTS            int64  `json:"last_seen_ts"`
-	CloudProvider         string `json:"cloud_provider"`
-	ASN                   string `json:"asn"`
-	ASNOrg                string `json:"asn_org"`
-	UAUncommon            bool   `json:"ua_uncommon"`
-	SecondsBeforeFailure  int64  `json:"seconds_before_failure"`
-	RecentChangeHits      int    `json:"recent_change_hits"`
-	RecentChangeTotal     int    `json:"recent_change_total"`
-	RepeatedBeforeChanges bool   `json:"repeated_before_changes"`
+	Tenant               string `json:"tenant"`
+	TokenHash            string `json:"token"`
+	ClientIP             string `json:"client_ip"`
+	UA                   string `json:"ua"`
+	PullCount            int    `json:"pull_count"`
+	FirstSeenTS          int64  `json:"first_seen_ts"`
+	LastSeenTS           int64  `json:"last_seen_ts"`
+	CloudProvider        string `json:"cloud_provider"`
+	ASN                  string `json:"asn"`
+	ASNOrg               string `json:"asn_org"`
+	UAUncommon           bool   `json:"ua_uncommon"`
+	SecondsBeforeFailure int64  `json:"seconds_before_failure"`
 }
 
-type AWSChangeTokenHistory struct {
-	Hits  int
-	Total int
+// AWSIPChangeContinuingToken 是 DNS 变化前后各取固定条数请求后，两侧均出现的 Token。
+// 两侧网络信息分别取最靠近 DNS 变化的一次请求。
+type AWSIPChangeContinuingToken struct {
+	Tenant              string `json:"tenant"`
+	TokenHash           string `json:"token"`
+	BeforePullCount     int    `json:"before_pull_count"`
+	AfterPullCount      int    `json:"after_pull_count"`
+	BeforeIP            string `json:"before_ip"`
+	AfterIP             string `json:"after_ip"`
+	BeforeUA            string `json:"before_ua"`
+	AfterUA             string `json:"after_ua"`
+	BeforeCloudProvider string `json:"before_cloud_provider"`
+	AfterCloudProvider  string `json:"after_cloud_provider"`
+	BeforeASN           string `json:"before_asn"`
+	AfterASN            string `json:"after_asn"`
+	BeforeASNOrg        string `json:"before_asn_org"`
+	AfterASNOrg         string `json:"after_asn_org"`
+	BeforeLastSeenTS    int64  `json:"before_last_seen_ts"`
+	AfterFirstSeenTS    int64  `json:"after_first_seen_ts"`
+}
+
+type AWSIPChangeContinuity struct {
+	SampleSize     int                          `json:"sample_size"`
+	BeforeRequests int                          `json:"before_requests"`
+	AfterRequests  int                          `json:"after_requests"`
+	Tokens         []AWSIPChangeContinuingToken `json:"tokens"`
 }
 
 // AWSSuspectIP 是墙前快照中同一 Token 使用过的一个订阅者 IP。
@@ -1716,36 +1736,106 @@ func (s *Store) ListAWSIPChangeSubscribers(ctx context.Context, changeID int64) 
 	return out, rows.Err()
 }
 
-// AWSIPChangeTokenHistory 返回同一 DNS 监控任务（入口 + 绑定站点范围）最近最多 50 次换 IP 中，
-// 各实际站点 + Token 的出现次数；相同 DNS 的其他监控范围不会混入。
-func (s *Store) AWSIPChangeTokenHistory(ctx context.Context, changeID int64) (map[string]AWSChangeTokenHistory, error) {
-	rows, err := s.db.QueryContext(ctx, `WITH target AS (
-		SELECT dns_name,COALESCE(tenant,'') AS watcher_tenant,occurred_ts
-		FROM aws_ip_changes WHERE id=? AND COALESCE(dns_name,'')<>''
-	), recent AS (
-		SELECT c.id FROM aws_ip_changes c,target t
-		WHERE c.dns_name=t.dns_name AND COALESCE(c.tenant,'')=t.watcher_tenant
-		  AND (c.occurred_ts<t.occurred_ts OR (c.occurred_ts=t.occurred_ts AND c.id<=?))
-		ORDER BY c.occurred_ts DESC,c.id DESC LIMIT 50
-	)
-	SELECT s.tenant,s.token_hash,COUNT(DISTINCT s.change_id),(SELECT COUNT(*) FROM recent)
-	FROM aws_ip_change_subscribers s
-	WHERE s.change_id IN (SELECT id FROM recent)
-	GROUP BY s.tenant,s.token_hash`, changeID, changeID)
+// AWSIPChangeTokenContinuity 以本次 DNS 变化时间为分界，向前、向后各取 sampleSize
+// 条有效订阅请求，只返回在两侧均出现的同站点 Token。
+func (s *Store) AWSIPChangeTokenContinuity(ctx context.Context, changeID int64, sampleSize int) (*AWSIPChangeContinuity, error) {
+	if sampleSize <= 0 || sampleSize > 500 {
+		return nil, fmt.Errorf("sample size must be between 1 and 500")
+	}
+	var occurredTS int64
+	var watcherTenant string
+	if err := s.db.QueryRowContext(ctx, `SELECT occurred_ts,COALESCE(tenant,'') FROM aws_ip_changes WHERE id=?`, changeID).Scan(&occurredTS, &watcherTenant); err != nil {
+		return nil, err
+	}
+	type sampledEvent struct {
+		tenant, token, ip, ua, cloud, asn, asnOrg string
+		ts                                        int64
+	}
+	load := func(before bool) ([]sampledEvent, error) {
+		comparison, order := ">=", "ASC"
+		if before {
+			comparison, order = "<", "DESC"
+		}
+		q := `SELECT tenant,token_hash,COALESCE(client_ip,''),COALESCE(ua,''),
+			COALESCE(cloud_provider,''),COALESCE(asn,''),COALESCE(asn_org,''),ts
+			FROM events WHERE ts ` + comparison + ` ? AND token_hash<>'' AND action IN ('pass','fake')`
+		args := []any{occurredTS}
+		if watcherTenant != "" {
+			q += " AND tenant=?"
+			args = append(args, watcherTenant)
+		}
+		q += " ORDER BY ts " + order + ",id " + order + " LIMIT ?"
+		args = append(args, sampleSize)
+		rows, err := s.db.QueryContext(ctx, q, args...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		out := make([]sampledEvent, 0, sampleSize)
+		for rows.Next() {
+			var e sampledEvent
+			if err := rows.Scan(&e.tenant, &e.token, &e.ip, &e.ua, &e.cloud, &e.asn, &e.asnOrg, &e.ts); err != nil {
+				return nil, err
+			}
+			out = append(out, e)
+		}
+		return out, rows.Err()
+	}
+	before, err := load(true)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := map[string]AWSChangeTokenHistory{}
-	for rows.Next() {
-		var tenant, token string
-		var h AWSChangeTokenHistory
-		if err := rows.Scan(&tenant, &token, &h.Hits, &h.Total); err != nil {
-			return nil, err
-		}
-		out[tenant+"\x00"+token] = h
+	after, err := load(false)
+	if err != nil {
+		return nil, err
 	}
-	return out, rows.Err()
+	byKey := make(map[string]*AWSIPChangeContinuingToken, len(before))
+	for _, e := range before {
+		key := e.tenant + "\x00" + e.token
+		row := byKey[key]
+		if row == nil {
+			row = &AWSIPChangeContinuingToken{
+				Tenant: e.tenant, TokenHash: e.token, BeforeIP: e.ip, BeforeUA: e.ua,
+				BeforeCloudProvider: e.cloud, BeforeASN: e.asn, BeforeASNOrg: e.asnOrg, BeforeLastSeenTS: e.ts,
+			}
+			byKey[key] = row
+		}
+		row.BeforePullCount++
+	}
+	for _, e := range after {
+		key := e.tenant + "\x00" + e.token
+		row := byKey[key]
+		if row == nil {
+			continue
+		}
+		if row.AfterPullCount == 0 {
+			row.AfterIP, row.AfterUA = e.ip, e.ua
+			row.AfterCloudProvider, row.AfterASN, row.AfterASNOrg = e.cloud, e.asn, e.asnOrg
+			row.AfterFirstSeenTS = e.ts
+		}
+		row.AfterPullCount++
+	}
+	result := &AWSIPChangeContinuity{
+		SampleSize: sampleSize, BeforeRequests: len(before), AfterRequests: len(after),
+		Tokens: make([]AWSIPChangeContinuingToken, 0),
+	}
+	for _, row := range byKey {
+		if row.AfterPullCount > 0 {
+			result.Tokens = append(result.Tokens, *row)
+		}
+	}
+	sort.Slice(result.Tokens, func(i, j int) bool {
+		if result.Tokens[i].Tenant != result.Tokens[j].Tenant {
+			return result.Tokens[i].Tenant < result.Tokens[j].Tenant
+		}
+		iStrength := min(result.Tokens[i].BeforePullCount, result.Tokens[i].AfterPullCount)
+		jStrength := min(result.Tokens[j].BeforePullCount, result.Tokens[j].AfterPullCount)
+		if iStrength != jStrength {
+			return iStrength > jStrength
+		}
+		return result.Tokens[i].AfterFirstSeenTS < result.Tokens[j].AfterFirstSeenTS
+	})
+	return result, nil
 }
 
 // ListAWSSuspectSummaries 返回 AWS 换 IP 取证中提纯后的 Token。

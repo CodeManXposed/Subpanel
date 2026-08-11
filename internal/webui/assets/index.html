@@ -628,7 +628,7 @@
             </div>
             <button class="primary" id="awsWatcherAddBtn">开始追踪</button>
           </div>
-          <p class="muted" style="margin:10px 0 12px">不选站点时记录全部站点。AWS 脚本检测到大陆 TCP 失联后，应立即调用下方接口；面板会保存首次失联时间，DNS 更新后按该时间冻结快照。</p>
+          <p class="muted" style="margin:10px 0 12px">不选站点时记录全部站点。AWS 脚本检测到大陆 TCP 失联后，应立即调用下方接口；换 IP 详情会以 DNS 变化为分界，对比前后各 X 次有效请求中均出现的 Token。</p>
           <details class="aws-hook-guide">
             <summary>自动脚本接入 · 精准记录首次失联时间</summary>
             <div class="aws-hook-guide-body">

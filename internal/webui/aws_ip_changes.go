@@ -292,47 +292,20 @@ func (s *Server) apiAWSIPChangeDetail(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	rows, err := s.st.ListAWSIPChangeSubscribers(r.Context(), id)
+	sampleSize, _ := strconv.Atoi(r.URL.Query().Get("sample_size"))
+	if sampleSize == 0 {
+		sampleSize = 50
+	}
+	if sampleSize < 1 || sampleSize > 500 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "sample_size must be between 1 and 500"})
+		return
+	}
+	continuity, err := s.st.AWSIPChangeTokenContinuity(r.Context(), id, sampleSize)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	if rows == nil {
-		rows = []store.AWSIPChangeSubscriber{}
-	}
-	history, err := s.st.AWSIPChangeTokenHistory(r.Context(), id)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	for i := range rows {
-		rows[i].UAUncommon = !blacklist.IsKnownSubClient(rows[i].UA)
-		anchor := change.FailureTS
-		if anchor <= 0 {
-			anchor = change.OccurredTS
-		}
-		if rows[i].LastSeenTS <= anchor {
-			rows[i].SecondsBeforeFailure = (anchor - rows[i].LastSeenTS) / 1000
-		}
-		if h, ok := history[rows[i].Tenant+"\x00"+rows[i].TokenHash]; ok {
-			rows[i].RecentChangeHits = h.Hits
-			rows[i].RecentChangeTotal = h.Total
-			rows[i].RepeatedBeforeChanges = h.Hits >= 2
-		}
-	}
-	sort.SliceStable(rows, func(i, j int) bool {
-		if rows[i].Tenant != rows[j].Tenant {
-			return rows[i].Tenant < rows[j].Tenant
-		}
-		if rows[i].RecentChangeHits != rows[j].RecentChangeHits {
-			return rows[i].RecentChangeHits > rows[j].RecentChangeHits
-		}
-		if rows[i].SecondsBeforeFailure != rows[j].SecondsBeforeFailure {
-			return rows[i].SecondsBeforeFailure < rows[j].SecondsBeforeFailure
-		}
-		return rows[i].LastSeenTS > rows[j].LastSeenTS
-	})
-	writeJSON(w, http.StatusOK, map[string]any{"change": change, "subscribers": rows})
+	writeJSON(w, http.StatusOK, map[string]any{"change": change, "continuity": continuity})
 }
 
 func (s *Server) apiAWSIPChangeRemove(w http.ResponseWriter, r *http.Request) {

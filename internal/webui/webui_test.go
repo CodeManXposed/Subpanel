@@ -256,13 +256,29 @@ func TestAWSIPChangeAPIRecordsSnapshot(t *testing.T) {
 	if change.SiteCount != 1 || change.SubscriberCount != 1 || change.PullCount != 1 {
 		t.Fatalf("unexpected change response: %+v", change)
 	}
+	st.SubmitEvent(store.Event{
+		TS: actionAt.Add(time.Second), Tenant: "default", ClientIP: "9.9.9.9",
+		UA: "clash-after", TokenHash: "snapshot-token", Action: "pass", ASN: "AS2",
+	})
+	time.Sleep(150 * time.Millisecond)
 
-	req = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/aws-ip-changes/detail?id=%d", change.ID), nil)
+	req = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/aws-ip-changes/detail?id=%d&sample_size=20", change.ID), nil)
 	req.AddCookie(cookie)
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "snapshot-token") || !strings.Contains(w.Body.String(), "default") {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"sample_size":20`) ||
+		!strings.Contains(w.Body.String(), `"token":"snapshot-token"`) ||
+		!strings.Contains(w.Body.String(), `"before_pull_count":1`) ||
+		!strings.Contains(w.Body.String(), `"after_pull_count":1`) {
 		t.Fatalf("detail: %d %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/aws-ip-changes/detail?id=%d&sample_size=501", change.ID), nil)
+	req.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid sample size: %d %s", w.Code, w.Body.String())
 	}
 
 	if err := srv.rules.AddIPWhitelist("8.8.8.0/24", "测试 CIDR 白名单"); err != nil {
