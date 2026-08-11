@@ -37,7 +37,7 @@ import (
 	"github.com/huabanmao168/SubPanel/internal/webui"
 )
 
-var Version = "0.1.92"
+var Version = "0.1.93"
 
 func main() {
 	if len(os.Args) >= 2 {
