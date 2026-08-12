@@ -774,6 +774,40 @@ func TestDNSWatcherFailureKeepsEarliestSignalAndAnchorsSnapshot(t *testing.T) {
 	}
 }
 
+func TestSetDNSWatcherFailureOverridesPendingAnchor(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+	w, err := st.AddDNSWatcher(ctx, DNSWatcher{
+		DNSName: "manual.example.com", Tenant: "sled", LookbackMinutes: 20,
+		Enabled: true, LastIPs: "1.2.3.4,1.2.3.5", LastCheckedTS: now.UnixMilli(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := now.Add(-time.Minute).UnixMilli()
+	if _, err := st.MarkDNSWatcherFailure(ctx, w.DNSName, w.Tenant, "1.2.3.4", first); err != nil {
+		t.Fatal(err)
+	}
+	corrected := now.Add(-10 * time.Minute).UnixMilli()
+	got, err := st.SetDNSWatcherFailure(ctx, w.ID, "1.2.3.5", corrected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PendingFailureTS != corrected || got.PendingFailureIP != "1.2.3.5" {
+		t.Fatalf("manual anchor must override pending signal: %+v", got)
+	}
+	if _, err := st.SetDNSWatcherFailure(ctx, w.ID, "9.9.9.9", corrected); err == nil {
+		t.Fatal("IP outside current DNS answers must be rejected")
+	}
+	if err := st.SetDNSWatcherEnabled(ctx, w.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SetDNSWatcherFailure(ctx, w.ID, "1.2.3.4", corrected); err == nil {
+		t.Fatal("disabled watcher must reject manual anchor")
+	}
+}
+
 func TestVacuumExpiresAWSIPChangeSnapshots(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()

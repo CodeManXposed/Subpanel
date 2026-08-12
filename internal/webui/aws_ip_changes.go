@@ -484,6 +484,50 @@ func (s *Server) apiDNSWatcherLookback(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "minutes": body.Minutes})
 }
 
+func (s *Server) apiDNSWatcherManualFailure(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var body struct {
+		ID       int64  `json:"id"`
+		IP       string `json:"ip"`
+		FailedTS int64  `json:"failed_ts"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ID <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "valid watcher id required"})
+		return
+	}
+	body.IP = strings.TrimSpace(body.IP)
+	if net.ParseIP(body.IP) == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "valid current IP required"})
+		return
+	}
+	now := time.Now().UnixMilli()
+	if body.FailedTS <= 0 {
+		body.FailedTS = now
+	}
+	// 管理员可能在 DNS 延迟较久后补录，允许回填 30 天；未来时间只容忍
+	// 5 分钟的终端时钟偏差。
+	if body.FailedTS < now-int64(30*24*time.Hour/time.Millisecond) || body.FailedTS > now+int64(5*time.Minute/time.Millisecond) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "failed_ts must be within the last 30 days"})
+		return
+	}
+	watcher, err := s.st.SetDNSWatcherFailure(r.Context(), body.ID, body.IP, body.FailedTS)
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "watcher not found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "watcher_id": watcher.ID, "failure_ts": watcher.PendingFailureTS,
+		"message": "manual failure anchor recorded; waiting for DNS change",
+	})
+}
+
 func (s *Server) apiDNSWatcherNote(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})

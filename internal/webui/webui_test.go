@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -383,6 +384,44 @@ func TestAWSFailureHookRequiresSecretAndRecordsAnchor(t *testing.T) {
 	watchers, err := st.ListDNSWatchers(context.Background(), false)
 	if err != nil || len(watchers) != 1 || watchers[0].PendingFailureTS == 0 || watchers[0].PendingFailureIP != "1.2.3.4" {
 		t.Fatalf("anchor not persisted: watchers=%+v err=%v", watchers, err)
+	}
+}
+
+func TestAWSManualFailureAPIRecordsExactTime(t *testing.T) {
+	srv, st, _ := setup(t)
+	h := srv.Handler()
+	cookie := login(t, h)
+	now := time.Now().Truncate(time.Second)
+	watcher, err := st.AddDNSWatcher(context.Background(), store.DNSWatcher{
+		DNSName: "manual.example.com", Tenant: "sled", LookbackMinutes: 20, Enabled: true,
+		LastIPs: "1.2.3.4", LastCheckedTS: now.UnixMilli(), LastChangedTS: now.Add(-time.Hour).UnixMilli(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedTS := now.Add(-3 * time.Hour).UnixMilli()
+	body := strings.NewReader(fmt.Sprintf(`{"id":%d,"ip":"1.2.3.4","failed_ts":%d}`, watcher.ID, failedTS))
+	req := httptest.NewRequest(http.MethodPost, "/api/dns-watchers/manual-failure", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"failure_ts":`+strconv.FormatInt(failedTS, 10)) {
+		t.Fatalf("manual failure: %d %s", w.Code, w.Body.String())
+	}
+	got, err := st.GetDNSWatcher(context.Background(), watcher.ID)
+	if err != nil || got.PendingFailureTS != failedTS || got.PendingFailureIP != "1.2.3.4" {
+		t.Fatalf("manual failure not persisted: watcher=%+v err=%v", got, err)
+	}
+
+	body = strings.NewReader(fmt.Sprintf(`{"id":%d,"ip":"9.9.9.9","failed_ts":%d}`, watcher.ID, failedTS))
+	req = httptest.NewRequest(http.MethodPost, "/api/dns-watchers/manual-failure", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("wrong current IP should conflict: %d %s", w.Code, w.Body.String())
 	}
 }
 

@@ -2348,6 +2348,35 @@ func (s *Store) MarkDNSWatcherFailure(ctx context.Context, dnsName, tenant, ip s
 	return s.GetDNSWatcher(ctx, id)
 }
 
+// SetDNSWatcherFailure 由管理员手动指定本轮准确失联时间。与自动上报保留
+// 最早时间不同，手动操作会覆盖待处理锚点，便于修正误报；DNS 切换后仍由
+// RecordDNSIPTransition 结算并清空。
+func (s *Store) SetDNSWatcherFailure(ctx context.Context, id int64, ip string, failedTS int64) (*DNSWatcher, error) {
+	w, err := s.GetDNSWatcher(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if !w.Enabled {
+		return nil, fmt.Errorf("DNS watcher is disabled")
+	}
+	matched := false
+	for _, current := range strings.Split(w.LastIPs, ",") {
+		if strings.TrimSpace(current) == ip {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return nil, fmt.Errorf("reported IP does not match current DNS IP")
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE dns_watchers SET pending_failure_ts=?,pending_failure_ip=?,updated_ts=? WHERE id=?`,
+		failedTS, ip, time.Now().UnixMilli(), id)
+	if err != nil {
+		return nil, err
+	}
+	return s.GetDNSWatcher(ctx, id)
+}
+
 // RecordDNSIPTransition 结算上一个 IP 的存活时间、更新当前 IP，并只保留最近 5 条。
 func (s *Store) RecordDNSIPTransition(ctx context.Context, watcher DNSWatcher, newIPs string, changedTS int64) error {
 	startedTS := watcher.LastChangedTS

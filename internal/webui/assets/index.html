@@ -608,8 +608,11 @@
       <section id="tab-aws-ip-changes" class="tab">
         <div class="card">
           <div class="card-header">
-            <h3>AWS 入口 DNS 自动追踪</h3>
-            <span class="muted" style="font-size:13px">TCP 失联信号负责精准定时，DNS 变化负责确认换 IP。</span>
+            <div>
+              <h3>AWS 入口 DNS 自动追踪</h3>
+              <span class="muted aws-watcher-heading-hint">失联时间负责精准定时，DNS 变化负责确认换 IP。</span>
+            </div>
+            <button class="warning" id="awsManualFailureBtn">手动记录被墙</button>
           </div>
           <div class="aws-watcher-form">
             <div class="aws-watcher-dns-field">
@@ -883,6 +886,37 @@ curl -fsS http://127.0.0.1:19090/healthz</pre>
     <div class="modal-footer">
       <button id="tenantFormCancel">取消</button>
       <button class="primary" id="tenantFormSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- AWS 手动失联时间弹窗 -->
+<div class="modal-overlay" id="awsFailureModal" style="display:none">
+  <div class="modal aws-failure-modal" style="width:560px">
+    <div class="modal-header">
+      <div><h3>手动记录 AWS 被墙时间</h3><p class="muted">先保存真实失联时间，DNS 稍后变化时会自动生成换 IP 记录。</p></div>
+      <button class="close-btn" id="awsFailureModalClose">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-row">
+        <label>追踪入口 <span class="req">*</span></label>
+        <select id="awsFailureWatcher"></select>
+      </div>
+      <div class="form-row">
+        <label>即将更换的旧 IP <span class="req">*</span></label>
+        <select id="awsFailureIP" class="mono"></select>
+        <p class="hint">只能选择该入口当前解析到的 IP，避免把失联时间记到错误入口。</p>
+      </div>
+      <div class="form-row">
+        <label>实际被墙时间 <span class="req">*</span></label>
+        <input id="awsFailureTime" type="datetime-local" step="1">
+        <p class="hint">默认当前时间，可回填最近 30 天。再次保存同一入口会以本次手动时间覆盖待处理锚点。</p>
+      </div>
+      <div class="aws-manual-failure-note"><strong>保存后不会立即制造换 IP 记录</strong><span>面板会等待 DNS 真正变化，再用这里的时间向前抓取订阅者。即使 DNS 延迟很久，取证锚点也不会漂移。</span></div>
+    </div>
+    <div class="modal-footer">
+      <button id="awsFailureCancel">取消</button>
+      <button class="primary" id="awsFailureSave">保存失联时间</button>
     </div>
   </div>
 </div>

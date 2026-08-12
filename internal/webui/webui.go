@@ -174,6 +174,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/dns-watchers", s.auth(http.HandlerFunc(s.apiDNSWatchers)))
 	mux.Handle("/api/dns-watchers/add", s.auth(http.HandlerFunc(s.apiDNSWatcherAdd)))
 	mux.Handle("/api/dns-watchers/toggle", s.auth(http.HandlerFunc(s.apiDNSWatcherToggle)))
+	mux.Handle("/api/dns-watchers/manual-failure", s.auth(http.HandlerFunc(s.apiDNSWatcherManualFailure)))
 	mux.Handle("/api/dns-watchers/note", s.auth(http.HandlerFunc(s.apiDNSWatcherNote)))
 	mux.Handle("/api/dns-watchers/lookback", s.auth(http.HandlerFunc(s.apiDNSWatcherLookback)))
 	mux.Handle("/api/dns-watchers/remove", s.auth(http.HandlerFunc(s.apiDNSWatcherRemove)))

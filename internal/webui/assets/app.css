@@ -608,6 +608,13 @@ table tbody tr:hover { background: #f8fafc; }
   align-items: end;
   gap: 10px;
 }
+.aws-watcher-heading-hint { display:block; margin-top:4px; font-size:12px; }
+#awsManualFailureBtn { flex:0 0 auto; border-color:#fdba74; background:#fff7ed; color:#c2410c; font-weight:650; }
+#awsManualFailureBtn:hover { background:#ffedd5; }
+.aws-failure-modal .modal-header { align-items:flex-start; gap:12px; }
+.aws-failure-modal .modal-header p { margin:4px 0 0; font-size:12px; }
+.aws-manual-failure-note { display:grid; gap:5px; padding:11px 12px; border:1px solid #fed7aa; border-radius:8px; background:#fff7ed; color:#9a3412; font-size:12px; line-height:1.55; }
+.aws-manual-failure-note strong { color:#c2410c; }
 .aws-watcher-form > div { min-width: 0; }
 .aws-watcher-form label { display: block; margin-bottom: 5px; color: var(--text-muted); font-size: 11px; font-weight: 650; }
 .aws-watcher-form input,
@@ -1212,6 +1219,9 @@ table tbody tr:hover { background: #f8fafc; }
   .aws-watcher-form > div { width: 100%; min-width: 0; }
   .aws-watcher-form select { width: 100%; }
   .aws-watcher-form > button { width: 100%; justify-content: center; }
+  #tab-aws-ip-changes > .card:first-child > .card-header { align-items:flex-start; gap:10px; }
+  #awsManualFailureBtn { width:auto; min-width:112px; justify-content:center; }
+  .aws-failure-modal .modal-header p { max-width:260px; }
   .aws-watcher-grid { grid-template-columns: minmax(0, 1fr); }
   .aws-watcher-top { align-items: flex-start; flex-direction: column; }
   .aws-watcher-identity { width: 100%; flex-wrap: wrap; }

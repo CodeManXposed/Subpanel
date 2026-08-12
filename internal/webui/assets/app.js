@@ -2409,10 +2409,51 @@ function refreshAWSAliveClocks() {
 }
 setInterval(refreshAWSAliveClocks, 1000);
 
+let awsWatcherRows = [];
+
+function localDateTimeValue(ts = Date.now()) {
+  const d = new Date(ts);
+  const pad = value => String(value).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function fillAWSFailureIPs() {
+  const watcherID = Number($('#awsFailureWatcher').value || 0);
+  const watcher = awsWatcherRows.find(row => Number(row.id) === watcherID);
+  const ipSelect = $('#awsFailureIP');
+  const ips = String(watcher?.last_ips || '').split(',').map(ip => ip.trim()).filter(Boolean);
+  ipSelect.innerHTML = ips.length
+    ? ips.map(ip => `<option value="${escapeHTML(ip)}">${escapeHTML(ip)}</option>`).join('')
+    : '<option value="">当前没有可用 IP</option>';
+}
+
+function openAWSFailureModal(preferredID = 0) {
+  const enabled = awsWatcherRows.filter(row => row.enabled && row.last_ips);
+  if (!enabled.length) {
+    alert('请先添加并启用一个已成功解析 IP 的 DNS 追踪任务');
+    return;
+  }
+  const select = $('#awsFailureWatcher');
+  select.innerHTML = enabled.map(row => {
+    const label = `${row.note ? row.note + ' · ' : ''}${row.dns_name} · ${row.tenant || '全部站点'}`;
+    return `<option value="${row.id}">${escapeHTML(label)}</option>`;
+  }).join('');
+  const selected = enabled.some(row => Number(row.id) === Number(preferredID)) ? Number(preferredID) : Number(enabled[0].id);
+  select.value = String(selected);
+  fillAWSFailureIPs();
+  $('#awsFailureTime').value = localDateTimeValue();
+  $('#awsFailureModal').style.display = 'flex';
+}
+
+function closeAWSFailureModal() {
+  $('#awsFailureModal').style.display = 'none';
+}
+
 async function loadAWSIPChanges() {
   const [watchers, rows, tenants] = await Promise.all([
     api('/api/dns-watchers'), api('/api/aws-ip-changes'), api('/api/tenants'),
   ]);
+  awsWatcherRows = Array.isArray(watchers) ? watchers : [];
 
   const tenantSel = $('#awsWatcherTenant');
   const selectedTenant = tenantSel.value;
@@ -2644,6 +2685,34 @@ $('#awsWatcherAddBtn').addEventListener('click', async () => {
 
 $('#awsChangeRefreshBtn').addEventListener('click', () => loadAWSIPChanges());
 $('#awsChangeDNSFilter').addEventListener('change', () => loadAWSIPChanges());
+$('#awsManualFailureBtn').addEventListener('click', () => openAWSFailureModal());
+$('#awsFailureWatcher').addEventListener('change', fillAWSFailureIPs);
+$('#awsFailureModalClose').addEventListener('click', closeAWSFailureModal);
+$('#awsFailureCancel').addEventListener('click', closeAWSFailureModal);
+$('#awsFailureModal').addEventListener('click', e => {
+  if (e.target.id === 'awsFailureModal') closeAWSFailureModal();
+});
+$('#awsFailureSave').addEventListener('click', async () => {
+  const watcherID = Number($('#awsFailureWatcher').value || 0);
+  const ip = $('#awsFailureIP').value;
+  const rawTime = $('#awsFailureTime').value;
+  const failedTS = rawTime ? new Date(rawTime).getTime() : NaN;
+  if (!watcherID || !ip || !Number.isFinite(failedTS)) {
+    alert('请选择入口、旧 IP 和有效的被墙时间');
+    return;
+  }
+  const save = $('#awsFailureSave');
+  save.disabled = true;
+  const r = await apiPost('/api/dns-watchers/manual-failure', { id: watcherID, ip, failed_ts: failedTS });
+  save.disabled = false;
+  if (!r || r.error) {
+    alert('记录失败：' + ((r && r.error) || '未知错误'));
+    return;
+  }
+  closeAWSFailureModal();
+  toast('已记录实际被墙时间，正在等待 DNS 变化', 'success');
+  loadAWSIPChanges();
+});
 
 $('#awsWatcherList').addEventListener('change', async e => {
   const input = e.target.closest('.aws-watcher-lookback');
@@ -2796,7 +2865,7 @@ document.addEventListener('keydown', (e) => {
 
   // Esc 关弹窗
   if (e.key === 'Escape') {
-    const modals = ['#tenantModal', '#ruleModal', '#reportCodeModal'];
+    const modals = ['#tenantModal', '#ruleModal', '#reportCodeModal', '#awsFailureModal'];
     for (const sel of modals) {
       const m = document.querySelector(sel);
       if (m && m.style.display === 'flex') {
