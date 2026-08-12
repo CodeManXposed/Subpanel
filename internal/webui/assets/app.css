@@ -611,6 +611,23 @@ table tbody tr:hover { background: #f8fafc; }
 .aws-watcher-heading-hint { display:block; margin-top:4px; font-size:12px; }
 #awsManualFailureBtn { flex:0 0 auto; border-color:#fdba74; background:#fff7ed; color:#c2410c; font-weight:650; }
 #awsManualFailureBtn:hover { background:#ffedd5; }
+.kuma-metrics-panel { margin:0 0 14px; border:1px solid #c7d2fe; border-radius:9px; background:#f8faff; }
+.kuma-metrics-panel > summary { display:flex; align-items:center; gap:9px; padding:10px 12px; cursor:pointer; list-style-position:inside; }
+.kuma-summary-title { font-weight:700; color:#3730a3; }
+.kuma-metrics-panel > summary .muted { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; }
+.kuma-metrics-body { padding:0 12px 11px; }
+.kuma-metrics-form { display:grid; grid-template-columns:minmax(260px,1.4fr) minmax(220px,1fr) 120px auto 112px; gap:9px; align-items:end; }
+.kuma-metrics-form > div { min-width:0; }
+.kuma-metrics-form label:not(.kuma-enabled) { display:block; margin-bottom:5px; color:var(--text-muted); font-size:11px; font-weight:650; }
+.kuma-metrics-form input,.kuma-metrics-form select { width:100%; min-width:0; }
+.kuma-enabled { display:flex; align-items:center; gap:6px; min-height:34px; white-space:nowrap; font-size:12px; }
+.kuma-enabled input { width:auto; }
+.kuma-metrics-form button { min-height:34px; justify-content:center; }
+.kuma-metrics-body > p { margin:8px 0 0; font-size:11px; }
+.kuma-monitor-row { display:flex; align-items:center; gap:7px; min-width:0; }
+.kuma-monitor-row > small { color:var(--text-muted); white-space:nowrap; }
+.kuma-monitor-select { width:min(360px, 100%); height:28px; padding:3px 7px; font-size:11px; }
+.kuma-state { font-size:11px; }
 .aws-failure-modal .modal-header { align-items:flex-start; gap:12px; }
 .aws-failure-modal .modal-header p { margin:4px 0 0; font-size:12px; }
 .aws-manual-failure-note { display:grid; gap:5px; padding:11px 12px; border:1px solid #fed7aa; border-radius:8px; background:#fff7ed; color:#9a3412; font-size:12px; line-height:1.55; }
@@ -2299,12 +2316,20 @@ td.empty-state::before { display: inline-block; vertical-align: middle; margin: 
 .cdn-troubleshoot strong { color: var(--text); }
 
 @media (max-width: 900px) {
+  .kuma-metrics-form { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .kuma-metrics-form > div:first-child { grid-column:1/-1; }
   .cdn-flow { grid-template-columns: 1fr; }
   .cdn-flow > b { transform: rotate(90deg); text-align: center; line-height: 10px; }
   .guide-field-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .guide-validation-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 600px) {
+  .kuma-metrics-panel > summary { align-items:flex-start; flex-wrap:wrap; }
+  .kuma-metrics-panel > summary .muted { width:100%; white-space:normal; }
+  .kuma-metrics-form { grid-template-columns:1fr; }
+  .kuma-metrics-form > div:first-child { grid-column:auto; }
+  .kuma-monitor-row { display:grid; grid-template-columns:auto 1fr; }
+  .kuma-monitor-select { grid-column:1/-1; width:100%; }
   .cdn-guide-card { padding: 12px; }
   .cdn-guide-heading { display: grid; gap: 8px; }
   .guide-time { justify-self: start; }

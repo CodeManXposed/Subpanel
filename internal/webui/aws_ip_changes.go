@@ -14,8 +14,148 @@ import (
 
 	"github.com/huabanmao168/SubPanel/internal/blacklist"
 	"github.com/huabanmao168/SubPanel/internal/dnswatch"
+	"github.com/huabanmao168/SubPanel/internal/kumawatch"
 	"github.com/huabanmao168/SubPanel/internal/store"
 )
+
+func (s *Server) apiKumaMetrics(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		endpoint, _ := s.st.GetMeta(kumawatch.MetaURL)
+		enabled, _ := s.st.GetMeta(kumawatch.MetaEnabled)
+		intervalRaw, _ := s.st.GetMeta(kumawatch.MetaInterval)
+		apiKey, _ := s.st.GetMeta(kumawatch.MetaAPIKey)
+		lastCheckedRaw, _ := s.st.GetMeta("kuma_metrics_last_checked_ts")
+		lastError, _ := s.st.GetMeta("kuma_metrics_last_error")
+		interval, _ := strconv.Atoi(intervalRaw)
+		if interval < 15 {
+			interval = 30
+		}
+		lastChecked, _ := strconv.ParseInt(lastCheckedRaw, 10, 64)
+		bindings, err := s.st.ListKumaBindings(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"url": endpoint, "enabled": enabled == "true",
+			"api_key_configured": apiKey != "", "interval_seconds": interval, "last_checked_ts": lastChecked,
+			"last_error": lastError, "bindings": bindings})
+	case http.MethodPost:
+		var body struct {
+			URL      string `json:"url"`
+			APIKey   string `json:"api_key"`
+			Enabled  bool   `json:"enabled"`
+			Interval int    `json:"interval_seconds"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "bad json"})
+			return
+		}
+		body.URL = strings.TrimSpace(body.URL)
+		body.APIKey = strings.TrimSpace(body.APIKey)
+		if body.Interval == 0 {
+			body.Interval = 30
+		}
+		if body.Interval < 15 || body.Interval > 300 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "interval_seconds must be between 15 and 300"})
+			return
+		}
+		key := body.APIKey
+		if key == "" {
+			key, _ = s.st.GetMeta(kumawatch.MetaAPIKey)
+		}
+		var monitors []kumawatch.Monitor
+		if body.Enabled {
+			ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+			defer cancel()
+			var err error
+			monitors, err = (kumawatch.Client{}).Fetch(ctx, body.URL, key)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
+		}
+		if err := s.st.SetMeta(kumawatch.MetaURL, body.URL); err != nil {
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+			return
+		}
+		if body.APIKey != "" {
+			if err := s.st.SetMeta(kumawatch.MetaAPIKey, body.APIKey); err != nil {
+				writeJSON(w, 500, map[string]any{"error": err.Error()})
+				return
+			}
+		}
+		_ = s.st.SetMeta(kumawatch.MetaEnabled, strconv.FormatBool(body.Enabled))
+		_ = s.st.SetMeta(kumawatch.MetaInterval, strconv.Itoa(body.Interval))
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "monitor_count": len(monitors)})
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+	}
+}
+
+func (s *Server) apiKumaMetricsMonitors(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	endpoint, _ := s.st.GetMeta(kumawatch.MetaURL)
+	key, _ := s.st.GetMeta(kumawatch.MetaAPIKey)
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	monitors, err := (kumawatch.Client{}).Fetch(ctx, endpoint, key)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, monitors)
+}
+
+func (s *Server) apiKumaMetricsBind(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var body struct {
+		WatcherID  int64  `json:"watcher_id"`
+		MonitorKey string `json:"monitor_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.WatcherID <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "valid watcher_id required"})
+		return
+	}
+	if body.MonitorKey == "" {
+		if err := s.st.DeleteKumaBinding(r.Context(), body.WatcherID); err != nil {
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
+	endpoint, _ := s.st.GetMeta(kumawatch.MetaURL)
+	key, _ := s.st.GetMeta(kumawatch.MetaAPIKey)
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	monitors, err := (kumawatch.Client{}).Fetch(ctx, endpoint, key)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+	for _, monitor := range monitors {
+		if monitor.Key != body.MonitorKey {
+			continue
+		}
+		err = s.st.UpsertKumaBinding(r.Context(), store.KumaMonitorBinding{WatcherID: body.WatcherID,
+			MonitorKey: monitor.Key, MonitorID: monitor.ID, MonitorName: monitor.Name,
+			MonitorHostname: monitor.Hostname, MonitorPort: monitor.Port})
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
+	writeJSON(w, http.StatusBadRequest, map[string]any{"error": "monitor is no longer present in /metrics"})
+}
 
 // apiAWSFailureReport 接收 AWS 自动换 IP 脚本的大陆 TCP 首次失联信号。
 // 该时间只作为后续 DNS 变化快照的精准锚点，不会单独制造换 IP 记录。

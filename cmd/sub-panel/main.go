@@ -29,6 +29,7 @@ import (
 	"github.com/huabanmao168/SubPanel/internal/dnswatch"
 	"github.com/huabanmao168/SubPanel/internal/faker"
 	"github.com/huabanmao168/SubPanel/internal/geoip"
+	"github.com/huabanmao168/SubPanel/internal/kumawatch"
 	"github.com/huabanmao168/SubPanel/internal/proxy"
 	"github.com/huabanmao168/SubPanel/internal/rules"
 	"github.com/huabanmao168/SubPanel/internal/slidingwin"
@@ -37,7 +38,7 @@ import (
 	"github.com/huabanmao168/SubPanel/internal/webui"
 )
 
-var Version = "0.1.99"
+var Version = "0.2.0"
 
 func main() {
 	if len(os.Args) >= 2 {
@@ -202,6 +203,7 @@ func main() {
 	ctxFetch, cancelFetch := context.WithCancel(context.Background())
 	cloudFetcher.RunPeriodic(ctxFetch, 7*24*time.Hour)
 	dnswatch.New(st, logger, 30*time.Second).Run(ctxFetch)
+	kumawatch.New(st, logger).Run(ctxFetch)
 
 	// 动态规则(IP 白名单)
 	rulesMgr := rules.NewManager(st)

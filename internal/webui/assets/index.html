@@ -614,6 +614,23 @@
             </div>
             <button class="warning" id="awsManualFailureBtn">手动记录被墙</button>
           </div>
+          <details class="kuma-metrics-panel" id="kumaMetricsPanel">
+            <summary>
+              <span class="kuma-summary-title">Uptime Kuma · /metrics</span>
+              <span class="pill" id="kumaMetricsStatus">未配置</span>
+              <span class="muted" id="kumaMetricsSummary">绑定 Kuma TCP 状态，自动记录 UP → DOWN 的首次失联时间</span>
+            </summary>
+            <div class="kuma-metrics-body">
+              <div class="kuma-metrics-form">
+                <div><label>Metrics 地址</label><input id="kumaMetricsURL" class="mono" placeholder="https://kuma.example.com/metrics"></div>
+                <div><label>Prometheus API Key</label><input id="kumaMetricsKey" type="password" autocomplete="new-password" placeholder="留空表示保持现有密钥"></div>
+                <div><label>读取间隔</label><select id="kumaMetricsInterval"><option value="15">15 秒</option><option value="30" selected>30 秒</option><option value="60">60 秒</option><option value="120">2 分钟</option></select></div>
+                <label class="kuma-enabled"><input id="kumaMetricsEnabled" type="checkbox"><span>启用读取</span></label>
+                <button class="primary" id="kumaMetricsSave">测试并保存</button>
+              </div>
+              <p class="muted">密钥只保存在 Subpanel 数据库，页面不会回显。每个入口必须在下方卡片中绑定完整监控指纹，避免 Kuma 改名残留指标造成误报。</p>
+            </div>
+          </details>
           <div class="aws-watcher-form">
             <div class="aws-watcher-dns-field">
               <label>入口 DNS</label>

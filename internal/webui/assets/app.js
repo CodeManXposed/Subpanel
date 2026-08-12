@@ -2413,6 +2413,27 @@ function refreshAWSAliveClocks() {
 setInterval(refreshAWSAliveClocks, 1000);
 
 let awsWatcherRows = [];
+let kumaMetricsConfig = {};
+let kumaMetricMonitors = [];
+
+function kumaStatusLabel(status) {
+  return ({ 0:'DOWN', 1:'UP', 2:'PENDING', 3:'维护中' })[Number(status)] || '等待基线';
+}
+
+function renderKumaConfig() {
+  $('#kumaMetricsURL').value = kumaMetricsConfig.url || '';
+  $('#kumaMetricsKey').value = '';
+  $('#kumaMetricsKey').placeholder = kumaMetricsConfig.api_key_configured ? '已配置 · 留空保持现有密钥' : '输入 Prometheus API Key';
+  $('#kumaMetricsEnabled').checked = Boolean(kumaMetricsConfig.enabled);
+  $('#kumaMetricsInterval').value = String(kumaMetricsConfig.interval_seconds || 30);
+  const status = $('#kumaMetricsStatus');
+  status.textContent = !kumaMetricsConfig.url ? '未配置' : (kumaMetricsConfig.last_error ? '读取失败' : (kumaMetricsConfig.enabled ? '读取中' : '已停用'));
+  status.className = `pill ${kumaMetricsConfig.last_error ? 'deny' : (kumaMetricsConfig.enabled ? 'pass' : '')}`;
+  const summary = $('#kumaMetricsSummary');
+  if (kumaMetricsConfig.last_error) summary.textContent = kumaMetricsConfig.last_error;
+  else if (kumaMetricsConfig.last_checked_ts) summary.textContent = `最近读取 ${fmtTime(new Date(kumaMetricsConfig.last_checked_ts))} · ${kumaMetricMonitors.length} 条监控指标`;
+  else summary.textContent = '绑定 Kuma TCP 状态，自动记录 UP → DOWN 的首次失联时间';
+}
 
 function localDateTimeValue(ts = Date.now()) {
   const d = new Date(ts);
@@ -2453,10 +2474,15 @@ function closeAWSFailureModal() {
 }
 
 async function loadAWSIPChanges() {
-  const [watchers, rows, tenants] = await Promise.all([
-    api('/api/dns-watchers'), api('/api/aws-ip-changes'), api('/api/tenants'),
+  const [watchers, rows, tenants, kumaConfig] = await Promise.all([
+    api('/api/dns-watchers'), api('/api/aws-ip-changes'), api('/api/tenants'), api('/api/kuma-metrics'),
   ]);
   awsWatcherRows = Array.isArray(watchers) ? watchers : [];
+  kumaMetricsConfig = kumaConfig || {};
+  kumaMetricMonitors = kumaMetricsConfig.url && kumaMetricsConfig.api_key_configured
+    ? ((await api('/api/kuma-metrics/monitors')) || []) : [];
+  renderKumaConfig();
+  const kumaBindings = new Map((kumaMetricsConfig.bindings || []).map(binding => [Number(binding.watcher_id), binding]));
 
   const tenantSel = $('#awsWatcherTenant');
   const selectedTenant = tenantSel.value;
@@ -2481,6 +2507,12 @@ async function loadAWSIPChanges() {
       const historyHTML = history.length
         ? `<details class="aws-history-fold"><summary><span>历史 IP</span><strong>${history.length} 条</strong><span class="mono">最近 ${escapeHTML(history[0].ip)}</span><span>${escapeHTML(fmtAliveSeconds(history[0].alive_seconds))}</span></summary><div class="datatable"><table><thead><tr><th>IP 地址</th><th>开始</th><th>结束</th><th>存活时间</th></tr></thead><tbody>${history.map(h => `<tr><td class="mono">${escapeHTML(h.ip)}</td><td class="mono">${escapeHTML(fmtTime(new Date(h.started_ts)))}</td><td class="mono">${escapeHTML(fmtTime(new Date(h.ended_ts)))}</td><td><strong>${escapeHTML(fmtAliveSeconds(h.alive_seconds))}</strong></td></tr>`).join('')}</tbody></table></div></details>`
         : '<div class="aws-no-history">暂无历史 IP</div>';
+      const kumaBinding = kumaBindings.get(Number(watcher.id));
+      const monitorOptions = ['<option value="">不绑定 Kuma</option>'].concat(kumaMetricMonitors.map(monitor => {
+        const selected = kumaBinding?.monitor_key === monitor.key ? ' selected' : '';
+        return `<option value="${escapeHTML(monitor.key)}"${selected}>${escapeHTML(`${monitor.name} · ${monitor.hostname}:${monitor.port} · ${kumaStatusLabel(monitor.status)}`)}</option>`;
+      })).join('');
+      const kumaStateClass = Number(kumaBinding?.last_status) === 0 ? 'deny' : (Number(kumaBinding?.last_status) === 1 ? 'pass' : '');
       card.innerHTML = `
         <div class="aws-watcher-top">
           <div class="aws-watcher-identity">
@@ -2501,6 +2533,12 @@ async function loadAWSIPChanges() {
           <span><small>存活</small><strong class="aws-alive-clock" data-started="${watcher.last_changed_ts || 0}">${fmtAliveSeconds(watcher.alive_seconds || 0)}</strong></span>
           <span><small>检查</small><b class="mono">${watcher.last_checked_ts ? escapeHTML(fmtTime(new Date(watcher.last_checked_ts))) : '-'}</b></span>
           ${watcher.pending_failure_ts ? `<span><small>首次失联</small><strong class="aws-failure-time">${escapeHTML(fmtTime(new Date(watcher.pending_failure_ts)))}</strong></span>` : ''}
+        </div>
+        <div class="kuma-monitor-row">
+          <small>Kuma 监控</small>
+          <select class="kuma-monitor-select" data-id="${watcher.id}" title="绑定完整指标指纹，只有 UP → DOWN 才记录失联">${monitorOptions}</select>
+          ${kumaBinding ? `<span class="pill kuma-state ${kumaStateClass}">${escapeHTML(kumaStatusLabel(kumaBinding.last_status))}</span>${kumaBinding.last_checked_ts ? `<small>${escapeHTML(fmtTime(new Date(kumaBinding.last_checked_ts)))}</small>` : ''}` : '<span class="pill kuma-state">未绑定</span>'}
+          ${kumaBinding?.last_error ? `<small class="text-danger">${escapeHTML(kumaBinding.last_error)}</small>` : ''}
         </div>
         ${watcher.last_error ? `<div class="aws-watcher-error">${escapeHTML(watcher.last_error)}</div>` : ''}
         ${historyHTML}`;
@@ -2686,6 +2724,31 @@ $('#awsWatcherAddBtn').addEventListener('click', async () => {
   loadAWSIPChanges();
 });
 
+$('#kumaMetricsSave').addEventListener('click', async () => {
+  const button = $('#kumaMetricsSave');
+  const body = {
+    url: $('#kumaMetricsURL').value.trim(),
+    api_key: $('#kumaMetricsKey').value.trim(),
+    enabled: $('#kumaMetricsEnabled').checked,
+    interval_seconds: Number($('#kumaMetricsInterval').value || 30),
+  };
+  if (body.enabled && (!body.url || (!body.api_key && !kumaMetricsConfig.api_key_configured))) {
+    alert('启用前请填写 Metrics 地址和 API Key');
+    return;
+  }
+  button.disabled = true;
+  button.textContent = '正在测试…';
+  const r = await apiPost('/api/kuma-metrics', body);
+  button.disabled = false;
+  button.textContent = '测试并保存';
+  if (!r || r.error) {
+    alert('Kuma 接入失败：' + ((r && r.error) || '未知错误'));
+    return;
+  }
+  toast(`Kuma 配置已保存，读取到 ${r.monitor_count || 0} 条监控`, 'success');
+  loadAWSIPChanges();
+});
+
 $('#awsChangeRefreshBtn').addEventListener('click', () => loadAWSIPChanges());
 $('#awsChangeDNSFilter').addEventListener('change', () => loadAWSIPChanges());
 $('#awsManualFailureBtn').addEventListener('click', () => openAWSFailureModal());
@@ -2718,6 +2781,20 @@ $('#awsFailureSave').addEventListener('click', async () => {
 });
 
 $('#awsWatcherList').addEventListener('change', async e => {
+  const kumaSelect = e.target.closest('.kuma-monitor-select');
+  if (kumaSelect) {
+    kumaSelect.disabled = true;
+    const r = await apiPost('/api/kuma-metrics/bind', { watcher_id: Number(kumaSelect.dataset.id), monitor_key: kumaSelect.value });
+    kumaSelect.disabled = false;
+    if (!r || r.error) {
+      alert('Kuma 绑定失败：' + ((r && r.error) || '未知错误'));
+      loadAWSIPChanges();
+      return;
+    }
+    toast(kumaSelect.value ? 'Kuma 监控已绑定，首次读取只建立状态基线' : '已取消 Kuma 绑定', 'success');
+    loadAWSIPChanges();
+    return;
+  }
   const input = e.target.closest('.aws-watcher-lookback');
   if (!input) return;
   const minutes = Math.floor(Number(input.value));

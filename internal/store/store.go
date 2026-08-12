@@ -84,6 +84,19 @@ CREATE TABLE IF NOT EXISTS meta (
     v TEXT
 );
 
+CREATE TABLE IF NOT EXISTS kuma_monitor_bindings (
+    watcher_id      INTEGER PRIMARY KEY,
+    monitor_key     TEXT NOT NULL,
+    monitor_id      TEXT NOT NULL,
+    monitor_name    TEXT NOT NULL,
+    monitor_hostname TEXT NOT NULL,
+    monitor_port    TEXT NOT NULL DEFAULT '',
+    last_status     INTEGER NOT NULL DEFAULT -1,
+    last_checked_ts INTEGER NOT NULL DEFAULT 0,
+    last_error      TEXT NOT NULL DEFAULT '',
+    updated_ts      INTEGER NOT NULL
+);
+
 -- cloud_cidrs 表已废弃(v2 起改用 ip2region xdb),老库的 DROP 见 NewStore 迁移
 
 CREATE TABLE IF NOT EXISTS ua_rules (
@@ -382,6 +395,11 @@ func Open(path string, flushEvery time.Duration, flushSize int) (*Store, error) 
 	_, _ = db.Exec("ALTER TABLE dns_watchers ADD COLUMN note TEXT NOT NULL DEFAULT ''")
 	_, _ = db.Exec("ALTER TABLE dns_watchers ADD COLUMN pending_failure_ts INTEGER NOT NULL DEFAULT 0")
 	_, _ = db.Exec("ALTER TABLE dns_watchers ADD COLUMN pending_failure_ip TEXT NOT NULL DEFAULT ''")
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS kuma_monitor_bindings (
+		watcher_id INTEGER PRIMARY KEY,monitor_key TEXT NOT NULL,monitor_id TEXT NOT NULL,
+		monitor_name TEXT NOT NULL,monitor_hostname TEXT NOT NULL,monitor_port TEXT NOT NULL DEFAULT '',
+		last_status INTEGER NOT NULL DEFAULT -1,last_checked_ts INTEGER NOT NULL DEFAULT 0,
+		last_error TEXT NOT NULL DEFAULT '',updated_ts INTEGER NOT NULL)`)
 	_, _ = db.Exec("ALTER TABLE aws_ip_changes ADD COLUMN failure_ts INTEGER NOT NULL DEFAULT 0")
 	// 兼容备注同步功能上线前已经填写的追踪备注，启动时回填对应历史记录。
 	_, _ = db.Exec(`UPDATE aws_ip_changes SET note=(
@@ -2235,6 +2253,68 @@ type DNSIPHistory struct {
 	AliveSec  int64  `json:"alive_seconds"`
 }
 
+type KumaMonitorBinding struct {
+	WatcherID       int64  `json:"watcher_id"`
+	MonitorKey      string `json:"monitor_key"`
+	MonitorID       string `json:"monitor_id"`
+	MonitorName     string `json:"monitor_name"`
+	MonitorHostname string `json:"monitor_hostname"`
+	MonitorPort     string `json:"monitor_port"`
+	LastStatus      int    `json:"last_status"`
+	LastCheckedTS   int64  `json:"last_checked_ts"`
+	LastError       string `json:"last_error"`
+	UpdatedTS       int64  `json:"updated_ts"`
+}
+
+func (s *Store) UpsertKumaBinding(ctx context.Context, b KumaMonitorBinding) error {
+	if b.WatcherID <= 0 || strings.TrimSpace(b.MonitorKey) == "" {
+		return fmt.Errorf("watcher and monitor are required")
+	}
+	_, err := s.GetDNSWatcher(ctx, b.WatcherID)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO kuma_monitor_bindings
+		(watcher_id,monitor_key,monitor_id,monitor_name,monitor_hostname,monitor_port,last_status,last_checked_ts,last_error,updated_ts)
+		VALUES (?,?,?,?,?,?,-1,0,'',?) ON CONFLICT(watcher_id) DO UPDATE SET
+		monitor_key=excluded.monitor_key,monitor_id=excluded.monitor_id,monitor_name=excluded.monitor_name,
+		monitor_hostname=excluded.monitor_hostname,monitor_port=excluded.monitor_port,last_status=-1,
+		last_checked_ts=0,last_error='',updated_ts=excluded.updated_ts`, b.WatcherID, b.MonitorKey,
+		b.MonitorID, b.MonitorName, b.MonitorHostname, b.MonitorPort, time.Now().UnixMilli())
+	return err
+}
+
+func (s *Store) DeleteKumaBinding(ctx context.Context, watcherID int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM kuma_monitor_bindings WHERE watcher_id=?`, watcherID)
+	return err
+}
+
+func (s *Store) ListKumaBindings(ctx context.Context) ([]KumaMonitorBinding, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT watcher_id,monitor_key,monitor_id,monitor_name,
+		monitor_hostname,monitor_port,last_status,last_checked_ts,last_error,updated_ts
+		FROM kuma_monitor_bindings ORDER BY watcher_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]KumaMonitorBinding, 0)
+	for rows.Next() {
+		var b KumaMonitorBinding
+		if err := rows.Scan(&b.WatcherID, &b.MonitorKey, &b.MonitorID, &b.MonitorName,
+			&b.MonitorHostname, &b.MonitorPort, &b.LastStatus, &b.LastCheckedTS, &b.LastError, &b.UpdatedTS); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UpdateKumaBindingState(ctx context.Context, watcherID int64, status int, checkedTS int64, lastError string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE kuma_monitor_bindings SET last_status=?,last_checked_ts=?,last_error=?,updated_ts=? WHERE watcher_id=?`,
+		status, checkedTS, lastError, time.Now().UnixMilli(), watcherID)
+	return err
+}
+
 func (s *Store) AddDNSWatcher(ctx context.Context, w DNSWatcher) (*DNSWatcher, error) {
 	if w.DNSName == "" {
 		return nil, fmt.Errorf("dns_name is required")
@@ -2488,8 +2568,18 @@ func (s *Store) UpdateDNSWatcherNote(ctx context.Context, id int64, note string)
 }
 
 func (s *Store) DeleteDNSWatcher(ctx context.Context, id int64) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM dns_watchers WHERE id=?`, id)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM kuma_monitor_bindings WHERE watcher_id=?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM dns_watchers WHERE id=?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // PurgeEvents 清空请求事件 + 异常事件。tenant 为空=全部租户;否则只清该租户。
