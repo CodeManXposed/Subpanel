@@ -28,6 +28,7 @@ type Manager struct {
 	ipWhitelistSingle map[string]struct{}
 	ipWhitelistNets   []*net.IPNet
 	uaWhitelist       []*regexp.Regexp
+	uaFullAllow       []*regexp.Regexp
 }
 
 func NewManager(st *store.Store) *Manager {
@@ -73,6 +74,7 @@ func (m *Manager) Reload() error {
 		return err
 	}
 	uaWhitelist := make([]*regexp.Regexp, 0, len(uaEntries))
+	uaFullAllow := make([]*regexp.Regexp, 0)
 	for _, e := range uaEntries {
 		if p := strings.TrimSpace(e.Pattern); p != "" {
 			re, compileErr := compileUARegex(p)
@@ -80,6 +82,9 @@ func (m *Manager) Reload() error {
 				return fmt.Errorf("invalid UA whitelist regex %q: %w", p, compileErr)
 			}
 			uaWhitelist = append(uaWhitelist, re)
+			if e.FullAllow {
+				uaFullAllow = append(uaFullAllow, re)
+			}
 		}
 	}
 
@@ -87,8 +92,26 @@ func (m *Manager) Reload() error {
 	m.ipWhitelistSingle = singles
 	m.ipWhitelistNets = nets
 	m.uaWhitelist = uaWhitelist
+	m.uaFullAllow = uaFullAllow
 	m.mu.Unlock()
 	return nil
+}
+
+// UAFullAllowed 命中管理员逐条开启的全放行 UA。该能力与普通 UA 白名单
+// 分离，避免升级后把已有白名单意外提升为绕过全部检测。
+func (m *Manager) UAFullAllowed(ua string) bool {
+	ua = strings.TrimSpace(ua)
+	if ua == "" {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, pattern := range m.uaFullAllow {
+		if pattern.MatchString(ua) {
+			return true
+		}
+	}
+	return false
 }
 
 func compileUARegex(pattern string) (*regexp.Regexp, error) {
@@ -159,7 +182,7 @@ func (m *Manager) DeleteIPWhitelist(id int64) error {
 	return m.Reload()
 }
 
-func (m *Manager) AddUAWhitelist(pattern, note string) error {
+func (m *Manager) AddUAWhitelist(pattern, note string, fullAllow ...bool) error {
 	p := strings.TrimSpace(pattern)
 	if p == "" {
 		return &simpleErr{"UA regex cannot be empty"}
@@ -167,7 +190,15 @@ func (m *Manager) AddUAWhitelist(pattern, note string) error {
 	if _, err := compileUARegex(p); err != nil {
 		return fmt.Errorf("UA 正则表达式无效: %w", err)
 	}
-	if err := m.st.AddUARule(store.UARule{Kind: "whitelist", Pattern: p, Note: strings.TrimSpace(note)}); err != nil {
+	allowAll := len(fullAllow) > 0 && fullAllow[0]
+	if err := m.st.AddUARule(store.UARule{Kind: "whitelist", Pattern: p, Note: strings.TrimSpace(note), FullAllow: allowAll}); err != nil {
+		return err
+	}
+	return m.Reload()
+}
+
+func (m *Manager) SetUAWhitelistFullAllow(id int64, enabled bool) error {
+	if err := m.st.SetUARuleFullAllow(id, enabled); err != nil {
 		return err
 	}
 	return m.Reload()

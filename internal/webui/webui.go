@@ -198,6 +198,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/api/ua-whitelist", s.auth(http.HandlerFunc(s.apiUAWhitelistList)))
 	mux.Handle("/api/ua-whitelist/add", s.auth(http.HandlerFunc(s.apiUAWhitelistAdd)))
 	mux.Handle("/api/ua-whitelist/remove", s.auth(http.HandlerFunc(s.apiUAWhitelistRemove)))
+	mux.Handle("/api/ua-whitelist/full-allow", s.auth(http.HandlerFunc(s.apiUAWhitelistFullAllow)))
 	mux.Handle("/api/config", s.auth(http.HandlerFunc(s.apiConfig)))
 	mux.Handle("/api/notifier", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 410, map[string]any{"error": "notifier removed"})

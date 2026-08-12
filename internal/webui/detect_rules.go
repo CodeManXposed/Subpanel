@@ -13,6 +13,7 @@
 package webui
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -296,10 +297,11 @@ func (s *Server) apiUAWhitelistList(w http.ResponseWriter, r *http.Request) {
 		Pattern   string `json:"pattern"`
 		Note      string `json:"note"`
 		CreatedTS int64  `json:"created_ts"`
+		FullAllow bool   `json:"full_allow"`
 	}
 	out := make([]item, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, item{ID: row.ID, Pattern: row.Pattern, Note: row.Note, CreatedTS: row.CreatedTS.Unix()})
+		out = append(out, item{ID: row.ID, Pattern: row.Pattern, Note: row.Note, CreatedTS: row.CreatedTS.Unix(), FullAllow: row.FullAllow})
 	}
 	writeJSON(w, 200, out)
 }
@@ -310,8 +312,9 @@ func (s *Server) apiUAWhitelistAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Pattern string `json:"pattern"`
-		Note    string `json:"note"`
+		Pattern   string `json:"pattern"`
+		Note      string `json:"note"`
+		FullAllow bool   `json:"full_allow"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
@@ -321,11 +324,39 @@ func (s *Server) apiUAWhitelistAdd(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 503, map[string]any{"error": "规则管理器未就绪"})
 		return
 	}
-	if err := s.rules.AddUAWhitelist(body.Pattern, body.Note); err != nil {
+	if err := s.rules.AddUAWhitelist(body.Pattern, body.Note, body.FullAllow); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+func (s *Server) apiUAWhitelistFullAllow(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, 405, map[string]any{"error": "POST only"})
+		return
+	}
+	var body struct {
+		ID      int64 `json:"id"`
+		Enabled bool  `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ID <= 0 {
+		writeJSON(w, 400, map[string]any{"error": "valid id required"})
+		return
+	}
+	if s.rules == nil {
+		writeJSON(w, 503, map[string]any{"error": "规则管理器未就绪"})
+		return
+	}
+	if err := s.rules.SetUAWhitelistFullAllow(body.ID, body.Enabled); err != nil {
+		if err == sql.ErrNoRows {
+			writeJSON(w, 404, map[string]any{"error": "UA 白名单不存在"})
+			return
+		}
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "full_allow": body.Enabled})
 }
 
 func (s *Server) apiUAWhitelistRemove(w http.ResponseWriter, r *http.Request) {

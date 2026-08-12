@@ -296,6 +296,42 @@ func TestE2EIPWhitelistDoesNotOverrideIPBlacklist(t *testing.T) {
 	}
 }
 
+func TestE2EUAFullAllowBypassesAllBusinessDetection(t *testing.T) {
+	gw, _, _, bans, cleanup := newE2E(t, false,
+		config.Rule{Name: "instant_ip_limit", Action: "rate_limit", When: config.When{IPFreq: &config.Cond{Window: config.Duration(time.Minute), GTE: 1}}},
+	)
+	defer cleanup()
+	gw.SetUAFullAllow(func(ua string) bool { return ua == "TrustedFetcher/1.0" })
+	if err := bans.AddIPWithAction("7.7.7.7", "deny", "manual block", time.Hour, nil, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := bans.AddToken("blocked-token", "deny", "manual token block", time.Hour, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 3; i++ {
+		w := httptest.NewRecorder()
+		gw.ServeHTTP(w, mkSubReq("sub.example.com", "TrustedFetcher/1.0", "blocked-token", "clash", "7.7.7.7"))
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "REAL-SUB-FROM-V2BOARD") {
+			t.Fatalf("full-allow request %d did not reach upstream: %d %q", i, w.Code, w.Body.String())
+		}
+	}
+
+	blocked := httptest.NewRecorder()
+	gw.ServeHTTP(blocked, mkSubReq("sub.example.com", "OtherClient/1.0", "blocked-token", "clash", "7.7.7.7"))
+	if blocked.Code != http.StatusForbidden {
+		t.Fatalf("unmatched UA bypassed blacklist: %d %q", blocked.Code, blocked.Body.String())
+	}
+
+	badPath := httptest.NewRecorder()
+	badReq := httptest.NewRequest(http.MethodGet, "http://sub.example.com/not-sub", nil)
+	badReq.Header.Set("User-Agent", "TrustedFetcher/1.0")
+	gw.ServeHTTP(badPath, badReq)
+	if badPath.Code != http.StatusNotFound {
+		t.Fatalf("full allow bypassed path routing: %d", badPath.Code)
+	}
+}
+
 func TestUpstreamGuardRejectsWithoutQueueing(t *testing.T) {
 	g := newUpstreamGuard(config.RateLimitCfg{
 		GlobalRPS: 100, GlobalBurst: 100, UpstreamMaxConcurrent: 1, PerIPMaxConcurrent: 1,

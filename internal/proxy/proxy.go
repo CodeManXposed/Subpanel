@@ -61,6 +61,9 @@ type Gateway struct {
 
 	// 可选:IP 白名单查询。命中豁免全局 IP 分类拦截和 detector 网络条件。
 	ipWhitelisted func(ip string) bool
+	// uaFullAllowed 是逐条开启的 UA 全放行。命中后跳过所有业务风控，
+	// 但仍保留上游并发硬保护，避免可信客户端自身异常拖垮源站。
+	uaFullAllowed func(ua string) bool
 
 	// tenants 快照:读多写少,Reload 时原子替换整个 snap 指针,
 	// 读路径只取一次指针,避免遍历期间被改。
@@ -99,6 +102,8 @@ func (g *Gateway) SetPassthroughAll(b bool) { g.passthroughAll.Store(b) }
 func (g *Gateway) SetIPWhitelist(fn func(ip string) bool) {
 	g.ipWhitelisted = fn
 }
+
+func (g *Gateway) SetUAFullAllow(fn func(ua string) bool) { g.uaFullAllowed = fn }
 
 // geoFor 包装 geoLookup,nil-safe。
 func (g *Gateway) geoFor(ip string) NetworkInfo {
@@ -265,6 +270,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tokenHash := g.hasher.Hash(pr.Token)
+
+	// 2.4) UA 白名单逐条全放行：发生在 Token/IP 黑名单、全局网络分类、
+	// detector Observe/Evaluate 之前，不污染频率窗口。路径和租户仍须合法；
+	// transparentProxyWithLog 内的上游并发硬保护继续作为服务安全边界。
+	if g.uaFullAllowed != nil && g.uaFullAllowed(pr.UA) {
+		g.transparentProxyWithLog(w, r, pr, tokenHash, []string{"ua_whitelist_full_allow"}, "pass", start)
+		return
+	}
 
 	// 2.5) Token 黑名单优先于 IP 白名单：明确拉黑的账户不能借白名单 IP 绕过。
 	if banned, action, reason := g.bans.CheckToken(tokenHash); banned {

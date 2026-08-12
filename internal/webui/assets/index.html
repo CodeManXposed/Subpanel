@@ -410,17 +410,18 @@
           <div class="card-header">
             <div>
               <h3>UA 白名单</h3>
-              <p class="muted" style="margin:4px 0 0">使用 Go RE2 正则表达式并忽略大小写，仅豁免“非常见 UA”规则，不会绕过其他 IP、频率或云厂商规则。</p>
+              <p class="muted" style="margin:4px 0 0">默认仅豁免“非常见 UA”。可逐条开启“全放行”，命中后跳过 IP、Token、频率、云厂商及黑名单检测，直接访问源站。</p>
             </div>
           </div>
           <div class="filter-bar">
             <input id="uaWLPattern" placeholder="正则，如 ^MyClient/\\d+\\.\\d+" style="min-width:320px">
             <input id="uaWLNote" placeholder="备注">
+            <label class="ua-full-allow-create"><input id="uaWLFullAllow" type="checkbox"><span>添加后全放行</span></label>
             <button class="primary" id="uaWLAddBtn">添加白名单</button>
           </div>
           <div class="datatable">
             <table>
-              <thead><tr><th>UA 正则表达式</th><th>备注</th><th>创建时间</th><th></th></tr></thead>
+              <thead><tr><th>UA 正则表达式</th><th>备注</th><th>全放行</th><th>创建时间</th><th></th></tr></thead>
               <tbody id="uaWLTbody"></tbody>
             </table>
           </div>

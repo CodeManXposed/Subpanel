@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS ua_rules (
     kind       TEXT NOT NULL,         -- 'blacklist' | 'whitelist'
     pattern    TEXT NOT NULL,         -- 正则(black) 或 前缀(white)
     note       TEXT,
+    full_allow INTEGER NOT NULL DEFAULT 0,
     created_ts INTEGER NOT NULL,
     UNIQUE(kind, pattern)
 );
@@ -375,6 +376,8 @@ func Open(path string, flushEvery time.Duration, flushSize int) (*Store, error) 
 	_, _ = db.Exec("ALTER TABLE detect_rules ADD COLUMN action TEXT NOT NULL DEFAULT 'fake'")
 	// Token 黑名单处置动作。旧封禁记录保持 fake，升级不改变现有行为。
 	_, _ = db.Exec("ALTER TABLE bans ADD COLUMN action TEXT NOT NULL DEFAULT 'fake'")
+	// UA 白名单默认只豁免非常见 UA；管理员可逐条开启全放行。
+	_, _ = db.Exec("ALTER TABLE ua_rules ADD COLUMN full_allow INTEGER NOT NULL DEFAULT 0")
 	// “已处理用户”升级为 Token 黑名单后，将旧记录一次性补为永久投毒。
 	// 新流程写入 token_block:* 备注并同步创建 bans，不参与这次兼容迁移。
 	if _, err := db.Exec(`INSERT INTO bans
@@ -2667,11 +2670,19 @@ func (s *Store) AllMeta() (map[string]string, error) {
 
 // ----- ua_rules -----
 
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
 type UARule struct {
 	ID        int64
 	Kind      string // blacklist|whitelist
 	Pattern   string
 	Note      string
+	FullAllow bool
 	CreatedTS time.Time
 }
 
@@ -2680,9 +2691,21 @@ func (s *Store) AddUARule(r UARule) error {
 		return errors.New("规则类型必须是 blacklist 或 whitelist")
 	}
 	_, err := s.db.Exec(
-		`INSERT INTO ua_rules (kind,pattern,note,created_ts) VALUES (?,?,?,?)
-		 ON CONFLICT(kind,pattern) DO UPDATE SET note=excluded.note`,
-		r.Kind, r.Pattern, r.Note, time.Now().UnixMilli())
+		`INSERT INTO ua_rules (kind,pattern,note,full_allow,created_ts) VALUES (?,?,?,?,?)
+		 ON CONFLICT(kind,pattern) DO UPDATE SET note=excluded.note,full_allow=excluded.full_allow`,
+		r.Kind, r.Pattern, r.Note, boolInt(r.FullAllow), time.Now().UnixMilli())
+	return err
+}
+
+func (s *Store) SetUARuleFullAllow(id int64, enabled bool) error {
+	result, err := s.db.Exec(`UPDATE ua_rules SET full_allow=? WHERE id=? AND kind='whitelist'`, boolInt(enabled), id)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err == nil && n == 0 {
+		return sql.ErrNoRows
+	}
 	return err
 }
 
@@ -2692,7 +2715,7 @@ func (s *Store) DeleteUARule(id int64) error {
 }
 
 func (s *Store) ListUARules(kind string) ([]UARule, error) {
-	q := `SELECT id,kind,pattern,COALESCE(note,''),created_ts FROM ua_rules`
+	q := `SELECT id,kind,pattern,COALESCE(note,''),COALESCE(full_allow,0),created_ts FROM ua_rules`
 	args := []any{}
 	if kind != "" {
 		q += ` WHERE kind=?`
@@ -2708,9 +2731,11 @@ func (s *Store) ListUARules(kind string) ([]UARule, error) {
 	for rows.Next() {
 		var r UARule
 		var ts int64
-		if err := rows.Scan(&r.ID, &r.Kind, &r.Pattern, &r.Note, &ts); err != nil {
+		var fullAllow int
+		if err := rows.Scan(&r.ID, &r.Kind, &r.Pattern, &r.Note, &fullAllow, &ts); err != nil {
 			return nil, err
 		}
+		r.FullAllow = fullAllow != 0
 		r.CreatedTS = time.UnixMilli(ts)
 		out = append(out, r)
 	}

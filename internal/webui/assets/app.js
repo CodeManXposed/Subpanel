@@ -55,6 +55,7 @@ const TAG_PREFIX_CN = {
   'ip_whitelist':   '白名单（旧版放行）',
   'ip_whitelist_auto_ip_rules_exempt': 'IP白名单·豁免自动IP风控',
   'ip_whitelist_multi_token_exempt': '白名单·豁免多Token（旧版）',
+  'ua_whitelist_full_allow': 'UA白名单·全放行',
   'banlist_ip':     'IP 黑名单',
   'banlist_token':  'Token 黑名单',
   'path_not_match': '路径不匹配',
@@ -1534,12 +1535,13 @@ async function loadUAWhitelist() {
   if (!tbody) return;
   tbody.innerHTML = '';
   if (!Array.isArray(list) || !list.length) {
-    tbody.innerHTML = '<tr><td colspan="4" class="empty">暂无自定义 UA 白名单；内置常规订阅客户端无需重复添加</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">暂无自定义 UA 白名单；内置常规订阅客户端无需重复添加</td></tr>';
     return;
   }
   for (const row of list) {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td class="mono">${escapeHtml(row.pattern)}</td><td>${escapeHtml(row.note || '-')}</td><td class="mono">${fmtTs(row.created_ts)}</td><td><button class="danger ua-wl-remove" data-id="${row.id}">删除</button></td>`;
+    tr.className = row.full_allow ? 'ua-full-allow-row' : '';
+    tr.innerHTML = `<td class="mono"><div class="ua-rule-pattern" title="${escapeHtml(row.pattern)}">${escapeHtml(row.pattern)}</div>${row.full_allow ? '<span class="pill orange">绕过全部检测</span>' : ''}</td><td>${escapeHtml(row.note || '-')}</td><td><label class="ua-full-allow-toggle" title="命中该 UA 后跳过全部业务风控，直接访问源站"><input type="checkbox" data-id="${row.id}" ${row.full_allow ? 'checked' : ''}><span>${row.full_allow ? '已开启' : '关闭'}</span></label></td><td class="mono">${fmtTs(row.created_ts)}</td><td><button class="danger ua-wl-remove" data-id="${row.id}">删除</button></td>`;
     tbody.appendChild(tr);
   }
   $$('.ua-wl-remove').forEach(btn => btn.addEventListener('click', async () => {
@@ -1548,15 +1550,29 @@ async function loadUAWhitelist() {
     if (r && r.ok) { toast('已删除', 'success'); loadUAWhitelist(); }
     else toast((r && r.error) || '删除失败', 'error');
   }));
+  $$('.ua-full-allow-toggle input').forEach(input => input.addEventListener('change', async () => {
+    const enabled = input.checked;
+    if (enabled && !confirm('开启后，命中该 UA 的请求将绕过 Token/IP 黑名单、频率、云厂商及其他检测，直接请求源站。确认开启？')) {
+      input.checked = false;
+      return;
+    }
+    input.disabled = true;
+    const r = await apiPost('/api/ua-whitelist/full-allow', { id: Number(input.dataset.id), enabled });
+    if (r && r.ok) { toast(enabled ? '该 UA 已开启全放行' : '已恢复普通 UA 白名单', 'success'); loadUAWhitelist(); }
+    else { input.disabled = false; input.checked = !enabled; toast((r && r.error) || '保存失败', 'error'); }
+  }));
 }
 
 $('#uaWLAddBtn').addEventListener('click', async () => {
   const pattern = $('#uaWLPattern').value.trim();
   if (!pattern) { toast('请输入 UA 正则表达式', 'error'); return; }
-  const r = await apiPost('/api/ua-whitelist/add', { pattern, note: $('#uaWLNote').value.trim() });
+  const fullAllow = $('#uaWLFullAllow').checked;
+  if (fullAllow && !confirm('该规则添加后将立即全放行所有匹配 UA，跳过黑名单和频率检测。确认继续？')) return;
+  const r = await apiPost('/api/ua-whitelist/add', { pattern, note: $('#uaWLNote').value.trim(), full_allow: fullAllow });
   if (r && r.ok) {
     $('#uaWLPattern').value = '';
     $('#uaWLNote').value = '';
+    $('#uaWLFullAllow').checked = false;
     toast('UA 白名单已添加并热生效', 'success');
     loadUAWhitelist();
   } else toast((r && r.error) || '添加失败', 'error');

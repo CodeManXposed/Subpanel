@@ -73,4 +73,23 @@ func TestUAWhitelistCaseInsensitiveRegex(t *testing.T) {
 	if err := m.AddUAWhitelist(`[invalid`, "bad"); err == nil {
 		t.Fatal("invalid regex must be rejected")
 	}
+	if m.UAFullAllowed("myclient/2.0 (ios)") {
+		t.Fatal("ordinary UA whitelist must not become full allow")
+	}
+	rows, err := st.ListUARules("whitelist")
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+	if err := m.SetUAWhitelistFullAllow(rows[0].ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if !m.UAFullAllowed("myclient/2.0 (ios)") || m.UAFullAllowed("Mozilla/5.0") {
+		t.Fatal("full allow regex matching is incorrect")
+	}
+	if err := m.SetUAWhitelistFullAllow(rows[0].ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if m.UAFullAllowed("myclient/2.0 (ios)") {
+		t.Fatal("full allow toggle did not hot reload")
+	}
 }

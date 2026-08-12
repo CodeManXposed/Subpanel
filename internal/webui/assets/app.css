@@ -588,6 +588,14 @@ table tbody tr:hover { background: #f8fafc; }
 .form-grid label { display: block; font-weight: 500; font-size: 13px; margin-bottom: 6px; }
 .form-grid input, .form-grid select { width: 100%; }
 .form-actions { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+.ua-full-allow-create,.ua-full-allow-toggle { display:inline-flex; align-items:center; gap:7px; white-space:nowrap; }
+.ua-full-allow-create { min-height:34px; padding:0 10px; border:1px solid #fed7aa; border-radius:7px; background:#fff7ed; color:#9a3412; font-size:12px; font-weight:650; }
+.ua-full-allow-create input,.ua-full-allow-toggle input { width:auto; margin:0; }
+.ua-full-allow-toggle { font-size:12px; font-weight:650; color:var(--text-muted); }
+.ua-full-allow-toggle:has(input:checked) { color:#c2410c; }
+.ua-full-allow-row { background:#fff7ed; }
+.ua-rule-pattern { max-width:700px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ua-full-allow-row .ua-rule-pattern { color:#9a3412; font-weight:650; }
 
 .kbd {
   background: var(--bg);

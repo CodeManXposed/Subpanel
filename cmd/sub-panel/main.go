@@ -38,7 +38,7 @@ import (
 	"github.com/huabanmao168/SubPanel/internal/webui"
 )
 
-var Version = "0.2.0"
+var Version = "0.2.1"
 
 func main() {
 	if len(os.Args) >= 2 {
@@ -260,6 +260,7 @@ func main() {
 	gw.SetBlacklist(bl)
 	// IP 白名单仅豁免“单 IP 多 Token”条件；其他检测与硬限流继续生效。
 	gw.SetIPWhitelist(rulesMgr.IPWhitelisted)
+	gw.SetUAFullAllow(rulesMgr.UAFullAllowed)
 
 	// 启动时恢复「一键透传」开关(store.meta 持久化)
 	if v, _ := st.GetMeta("passthrough_all"); v == "true" {
