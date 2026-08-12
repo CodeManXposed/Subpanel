@@ -156,8 +156,9 @@ type Result struct {
 	Note       string
 }
 
-// Whitelisted 判断 IP 是否享有“单 IP 多 Token”检测豁免。
-// 白名单不会再跳过频率、UA、Token 或网络类型等其他规则。
+// Whitelisted 判断 IP 是否享有自动 IP 风控豁免。
+// 白名单跳过 IP 多 Token、云厂商和 GeoIP 网络属性条件；频率、UA、
+// Token 行为规则仍生效，避免可信出口被滥用后失去基本限流保护。
 // ua 参数保留兼容签名,内部不再使用。
 func (d *Detector) Whitelisted(ip, ua string) bool {
 	if _, ok := d.ipWhitelist[ip]; ok {
@@ -172,14 +173,17 @@ func (d *Detector) Whitelisted(ip, ua string) bool {
 
 // EvaluateOptions 控制一次检测允许跳过的特定条件。
 type EvaluateOptions struct {
-	ExemptIPDistinctTokens bool
+	ExemptIPDistinctTokens  bool
+	ExemptNetworkConditions bool
 }
 
 // Evaluate 运行所有规则。注意 Evaluate 必须在 Observe 之后调用,
 // 这样当前请求自身也算进窗口。ua 参数保留兼容签名,内部不再使用。
 func (d *Detector) Evaluate(ip, tokenHash, ua string) Result {
+	whitelisted := d.Whitelisted(ip, ua)
 	return d.EvaluateWithOptions(ip, tokenHash, ua, EvaluateOptions{
-		ExemptIPDistinctTokens: d.Whitelisted(ip, ua),
+		ExemptIPDistinctTokens:  whitelisted,
+		ExemptNetworkConditions: whitelisted,
 	})
 }
 
@@ -275,7 +279,7 @@ func (d *Detector) matchRule(r config.Rule, ip, tokenHash, ua string, opts Evalu
 			return true, formatN("ip_distinct_tokens", n, c)
 		}
 	}
-	if c := w.CloudTokenDistinctUAs; c != nil && tokenHash != "" && d.cloudLookup != nil {
+	if c := w.CloudTokenDistinctUAs; c != nil && tokenHash != "" && d.cloudLookup != nil && !opts.ExemptNetworkConditions {
 		n := d.tokenIPUAs.Count(tokenIPUAKey(tokenHash, ip), c.Window.Std())
 		if n >= c.GTE {
 			if hit, prov := d.cloudLookup(ip); hit {
@@ -283,13 +287,13 @@ func (d *Detector) matchRule(r config.Rule, ip, tokenHash, ua string, opts Evalu
 			}
 		}
 	}
-	if w.FromCloudIP && d.cloudLookup != nil {
+	if w.FromCloudIP && d.cloudLookup != nil && !opts.ExemptNetworkConditions {
 		if hit, prov := d.cloudLookup(ip); hit {
 			return true, "cloud_ip:" + prov
 		}
 	}
 	// GeoIP 字段评估(country/usage_type/isp)
-	if d.geoLookup != nil && needsGeo(&w) {
+	if d.geoLookup != nil && needsGeo(&w) && !opts.ExemptNetworkConditions {
 		if info := d.geoLookup(ip); info != nil {
 			if hit, note := evalGeoConds(&w, info); hit {
 				return true, note

@@ -59,7 +59,7 @@ type Gateway struct {
 	// 可选:全局黑名单(海外/云/ISP/浏览器),命中即投毒,优先级高于触发规则
 	bl *blacklist.Manager
 
-	// 可选:IP 白名单查询。命中仅豁免“单 IP 多 Token”规则。
+	// 可选:IP 白名单查询。命中豁免全局 IP 分类拦截和 detector 网络条件。
 	ipWhitelisted func(ip string) bool
 
 	// tenants 快照:读多写少,Reload 时原子替换整个 snap 指针,
@@ -95,7 +95,7 @@ func (g *Gateway) SetBlacklist(b *blacklist.Manager) {
 // SetPassthroughAll 一键透传开关。热生效。
 func (g *Gateway) SetPassthroughAll(b bool) { g.passthroughAll.Store(b) }
 
-// SetIPWhitelist 注入 IP 白名单查询(仅豁免单 IP 多 Token 规则)。
+// SetIPWhitelist 注入 IP 白名单查询。
 func (g *Gateway) SetIPWhitelist(fn func(ip string) bool) {
 	g.ipWhitelisted = fn
 }
@@ -280,8 +280,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2.6) IP 白名单只豁免“单 IP 多 Token”条件。当前请求仍进入所有
-	// 频率窗口，并继续接受 IP 黑名单、网络、UA、Token 与并发限制。
+	// 2.6) IP 白名单豁免自动 IP 分类风控；Token/IP 手工黑名单仍优先，
+	// 请求仍进入频率窗口并接受频率、UA、Token 行为与并发限制。
 	ipWhitelisted := g.det.Whitelisted(pr.ClientIP, pr.UA)
 	if g.ipWhitelisted != nil && g.ipWhitelisted(pr.ClientIP) {
 		ipWhitelisted = true
@@ -303,7 +303,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 3.5) 全局黑名单(海外/云/ISP/浏览器)— 粗粒度规则,优先于触发规则。
 	// 命中即投毒,不进 detector.Observe(不污染频率窗口)。
-	if g.bl != nil {
+	if g.bl != nil && !ipWhitelisted {
 		network := g.geoFor(pr.ClientIP)
 		// xdb 返回的 country 字段是中文,需要 ISO 码就要单独存。这里把 country
 		// 当 ISO 兜底字段两边都传,IsOverseaCountry 会两个都判。
@@ -329,10 +329,11 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 5) evaluate
 	res := g.det.EvaluateWithOptions(pr.ClientIP, tokenHash, pr.UA, detector.EvaluateOptions{
-		ExemptIPDistinctTokens: ipWhitelisted,
+		ExemptIPDistinctTokens:  ipWhitelisted,
+		ExemptNetworkConditions: ipWhitelisted,
 	})
 	if ipWhitelisted {
-		res.Tags = append(res.Tags, "ip_whitelist_multi_token_exempt")
+		res.Tags = append(res.Tags, "ip_whitelist_auto_ip_rules_exempt")
 	}
 
 	// 6) 记 incident(如有命中)

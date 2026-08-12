@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/huabanmao168/SubPanel/internal/banlist"
+	"github.com/huabanmao168/SubPanel/internal/blacklist"
 	"github.com/huabanmao168/SubPanel/internal/config"
 	"github.com/huabanmao168/SubPanel/internal/detector"
 	"github.com/huabanmao168/SubPanel/internal/faker"
@@ -243,12 +244,41 @@ func TestE2EIPWhitelistStillRateLimited(t *testing.T) {
 	first := httptest.NewRecorder()
 	gw.ServeHTTP(first, mkSubReq("sub.example.com", "Clash/1.0", "token-a", "clash", "9.9.9.9"))
 	if first.Code != http.StatusOK {
-		t.Fatalf("multi-token exemption should allow first request, got %d %q", first.Code, first.Body.String())
+		t.Fatalf("IP whitelist should allow first request, got %d %q", first.Code, first.Body.String())
 	}
 	second := httptest.NewRecorder()
 	gw.ServeHTTP(second, mkSubReq("sub.example.com", "Clash/1.0", "token-b", "clash", "9.9.9.9"))
 	if second.Code != http.StatusTooManyRequests {
 		t.Fatalf("whitelisted IP must still receive 429 for frequency, got %d %q", second.Code, second.Body.String())
+	}
+}
+
+func TestE2EIPWhitelistBypassesGlobalIPClassification(t *testing.T) {
+	gw, _, st, _, cleanup := newE2E(t, false)
+	defer cleanup()
+	bl := blacklist.New(st)
+	if err := bl.Update(blacklist.Snapshot{
+		OverseaEnabled: true,
+		CloudEnabled:   true,
+		CNIDCEnabled:   true,
+		ISPKeywords:    []string{"cloudflare"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gw.SetBlacklist(bl)
+	gw.SetCloudLookup(func(ip string) (bool, string) { return true, "cloudflare" })
+	gw.SetIPWhitelist(func(ip string) bool { return ip == "9.9.9.9" })
+
+	allowed := httptest.NewRecorder()
+	gw.ServeHTTP(allowed, mkSubReq("sub.example.com", "Clash/1.0", "token-a", "clash", "9.9.9.9"))
+	if allowed.Code != http.StatusOK || !strings.Contains(allowed.Body.String(), "REAL-SUB-FROM-V2BOARD") {
+		t.Fatalf("whitelisted cloud/oversea IP should reach upstream, got %d %q", allowed.Code, allowed.Body.String())
+	}
+
+	blocked := httptest.NewRecorder()
+	gw.ServeHTTP(blocked, mkSubReq("sub.example.com", "Clash/1.0", "token-b", "clash", "8.8.8.8"))
+	if blocked.Code != http.StatusOK || strings.Contains(blocked.Body.String(), "REAL-SUB-FROM-V2BOARD") {
+		t.Fatalf("non-whitelisted IP should still be poisoned, got %d %q", blocked.Code, blocked.Body.String())
 	}
 }
 
@@ -262,7 +292,7 @@ func TestE2EIPWhitelistDoesNotOverrideIPBlacklist(t *testing.T) {
 	w := httptest.NewRecorder()
 	gw.ServeHTTP(w, mkSubReq("sub.example.com", "Clash/1.0", "token", "clash", "7.7.7.7"))
 	if w.Code != http.StatusForbidden {
-		t.Fatalf("IP blacklist must override multi-token exemption, got %d %q", w.Code, w.Body.String())
+		t.Fatalf("IP blacklist must override IP whitelist, got %d %q", w.Code, w.Body.String())
 	}
 }
 

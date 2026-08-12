@@ -131,16 +131,22 @@ func TestRateLimitActionAndPrecedence(t *testing.T) {
 	}
 }
 
-func TestIPWhitelistOnlyExemptsDistinctTokenRule(t *testing.T) {
+func TestIPWhitelistExemptsIPClassificationButKeepsFrequencyRule(t *testing.T) {
 	cfg := &config.DetectorCfg{Rules: []config.Rule{
 		{Name: "ip_freq_burst", Action: "rate_limit", When: config.When{IPFreq: &config.Cond{Window: config.Duration(time.Minute), GTE: 2}}},
 		{Name: "ip_multi_token", Action: "rate_limit", When: config.When{IPDistinctTokens: &config.Cond{Window: config.Duration(10 * time.Minute), GTE: 2}}},
+		{Name: "cloud_deny", Action: "deny", When: config.When{FromCloudIP: true}},
+		{Name: "oversea_deny", Action: "deny", When: config.When{CountryNotIn: []string{"CN"}}},
 	}}
 	d, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	d.SetDynamicIPWhitelist(func(ip string) bool { return ip == "1.2.3.4" })
+	d.SetCloudLookup(func(ip string) (bool, string) { return true, "cloudflare" })
+	d.SetGeoLookup(func(ip string) *GeoInfo {
+		return &GeoInfo{Country: "美国", ISOCode: "US", UsageType: "CDN", ISP: "Cloudflare"}
+	})
 	d.Observe("1.2.3.4", "token-a", "clash")
 	if got := d.Evaluate("1.2.3.4", "token-a", "clash"); got.Hit {
 		t.Fatalf("first whitelisted request triggered unexpectedly: %+v", got)
@@ -149,6 +155,21 @@ func TestIPWhitelistOnlyExemptsDistinctTokenRule(t *testing.T) {
 	got := d.Evaluate("1.2.3.4", "token-b", "clash")
 	if !got.Hit || got.Action != "rate_limit" || len(got.Tags) != 1 || got.Tags[0] != "ip_freq_burst" {
 		t.Fatalf("whitelisted IP must still hit frequency rule only: %+v", got)
+	}
+}
+
+func TestNonWhitelistedIPStillHitsNetworkDenyRule(t *testing.T) {
+	cfg := &config.DetectorCfg{Rules: []config.Rule{{
+		Name: "cloud_deny", Action: "deny", When: config.When{FromCloudIP: true},
+	}}}
+	d, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.SetCloudLookup(func(ip string) (bool, string) { return true, "cloudflare" })
+	d.Observe("1.2.3.5", "token", "clash")
+	if got := d.Evaluate("1.2.3.5", "token", "clash"); !got.Hit || got.Action != "deny" {
+		t.Fatalf("non-whitelisted cloud IP should still be denied: %+v", got)
 	}
 }
 
