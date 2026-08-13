@@ -109,6 +109,10 @@ func TestRenderedPagesUseRuntimeVersion(t *testing.T) {
 	if indexRec.Code != http.StatusOK || !strings.Contains(indexRec.Body.String(), "Sub-Panel v0.1.87-test") {
 		t.Fatalf("index runtime version not rendered: code=%d", indexRec.Code)
 	}
+	if !strings.Contains(indexRec.Body.String(), "/static/app.css?v=0.1.87-test") ||
+		!strings.Contains(indexRec.Body.String(), "/static/app.js?v=0.1.87-test") {
+		t.Fatalf("index static assets are not versioned")
+	}
 }
 
 func TestPanelAnalysisToggleAndEmptyQuery(t *testing.T) {
