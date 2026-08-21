@@ -315,6 +315,10 @@ function renderEventCard(e) {
   const uncommonUABit = e.UAUncommon
     ? '<span class="pill orange" title="未命中常规订阅客户端 UA 库，仅作风险提示">非常见 UA</span>'
     : '';
+  const clientIP = e.ClientIP || '';
+  const quickIPBanBtn = clientIP
+    ? `<button type="button" class="danger ev-ip-block" data-ip="${escapeHTML(clientIP)}" title="将此 IP 快速加入黑名单">快速拉黑 IP</button>`
+    : '';
   // 拉黑 Token:仅当有 token 时显示。data-tenant 用事件自己的 tenant(不是当前过滤)。
   const resolveBtn = tokenFull
     ? `<button class="danger ev-token-block" data-token="${escapeHTML(tokenFull)}" data-tenant="${escapeHTML(e.Tenant || '')}" title="将此 Token 加入黑名单">拉黑 Token</button>`
@@ -357,8 +361,9 @@ function renderEventCard(e) {
         : '<span class="muted">(无)</span>'}
     </div>
     <div class="ev-meta">
-      <span class="ev-meta-item"><span class="ev-label">IP</span>
+      <span class="ev-meta-item ev-ip-meta"><span class="ev-label">IP</span>
         <span class="mono">${escapeHTML(e.ClientIP || '—')}</span>
+        ${quickIPBanBtn}
       </span>
       <span class="ev-meta-item"><span class="ev-label">地区</span><span>${escapeHTML(region)}</span></span>
       <span class="ev-meta-item"><span class="ev-label">ISP</span><span>${isp}</span></span>
@@ -477,8 +482,14 @@ $('#evPurge').addEventListener('click', async () => {
   }
 });
 
-// 事件卡片 Token 拉黑 / 重置窗口：事件委托。
+// 事件卡片 Token / IP 拉黑与重置窗口：事件委托。
 $('#evList').addEventListener('click', async (e) => {
+  const ipBlockBtn = e.target.closest('.ev-ip-block');
+  if (ipBlockBtn) {
+    const ip = ipBlockBtn.dataset.ip || '';
+    if (ip) openIPBlockModal(ip, 'events');
+    return;
+  }
   const resetBtn = e.target.closest('.ev-reset');
   if (resetBtn) {
     const token = resetBtn.dataset.token || '';
@@ -498,6 +509,52 @@ $('#evList').addEventListener('click', async (e) => {
   const tenant = btn.dataset.tenant || '';
   if (!token) return;
   openTokenBlockModal(token, tenant, 'events');
+});
+
+let ipBlockContext = null;
+
+function openIPBlockModal(ip, source) {
+  ipBlockContext = { ip, source: source || '' };
+  $('#ipBlockValue').textContent = ip;
+  $('#ipBlockCopy').dataset.copy = ip;
+  $('#ipBlockAction').value = 'deny';
+  $('#ipBlockReason').value = '请求日志快速拉黑';
+  $('#ipBlockTTL').value = '';
+  $('#ipBlockModal').style.display = 'flex';
+  bindCopyHandlers($('#ipBlockModal'));
+}
+
+function closeIPBlockModal() {
+  $('#ipBlockModal').style.display = 'none';
+  ipBlockContext = null;
+}
+
+$('#ipBlockClose')?.addEventListener('click', closeIPBlockModal);
+$('#ipBlockCancel')?.addEventListener('click', closeIPBlockModal);
+$('#ipBlockModal')?.addEventListener('click', e => {
+  if (e.target.id === 'ipBlockModal') closeIPBlockModal();
+});
+$('#ipBlockConfirm')?.addEventListener('click', async e => {
+  if (!ipBlockContext) return;
+  const btn = e.currentTarget;
+  const ip = ipBlockContext.ip;
+  const action = $('#ipBlockAction').value === 'fake' ? 'fake' : 'deny';
+  btn.classList.add('loading');
+  const r = await apiPost('/api/bans/add', {
+    kind: 'ip',
+    target: ip,
+    action,
+    reason: $('#ipBlockReason').value.trim() || '请求日志快速拉黑',
+    ttl: $('#ipBlockTTL').value.trim(),
+  });
+  btn.classList.remove('loading');
+  if (!r || !r.ok) {
+    toast((r && r.error) || 'IP 拉黑失败', 'error');
+    return;
+  }
+  closeIPBlockModal();
+  toast(`${ip} 已${action === 'deny' ? '直接拒绝' : '投毒'}${Number(r.updated || 0) ? '（已更新原规则）' : ''}`, 'success');
+  if (document.querySelector('.navlink.active')?.dataset.tab === 'events') loadEvents(false);
 });
 
 // ---- 已拉黑 Token 列表 ----

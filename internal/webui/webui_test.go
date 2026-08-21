@@ -113,6 +113,10 @@ func TestRenderedPagesUseRuntimeVersion(t *testing.T) {
 		!strings.Contains(indexRec.Body.String(), "/static/app.js?v=0.1.87-test") {
 		t.Fatalf("index static assets are not versioned")
 	}
+	if !strings.Contains(indexRec.Body.String(), `id="ipBlockModal"`) ||
+		!strings.Contains(indexRec.Body.String(), `id="ipBlockConfirm"`) {
+		t.Fatalf("quick IP blacklist modal not rendered")
+	}
 }
 
 func TestPanelAnalysisToggleAndEmptyQuery(t *testing.T) {

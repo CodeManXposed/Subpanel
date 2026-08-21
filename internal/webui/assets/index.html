@@ -1081,6 +1081,45 @@ curl -fsS http://127.0.0.1:19090/healthz</pre>
   </div>
 </div>
 
+<!-- IP 快速拉黑 弹窗 -->
+<div class="modal-overlay" id="ipBlockModal" style="display:none">
+  <div class="modal token-block-modal" style="width:520px">
+    <div class="modal-header">
+      <div><h3>快速拉黑 IP</h3><p class="muted" style="margin:4px 0 0;font-size:12px">保存后立即生效，手工 IP 黑名单优先于 IP 白名单。</p></div>
+      <button class="close-btn" id="ipBlockClose">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="token-block-summary">
+        <span class="muted">目标 IP</span>
+        <code id="ipBlockValue"></code>
+        <button type="button" class="ip-copy-btn copyable" id="ipBlockCopy" data-copy="">复制</button>
+      </div>
+      <div class="form-row rule-action-field">
+        <label>命中后的处置动作 <span class="req">*</span></label>
+        <select id="ipBlockAction">
+          <option value="deny">直接拒绝 · HTTP 403（不请求源站）</option>
+          <option value="fake">投毒 · HTTP 200（返回黑洞订阅）</option>
+        </select>
+      </div>
+      <div class="rule-grid rule-grid-2">
+        <div class="form-row">
+          <label>拉黑原因</label>
+          <input id="ipBlockReason" placeholder="例如：异常高频请求">
+        </div>
+        <div class="form-row">
+          <label>有效期</label>
+          <input id="ipBlockTTL" placeholder="如 24h，留空为永久">
+        </div>
+      </div>
+      <div class="token-block-warning">默认“直接拒绝”：命中后返回 HTTP 403，不读取缓存，也不会向源站发起请求。</div>
+    </div>
+    <div class="modal-footer">
+      <button id="ipBlockCancel">取消</button>
+      <button class="danger solid" id="ipBlockConfirm">确认拉黑 IP</button>
+    </div>
+  </div>
+</div>
+
 <!-- Token 拉黑 弹窗 -->
 <div class="modal-overlay" id="tokenBlockModal" style="display:none">
   <div class="modal token-block-modal" style="width:560px">

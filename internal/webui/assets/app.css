@@ -440,6 +440,19 @@ table tbody tr:hover { background: #f8fafc; }
   border-radius: 4px; cursor: pointer;
 }
 .ev-token-block:hover { background: #fef2f2; border-color: #f87171; }
+.ev-ip-block {
+  flex:0 0 auto;
+  min-height:25px;
+  padding:3px 8px;
+  border-color:#fecaca;
+  border-radius:5px;
+  background:#fff;
+  color:#dc2626;
+  font-size:11px;
+  font-weight:650;
+  line-height:1.35;
+}
+.ev-ip-block:hover { background:#fef2f2; border-color:#f87171; }
 .ev-reset {
   font-size: 11.5px; padding: 2px 8px; line-height: 1.5;
   background: #fff; color: #c2410c; border: 1px solid #fed7aa;
@@ -470,6 +483,7 @@ table tbody tr:hover { background: #f8fafc; }
 }
 .ev-meta-item { display: inline-flex; align-items: center; gap: 6px; }
 .ev-meta-item .ev-label { min-width: 0; text-align: left; }
+.ev-ip-meta { flex-wrap:wrap; }
 
 .copyable { cursor: pointer; transition: background 0.15s; border-radius: 3px; padding: 1px 4px; margin: -1px -4px; }
 .copyable:hover { background: rgba(99,102,241,0.10); }
@@ -1257,6 +1271,8 @@ table tbody tr:hover { background: #f8fafc; }
   .ev-card-head { gap: 6px 8px; }
   .ev-label { text-align: left; }
   .ev-meta { gap: 5px 10px; }
+  .ev-ip-meta { width:100%; }
+  .ev-ip-block { min-height:38px; margin-left:auto; padding:7px 11px; }
   .ev-row-full { align-items: flex-start; }
   .filter-bar { align-items: stretch; }
   .filter-bar > input,
